@@ -1,0 +1,8 @@
+{
+  "schema_version": "hlsgraph.vitis.csim.v1",
+  "status": "pass",
+  "exit_code": 0,
+  "mismatches": 0,
+  "assertions_failed": 0,
+  "workload_id": "tb.default"
+}

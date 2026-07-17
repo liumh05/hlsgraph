@@ -1,0 +1,9 @@
+{
+  "schema_version": "hlsgraph.vitis.dataflow_profile.v1",
+  "workload_id": "tb.default",
+  "channels": [
+    {"name": "values", "max_occupancy": 7, "read_block_cycles": 0, "write_block_cycles": 2, "tokens": 16},
+    {"name": "results", "max_occupancy": 9, "read_block_cycles": 1, "write_block_cycles": 0, "tokens": 16}
+  ]
+}
+

@@ -1,0 +1,8 @@
+[
+  {
+    "directory": ".",
+    "file": "kernel.cpp",
+    "arguments": ["clang++", "-std=c++17", "-Iinclude", "-c", "kernel.cpp"]
+  }
+]
+

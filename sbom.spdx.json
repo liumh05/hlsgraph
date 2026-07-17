@@ -1,0 +1,119 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "hlsgraph-0.1.1",
+  "documentNamespace": "https://github.com/liumh05/hlsgraph/sbom/0.1.1",
+  "creationInfo": {
+    "created": "2026-07-16T16:51:33Z",
+    "creators": ["Tool: HLSGraph repository audit"]
+  },
+  "packages": [
+    {
+      "name": "hlsgraph",
+      "SPDXID": "SPDXRef-Package-HLSGraph",
+      "versionInfo": "0.1.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright 2026 HLSGraph contributors"
+    },
+    {
+      "name": "cytoscape",
+      "SPDXID": "SPDXRef-Package-Cytoscape",
+      "versionInfo": "3.30.2",
+      "downloadLocation": "https://www.npmjs.com/package/cytoscape/v/3.30.2",
+      "filesAnalyzed": true,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "licenseInfoFromFiles": ["MIT"],
+      "packageVerificationCode": {
+        "packageVerificationCodeValue": "abc71e329d522da6f3c7fd6d0bc617582d2e002b"
+      },
+      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium",
+      "hasFiles": ["SPDXRef-File-Cytoscape"]
+    },
+    {
+      "name": "elkjs",
+      "SPDXID": "SPDXRef-Package-ELKJS",
+      "versionInfo": "0.9.3",
+      "downloadLocation": "https://www.npmjs.com/package/elkjs/v/0.9.3",
+      "filesAnalyzed": true,
+      "licenseConcluded": "EPL-2.0 AND Apache-2.0",
+      "licenseDeclared": "EPL-2.0",
+      "licenseInfoFromFiles": ["Apache-2.0", "EPL-2.0"],
+      "packageVerificationCode": {
+        "packageVerificationCodeValue": "4a9b937193343bca0f05aa080e147cb47005fd5b"
+      },
+      "copyrightText": "Copyright (c) 2017 Kiel University and others; Copyright 2020 Google LLC",
+      "hasFiles": ["SPDXRef-File-ELKJS"]
+    },
+    {
+      "name": "tomli",
+      "SPDXID": "SPDXRef-Package-Tomli",
+      "downloadLocation": "https://pypi.org/project/tomli/",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "comment": "Conditional runtime dependency declared as tomli>=2 for Python <3.11; it is resolved by the installer and is not bundled."
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./src/hlsgraph/render/vendor/cytoscape.min.js",
+      "SPDXID": "SPDXRef-File-Cytoscape",
+      "checksums": [{
+        "algorithm": "SHA256",
+        "checksumValue": "83e8c54a6bec655bfd81df07df605649c268af69aeca67a5ea2da54ea42dac81"
+      }],
+      "licenseConcluded": "MIT",
+      "licenseInfoInFiles": ["MIT"],
+      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium"
+    },
+    {
+      "fileName": "./src/hlsgraph/render/vendor/elk.bundled.js",
+      "SPDXID": "SPDXRef-File-ELKJS",
+      "checksums": [{
+        "algorithm": "SHA256",
+        "checksumValue": "b0745abd7f23cd91690a1587e377edbe19fd7233c783300290936720546216d4"
+      }],
+      "licenseConcluded": "EPL-2.0 AND Apache-2.0",
+      "licenseInfoInFiles": ["EPL-2.0", "Apache-2.0"],
+      "copyrightText": "Copyright (c) 2017 Kiel University and others; Copyright 2020 Google LLC"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-HLSGraph"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-HLSGraph",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Cytoscape"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-HLSGraph",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-ELKJS"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-HLSGraph",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Tomli"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-Cytoscape",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-File-Cytoscape"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ELKJS",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-File-ELKJS"
+    }
+  ]
+}

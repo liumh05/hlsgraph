@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "hlsgraph"
+version = "0.1.1"
+description = "Deterministic, evidence-backed HLS architecture graph infrastructure for agents and ML4HLS."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "licenses/*"]
+requires-python = ">=3.10"
+authors = [{name = "HLSGraph contributors"}]
+keywords = ["HLS", "FPGA", "MCP", "MLIR", "LLVM", "LLM4HLS", "ML4HLS"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Compilers",
+]
+dependencies = ["tomli>=2; python_version < '3.11'"]
+
+[project.optional-dependencies]
+clang = ["libclang>=16"]
+mcp = ["mcp>=1.27,<2"]
+parquet = ["pyarrow>=15"]
+pyg = ["torch>=2", "torch-geometric>=2.5"]
+dev = ["pytest>=8", "coverage[toml]>=7"]
+
+[project.scripts]
+hlsgraph = "hlsgraph.cli:main"
+hlsgraph-mcp = "hlsgraph.mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/liumh05/hlsgraph"
+Documentation = "https://github.com/liumh05/hlsgraph#readme"
+Issues = "https://github.com/liumh05/hlsgraph/issues"
+Source = "https://github.com/liumh05/hlsgraph"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hlsgraph.render" = ["vendor/*.js"]
+"hlsgraph.knowledge" = ["packs/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["hlsgraph"]

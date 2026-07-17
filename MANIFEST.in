@@ -1,0 +1,16 @@
+include LICENSE NOTICE THIRD_PARTY_NOTICES.md sbom.spdx.json
+include README.md CHANGELOG.md pyproject.toml build_backend.py CITATION.cff
+include CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md DCO
+recursive-include licenses *
+recursive-include docs *.md
+recursive-include examples/dataflow_gemm *.cpp *.h *.toml *.json *.xml *.rpt *.tcl *.ll *.mlir *.md
+recursive-include src/hlsgraph/render/vendor *.js
+recursive-include src/hlsgraph/knowledge/packs *.json
+recursive-include tools *.py
+prune examples/dataflow_gemm/.hlsgraph
+prune .packaging-test
+prune .wheel-test
+prune build
+prune dist
+prune src/hlsgraph.egg-info
+global-exclude __pycache__ *.py[cod] *.db *.sqlite *.sqlite3 *.sqlite-*

@@ -1,0 +1,12 @@
+{
+  "schema_version": "hlsgraph.vivado.physical_summary.v1",
+  "congestion_level": 2,
+  "slr_crossings": 0,
+  "critical_path_delay_ns": 5.12,
+  "drc_errors": 0,
+  "cdc_critical": 0,
+  "dynamic_power_w": 0.42,
+  "static_power_w": 0.81,
+  "activity_source": "vectorless-default"
+}
+

@@ -1,0 +1,52 @@
+"""HLSGraph public API."""
+from .graph import CanonicalGraph
+from .model import (
+    AccessPolicy,
+    Anchor,
+    ArtifactRef,
+    AuthorityClass,
+    BuildContext,
+    ClockConstraint,
+    Completeness,
+    ConstraintSet,
+    DatasetManifest,
+    Derivation,
+    DesignSnapshot,
+    Diagnostic,
+    Entity,
+    FailureClass,
+    GateKind,
+    GateResult,
+    GateStatus,
+    KnowledgeRule,
+    LabelSpec,
+    Observation,
+    PredictionEnvelope,
+    ProjectManifest,
+    Relation,
+    RetentionPolicy,
+    RunStatus,
+    SourceAnchor,
+    Stage,
+    TargetProfile,
+    ToolOutputSpec, ToolRun,
+    ToolchainContext,
+    TranslationUnit,
+    VariantAction,
+    VerificationKind,
+    VerificationResult,
+)
+from .version import __version__, BUNDLE_VERSION, FEATURE_SCHEMA_VERSION, SCHEMA_VERSION
+from .sdk import Project
+
+__all__ = [
+    "CanonicalGraph", "AccessPolicy", "Anchor", "ArtifactRef", "AuthorityClass", "BuildContext",
+    "ClockConstraint", "Completeness", "ConstraintSet", "DatasetManifest", "Derivation",
+    "DesignSnapshot", "Diagnostic", "Entity", "FailureClass", "GateKind", "GateResult",
+    "GateStatus", "KnowledgeRule", "LabelSpec", "Observation", "PredictionEnvelope",
+    "ProjectManifest", "Relation", "RetentionPolicy", "RunStatus", "SourceAnchor", "Stage",
+    "TargetProfile", "ToolOutputSpec", "ToolRun", "ToolchainContext", "TranslationUnit", "VariantAction",
+    "VerificationKind", "VerificationResult", "__version__", "BUNDLE_VERSION",
+    "FEATURE_SCHEMA_VERSION", "SCHEMA_VERSION",
+    "Project",
+]

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use HLSGraph in research, please cite this software and the upstream systems relevant to your adapter."
+title: "HLSGraph: Deterministic HLS architecture graph infrastructure"
+type: software
+authors:
+  - family-names: "Contributors"
+    given-names: "HLSGraph"
+version: 0.1.1
+date-released: 2026-07-17
+license: Apache-2.0
+repository-code: "https://github.com/liumh05/hlsgraph"
+url: "https://github.com/liumh05/hlsgraph"
+keywords:
+  - high-level synthesis
+  - FPGA
+  - MLIR
+  - LLVM
+  - MCP
+  - LLM4HLS
+  - ML4HLS

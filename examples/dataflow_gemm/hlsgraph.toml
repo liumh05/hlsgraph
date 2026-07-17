@@ -1,0 +1,151 @@
+schema_version = "0.1.0"
+project_id = "examples.dataflow_gemm"
+name = "Dataflow GEMM-style pipeline"
+
+[build]
+top = "dut"
+language = "c++"
+flow_target = "vitis"
+compile_commands = "compile_commands.json"
+include_dirs = ["include"]
+config_files = []
+tcl_files = ["directives.tcl"]
+testbench_files = ["tb.cpp"]
+golden_files = []
+
+[[build.translation_units]]
+file = "kernel.cpp"
+directory = "."
+arguments = ["-std=c++17", "-Iinclude"]
+
+[target]
+vendor = "amd"
+part = "xck26-sfvc784-2LV-c"
+capacities = { lut = 117000, ff = 234000, dsp = 1248, bram_18k = 288, uram = 64 }
+reserved_resources = { lut = 1000, ff = 2000 }
+
+[[target.clocks]]
+name = "ap_clk"
+period_ns = 5.0
+uncertainty_ns = 0.5
+
+[constraints]
+resources = { lut = 116000, ff = 232000, dsp = 1248, bram_18k = 288, uram = 64 }
+xdc_files = []
+numerical = { type = "integer", exact = true }
+
+[[artifact_paths]]
+path = "kernel.cpp"
+kind = "source.cpp"
+role = "design_source"
+access = "private"
+license = "Apache-2.0"
+
+[[artifact_paths]]
+path = "include/hls_stream.h"
+kind = "source.hpp"
+role = "header"
+access = "private"
+license = "Apache-2.0"
+
+[[artifact_paths]]
+path = "tb.cpp"
+kind = "testbench.cpp"
+role = "testbench"
+access = "private"
+license = "Apache-2.0"
+
+[[artifact_paths]]
+path = "directives.tcl"
+kind = "config.tcl"
+role = "hls_tcl"
+access = "private"
+license = "Apache-2.0"
+
+[[artifact_paths]]
+path = "ir/dut.mlir"
+kind = "ir.mlir"
+role = "hls_ir"
+access = "project"
+license = "Apache-2.0"
+metadata = { pass_stage = "handshake", fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "ir/dut.ll"
+kind = "ir.llvm"
+role = "llvm_ir"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/dut_csynth.xml"
+kind = "amd.vitis.csynth_xml"
+role = "csynth_report"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/csim_result.json"
+kind = "amd.vitis.csim_result"
+role = "csim_result"
+access = "project"
+license = "Apache-2.0"
+metadata = { workload_id = "tb.default", fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/dut_cosim.rpt"
+kind = "amd.vitis.cosim_rpt"
+role = "cosim_report"
+access = "project"
+license = "Apache-2.0"
+metadata = { workload_id = "tb.default", fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/schedule.json"
+kind = "amd.vitis.schedule_json"
+role = "schedule_report"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/dataflow_profile.json"
+kind = "amd.vitis.dataflow_profile"
+role = "cosim_profile"
+access = "project"
+license = "Apache-2.0"
+metadata = { workload_id = "tb.default", fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/directive_status.json"
+kind = "amd.vitis.directive_status"
+role = "directive_status"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic" }
+
+[[artifact_paths]]
+path = "reports/post_route_timing.rpt"
+kind = "amd.vivado.post_route_timing"
+role = "post_route_timing"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic", scope = { kind = "kernel", top = "dut", instance = "dut", part = "xck26-sfvc784-2LV-c", clock = "all" } }
+
+[[artifact_paths]]
+path = "reports/post_route_utilization.rpt"
+kind = "amd.vivado.post_route_utilization"
+role = "post_route_utilization"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic", scope = { kind = "kernel", top = "dut", instance = "dut", part = "xck26-sfvc784-2LV-c" } }
+
+[[artifact_paths]]
+path = "reports/physical_summary.json"
+kind = "amd.vivado.physical_summary"
+role = "physical_summary"
+access = "project"
+license = "Apache-2.0"
+metadata = { fixture_authority = "synthetic", stage = "post_route", scope = { kind = "kernel", top = "dut", instance = "dut", part = "xck26-sfvc784-2LV-c" } }

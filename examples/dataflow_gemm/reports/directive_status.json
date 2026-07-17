@@ -1,0 +1,17 @@
+{
+  "schema_version": "hlsgraph.vitis.directive_status.v1",
+  "tool": "vitis_hls",
+  "tool_version": "2024.2",
+  "fixture_authority": "sanitized_synthetic",
+  "directives": [
+    {
+      "directive_kind": "PIPELINE",
+      "scope": "compute_loop",
+      "requested": {"ii": 1},
+      "effective": {"ii": 1},
+      "achieved": {"ii": 2},
+      "status": "unmet",
+      "reason": "The normalized fixture records a recurrence-limited achieved II."
+    }
+  ]
+}

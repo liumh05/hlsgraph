@@ -1,0 +1,159 @@
+{
+  "schema_version": "1.0",
+  "pack_id": "hlsgraph.amd.public_guidance.2024_2",
+  "title": "AMD HLS and implementation interpretation rules (2024.2 references)",
+  "license": "Apache-2.0",
+  "metadata": {
+    "content_policy": "Project-authored paraphrases and citations only; referenced documents are not redistributed.",
+    "reviewed_by": "HLSGraph maintainers",
+    "review_status": "manual"
+  },
+  "documents": [
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "title": "Vitis High-Level Synthesis User Guide",
+      "official_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/",
+      "publisher": "Advanced Micro Devices, Inc.",
+      "kind": "user_guide",
+      "license_note": "Reference metadata only; the guide is not included in HLSGraph."
+    },
+    {
+      "document_id": "amd.ug903",
+      "document_version": "2024.2",
+      "title": "Vivado Design Suite User Guide: Using Constraints",
+      "official_url": "https://docs.amd.com/r/2024.2-English/ug903-vivado-using-constraints/",
+      "publisher": "Advanced Micro Devices, Inc.",
+      "kind": "user_guide",
+      "license_note": "Reference metadata only; the guide is not included in HLSGraph."
+    },
+    {
+      "document_id": "amd.ug835",
+      "document_version": "2024.2",
+      "title": "Vivado Design Suite Tcl Command Reference Guide",
+      "official_url": "https://docs.amd.com/r/2024.2-English/ug835-vivado-tcl-commands/",
+      "publisher": "Advanced Micro Devices, Inc.",
+      "kind": "command_reference",
+      "license_note": "Reference metadata only; the guide is not included in HLSGraph."
+    }
+  ],
+  "rules": [
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Failure to Satisfy Optimization Directives",
+      "rule_id": "directive.requested_effective_achieved",
+      "title": "Keep requested directives separate from achieved behavior",
+      "applicability": {
+        "vendor": "amd",
+        "tool": "vitis_hls"
+      },
+      "condition": {
+        "requested_directive_present": true
+      },
+      "effect": {
+        "record_as": "declared_constraint",
+        "requires_separate_tool_observation": true
+      },
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Failure-to-Satisfy-Optimization-Directives",
+      "summary": "An optimization request can be relaxed or remain unmet, so the request and the tool-reported result must be stored separately.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Dataflow Viewer",
+      "rule_id": "dataflow.dynamic_results_are_workload_scoped",
+      "title": "Scope dataflow profiling results to the cosimulation workload",
+      "applicability": {
+        "vendor": "amd",
+        "tool": "vitis_hls",
+        "stage": "cosim"
+      },
+      "condition": {
+        "dataflow_profiling_enabled": true
+      },
+      "effect": {
+        "requires_workload_id": true,
+        "authority": "verification_evidence"
+      },
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Dataflow-Viewer",
+      "summary": "FIFO occupancy and stall measurements produced during RTL cosimulation describe that testbench run, not every possible input workload.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Schedule Viewer",
+      "rule_id": "schedule.control_steps_are_compiler_evidence",
+      "title": "Treat schedule control steps as compiler decisions",
+      "applicability": {
+        "vendor": "amd",
+        "tool": "vitis_hls",
+        "stage": "schedule"
+      },
+      "condition": {
+        "schedule_artifact_present": true
+      },
+      "effect": {
+        "authority": "compiler_decision",
+        "preserve_source_mapping": true
+      },
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Schedule-Viewer",
+      "summary": "Operation placement in control steps is compiler schedule evidence and should retain links back to the reported operation and source location.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug903",
+      "document_version": "2024.2",
+      "section": "About XDC Constraints",
+      "rule_id": "xdc.constraints_are_design_inputs",
+      "title": "Record XDC constraints as versioned design inputs",
+      "applicability": {
+        "vendor": "amd",
+        "tool": "vivado",
+        "stage": [
+          "post_synth",
+          "post_place",
+          "post_route"
+        ]
+      },
+      "condition": {
+        "timing_or_physical_result_present": true
+      },
+      "effect": {
+        "requires_constraint_artifact": true,
+        "authority": "declared_constraint"
+      },
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug903-vivado-using-constraints/About-XDC-Constraints",
+      "summary": "Implementation results depend on the applied XDC constraints, so their identity and hash belong in the design snapshot.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug835",
+      "document_version": "2024.2",
+      "section": "report_timing_summary",
+      "rule_id": "timing.summary_keeps_wns_tns_distinct",
+      "title": "Preserve WNS, TNS, and endpoint counts as separate observations",
+      "applicability": {
+        "vendor": "amd",
+        "tool": "vivado",
+        "stage": "post_route"
+      },
+      "condition": {
+        "timing_summary_present": true
+      },
+      "effect": {
+        "predicates": [
+          "timing.wns_ns",
+          "timing.tns_ns",
+          "timing.failing_endpoints"
+        ],
+        "gate": "post_route_timing"
+      },
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug835-vivado-tcl-commands/report_timing_summary",
+      "summary": "A timing summary reports multiple timing measures; do not collapse slack, total negative slack, and failing endpoint counts into one value.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    }
+  ]
+}

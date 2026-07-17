@@ -1,0 +1,4 @@
+__version__ = "0.1.1"
+SCHEMA_VERSION = "0.1.0"
+BUNDLE_VERSION = "0.1.0"
+FEATURE_SCHEMA_VERSION = "0.1.0"
