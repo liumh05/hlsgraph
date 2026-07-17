@@ -175,8 +175,18 @@ def json_ready(value: Any) -> Any:
         return {key: json_ready(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
         return {str(key): json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (list, tuple)):
         return [json_ready(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        # Sets have no JSON ordering.  Sorting by each element's own canonical
+        # JSON makes generic serialization deterministic across processes and
+        # PYTHONHASHSEED values; API boundaries that require ordered semantics
+        # (for example extractor options) reject sets before reaching here.
+        items = [json_ready(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ))
     return value
 
 
@@ -1137,6 +1147,7 @@ class PredictionEnvelope:
     ood: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
+    action_id: str | None = None
 
     def __post_init__(self) -> None:
         require_namespaced(self.predicate, "prediction predicate")
@@ -1144,20 +1155,29 @@ class PredictionEnvelope:
         reject_embedded_body_fields(self.applicability, "prediction applicability")
         reject_embedded_body_fields(self.ood, "prediction ood")
         reject_embedded_body_fields(self.metadata, "prediction metadata")
+        if (self.action_id is not None
+                and (not isinstance(self.action_id, str) or not self.action_id.strip())):
+            raise ValueError("prediction action_id must be a non-empty string or None")
         if not self.id:
-            self.id = stable_id("prediction", {"snapshot": self.snapshot_id,
-                                                "subject": self.subject_id,
-                                                "predicate": self.predicate,
-                                                "model": self.model_id,
-                                                "version": self.model_version,
-                                                "input_schema_version": self.input_schema_version,
-                                                "trainset_hash": self.trainset_hash,
-                                                "value": self.value,
-                                                "unit": self.unit,
-                                                "uncertainty": self.uncertainty,
-                                                "applicability": self.applicability,
-                                                "ood": self.ood,
-                                                "metadata": self.metadata})
+            identity = {"snapshot": self.snapshot_id,
+                        "subject": self.subject_id,
+                        "predicate": self.predicate,
+                        "model": self.model_id,
+                        "version": self.model_version,
+                        "input_schema_version": self.input_schema_version,
+                        "trainset_hash": self.trainset_hash,
+                        "value": self.value,
+                        "unit": self.unit,
+                        "uncertainty": self.uncertainty,
+                        "applicability": self.applicability,
+                        "ood": self.ood,
+                        "metadata": self.metadata}
+            # Omitting the optional key preserves v0.1 prediction identifiers
+            # exactly.  A concrete action is semantic input and therefore gets
+            # its own prediction identity.
+            if self.action_id is not None:
+                identity["action_id"] = self.action_id
+            self.id = stable_id("prediction", identity)
 
 
 @dataclass(slots=True)

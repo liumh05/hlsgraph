@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import stat
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
 from .bundle import GraphBundle
+from .diagnostic_projection import public_diagnostic
 from .doctor import diagnose
-from .manifest import manifest_template
+from .manifest import manifest_template, parse_manifest_text, safe_relative_path
 from .model import DatasetManifest, json_ready
 from .query import ExploreSpec, QuerySpec
 from .runner import FakeRunner, LocalRunner, SSHRunner
@@ -42,6 +47,346 @@ def _project_root(args: argparse.Namespace) -> Path:
     return Path(getattr(args, "project", ".")).resolve()
 
 
+def _path_identity(path: Path) -> tuple[int, int]:
+    value = path.stat(follow_symlinks=False)
+    return int(value.st_dev), int(value.st_ino)
+
+
+def _is_reparse_path(path: Path) -> bool:
+    """Return True for symlinks and Windows junction/reparse entries."""
+    try:
+        value = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(value.st_mode):
+        return True
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    if attributes & reparse_flag:
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    try:
+        return bool(callable(is_junction) and is_junction())
+    except OSError:
+        # A path that cannot be classified stably is unsafe for publication.
+        return True
+
+
+DirectoryChain = tuple[tuple[Path, tuple[int, int]], ...]
+
+
+def _prepare_directory_chain(root: Path, parent: Path) -> DirectoryChain:
+    """Create ordinary parents and capture every no-follow directory identity."""
+    try:
+        relative = parent.relative_to(root)
+    except ValueError as exc:
+        raise CliError("manifest parent must remain inside the project root") from exc
+    if (_is_reparse_path(root) or not os.path.lexists(root)
+            or not stat.S_ISDIR(root.lstat().st_mode)):
+        raise CliError("project root must be an ordinary directory")
+    chain: list[tuple[Path, tuple[int, int]]] = [(root, _path_identity(root))]
+    current = root
+    for component in relative.parts:
+        current = current / component
+        if not os.path.lexists(current):
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+        # Validate before descending to the next component so we never
+        # knowingly create a child through a symlink/junction won by a peer.
+        if (_is_reparse_path(current) or not os.path.lexists(current)
+                or not stat.S_ISDIR(current.lstat().st_mode)):
+            raise CliError("init manifest parent must contain only ordinary directories")
+        chain.append((current, _path_identity(current)))
+    _validate_directory_chain(tuple(chain))
+    return tuple(chain)
+
+
+def _validate_directory_chain(chain: DirectoryChain) -> None:
+    """Fail if any named parent was replaced or became a reparse point."""
+    for path, identity in chain:
+        try:
+            value = path.lstat()
+        except OSError as exc:
+            raise FileExistsError(
+                "manifest parent changed concurrently; refusing publication"
+            ) from exc
+        if (_is_reparse_path(path) or not stat.S_ISDIR(value.st_mode)
+                or _path_identity(path) != identity):
+            raise FileExistsError(
+                "manifest parent changed concurrently; refusing publication"
+            )
+
+
+def _exclusive_flags() -> int:
+    return (os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            | int(getattr(os, "O_NOFOLLOW", 0))
+            | int(getattr(os, "O_NOINHERIT", 0))
+            | int(getattr(os, "O_BINARY", 0)))
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(descriptor, data[offset:])
+        if written <= 0:
+            raise OSError("short write while publishing initialization metadata")
+        offset += written
+
+
+def _open_owner_file(path: Path, token: str) -> tuple[int, tuple[int, int]]:
+    """Open an O_EXCL/no-follow token file and keep its descriptor owned."""
+    descriptor = os.open(path, _exclusive_flags(), 0o600)
+    identity: tuple[int, int] | None = None
+    try:
+        value = os.fstat(descriptor)
+        if not stat.S_ISREG(value.st_mode):
+            raise OSError("owner claim is not a regular file")
+        identity = int(value.st_dev), int(value.st_ino)
+        _write_all(descriptor, (token + "\n").encode("ascii"))
+        os.fsync(descriptor)
+        if (_is_reparse_path(path) or _path_identity(path) != identity
+                or not stat.S_ISREG(path.lstat().st_mode)):
+            raise FileExistsError("owner claim path changed concurrently")
+        return descriptor, identity
+    except BaseException:
+        os.close(descriptor)
+        try:
+            if (identity is not None and not _is_reparse_path(path)
+                    and _path_identity(path) == identity):
+                path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _open_verified_directory(path: Path, identity: tuple[int, int]) -> int | None:
+    """Hold a stable directory fd where the platform supports dir_fd APIs."""
+    if os.name == "nt":
+        return None
+    flags = (os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+             | int(getattr(os, "O_NOFOLLOW", 0)))
+    descriptor = os.open(path, flags)
+    value = os.fstat(descriptor)
+    if ((int(value.st_dev), int(value.st_ino)) != identity
+            or not stat.S_ISDIR(value.st_mode)):
+        os.close(descriptor)
+        raise FileExistsError("manifest parent changed concurrently")
+    return descriptor
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _atomic_write_text(
+    path: Path, text: str, *, replace: bool = True,
+    expected_identity: tuple[int, int] | None = None,
+    expected_bytes: bytes | None = None,
+    directory_chain: DirectoryChain | None = None,
+) -> None:
+    """Publish text atomically, optionally with fail-closed replacement.
+
+    The no-replace path uses a hard-link publish so an existing file or
+    dangling symlink wins the race.  The replace path is reserved for an
+    explicit ``--force`` and verifies that the file observed by the caller has
+    not been replaced or edited in place before publishing.
+    """
+    if replace and expected_identity is None:
+        raise ValueError("atomic replacement requires an expected manifest identity")
+    if directory_chain is None:
+        if (_is_reparse_path(path.parent) or not path.parent.is_dir()):
+            raise FileExistsError("manifest parent is not an ordinary directory")
+        directory_chain = ((path.parent, _path_identity(path.parent)),)
+    _validate_directory_chain(directory_chain)
+
+    parent_identity = directory_chain[-1][1]
+    directory_fd = _open_verified_directory(path.parent, parent_identity)
+    guard_token = uuid.uuid4().hex
+    guard_path = path.parent / f".hlsgraph-init-parent.{guard_token}.lock"
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary = path.parent / temporary_name
+    guard_descriptor = -1
+    guard_identity: tuple[int, int] | None = None
+    descriptor = -1
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        guard_descriptor, guard_identity = _open_owner_file(guard_path, guard_token)
+        _validate_directory_chain(directory_chain)
+        if directory_fd is None:
+            descriptor = os.open(temporary, _exclusive_flags(), 0o600)
+        else:
+            descriptor = os.open(
+                temporary_name, _exclusive_flags(), 0o600, dir_fd=directory_fd,
+            )
+        temporary_value = os.fstat(descriptor)
+        temporary_identity = int(temporary_value.st_dev), int(temporary_value.st_ino)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if guard_descriptor >= 0:
+            os.close(guard_descriptor)
+        if guard_identity is not None:
+            _remove_owned_file(guard_path, guard_identity, guard_token)
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise
+    published = False
+    try:
+        _write_all(descriptor, text.encode("utf-8"))
+        os.fsync(descriptor)
+        _validate_directory_chain(directory_chain)
+        if replace:
+            if expected_identity is not None:
+                target_flags = (os.O_RDONLY | int(getattr(os, "O_NOFOLLOW", 0))
+                                | int(getattr(os, "O_BINARY", 0)))
+                if _is_reparse_path(path):
+                    raise FileExistsError(
+                        "manifest changed concurrently; refusing to follow a reparse point"
+                    )
+                if directory_fd is None:
+                    target_descriptor = os.open(path, target_flags)
+                else:
+                    target_descriptor = os.open(
+                        path.name, target_flags, dir_fd=directory_fd,
+                    )
+                try:
+                    target_value = os.fstat(target_descriptor)
+                    target_identity = int(target_value.st_dev), int(target_value.st_ino)
+                    target_bytes = _read_descriptor(target_descriptor)
+                finally:
+                    os.close(target_descriptor)
+                if (_is_reparse_path(path)
+                        or target_identity != expected_identity
+                        or (expected_bytes is not None
+                            and target_bytes != expected_bytes)):
+                    raise FileExistsError(
+                        "manifest changed concurrently; refusing to overwrite peer data"
+                    )
+            # Windows cannot replace an open source file.  The still-open
+            # parent guard prevents directory replacement while this one
+            # descriptor is briefly closed.  POSIX publishes relative to the
+            # already-verified directory fd.
+            os.close(descriptor)
+            descriptor = -1
+            _validate_directory_chain(directory_chain)
+            if directory_fd is None:
+                os.replace(temporary, path)
+            else:
+                os.replace(
+                    temporary_name, path.name,
+                    src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                )
+        else:
+            # link(2)/CreateHardLink publishes the fully-fsynced inode without
+            # replacing any directory entry that appeared after our precheck.
+            if directory_fd is None:
+                os.link(temporary, path, follow_symlinks=False)
+            else:
+                os.link(
+                    temporary_name, path.name,
+                    src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+        published = True
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            if directory_fd is None:
+                if (temporary_identity is not None
+                        and not _is_reparse_path(temporary)
+                        and os.path.lexists(temporary)
+                        and _path_identity(temporary) == temporary_identity):
+                    temporary.unlink()
+            else:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            # Once the target is published, an unremovable temp hard link is
+            # a harmless orphan and must not trigger bundle rollback.  Before
+            # publication, preserve the original exception rather than mask it.
+            if published:
+                pass
+        os.close(guard_descriptor)
+        if guard_identity is not None:
+            _remove_owned_file(guard_path, guard_identity, guard_token)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _bundle_directory_identity(path: Path) -> tuple[int, int]:
+    return _path_identity(path)
+
+
+def _claim_owner_file(path: Path, token: str) -> tuple[int, int]:
+    """Atomically create a token file and return the identity we own."""
+    descriptor, identity = _open_owner_file(path, token)
+    os.close(descriptor)
+    return identity
+
+
+def _remove_owned_file(path: Path, identity: tuple[int, int], token: str) -> bool:
+    """Remove a coordination file only while identity and token still match."""
+    try:
+        if (_is_reparse_path(path) or _path_identity(path) != identity
+                or path.read_text(encoding="ascii").strip() != token):
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _cleanup_owned_bundle(path: Path, identity: tuple[int, int] | None, *,
+                          owner_token: str, marker_required: bool,
+                          marker_identity: tuple[int, int] | None = None) -> bool:
+    """Best-effort rollback without deleting a directory created by a peer."""
+    if identity is None:
+        return True
+    try:
+        if _is_reparse_path(path) or _bundle_directory_identity(path) != identity:
+            return False
+        marker = path / ".init-owner"
+        if marker_required:
+            if (marker_identity is None or _is_reparse_path(marker)
+                    or not marker.is_file()
+                    or _path_identity(marker) != marker_identity
+                    or marker.read_text(encoding="ascii").strip() != owner_token):
+                return False
+        else:
+            # Without a successfully-published token we only own the empty
+            # directory entry.  Never recursively remove files that could
+            # have appeared after the marker creation failed.
+            path.rmdir()
+            return not os.path.lexists(path)
+        # sqlite3's connection context manager commits but does not close the
+        # connection object.  CPython 3.13 can therefore retain an unreachable
+        # initialization connection until cyclic GC, which keeps graph.db
+        # undeletable on Windows.  Collect before the first recursive attempt;
+        # a failed rmtree could otherwise remove the owner marker and make a
+        # token-verified retry impossible.
+        import gc
+        gc.collect()
+        shutil.rmtree(path)
+        return not os.path.lexists(path)
+    except OSError:
+        return False
+
+
 def _open_project(args: argparse.Namespace) -> Project:
     return Project.open(_project_root(args))
 
@@ -53,12 +398,101 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if not project_id:
         slug = re.sub(r"[^a-z0-9_]+", "_", root.name.casefold()).strip("_") or "project"
         project_id = f"local.{slug}"
-    manifest_path = root / args.manifest
-    if manifest_path.exists() and not args.force:
-        raise CliError(f"manifest already exists: {manifest_path}; use --force to replace it")
+    manifest_path = root / Path(safe_relative_path(args.manifest))
+    if manifest_path.suffix.casefold() != ".toml":
+        raise CliError("init manifest must use the .toml extension")
     text = manifest_template(project_id, args.name or root.name, args.top, args.source)
-    manifest_path.write_text(text, encoding="utf-8", newline="\n")
-    project = Project.create_from_manifest(manifest_path, force=args.force)
+    manifest = parse_manifest_text(text, format="toml")
+
+    bundle_path = root / GraphBundle.DIRECTORY
+    lock_path = root / ".hlsgraph-init.lock"
+    lock_token = uuid.uuid4().hex
+    try:
+        lock_identity = _claim_owner_file(lock_path, lock_token)
+    except FileExistsError as exc:
+        raise CliError(
+            "another project initialization owns .hlsgraph-init.lock; "
+            "inspect it before removing a stale lock"
+        ) from exc
+
+    owned_identity: tuple[int, int] | None = None
+    owner_marker = bundle_path / ".init-owner"
+    owner_token = uuid.uuid4().hex
+    marker_created = False
+    marker_identity: tuple[int, int] | None = None
+    manifest_published = False
+    try:
+        if os.path.lexists(bundle_path):
+            # ``init`` is a creation transaction, not a ledger migration.
+            raise CliError(
+                "an HLSGraph bundle already exists; init will not replace an existing ledger"
+            )
+
+        # Capture the complete ordinary-directory chain.  Publication later
+        # revalidates every identity and, where available, uses a stable dir_fd
+        # so a nested parent cannot be swapped for a symlink or junction after
+        # this precheck.
+        manifest_directory_chain = _prepare_directory_chain(
+            root, manifest_path.parent,
+        )
+        manifest_preexisting = os.path.lexists(manifest_path)
+        if (manifest_preexisting and (_is_reparse_path(manifest_path)
+                or not stat.S_ISREG(manifest_path.lstat().st_mode))):
+            raise CliError(
+                "init manifest target must be a regular file, not a symlink or reparse point"
+            )
+        if manifest_preexisting and not args.force:
+            raise CliError(
+                f"manifest already exists: {manifest_path}; use --force to replace it"
+            )
+        expected_manifest_identity = (
+            _path_identity(manifest_path) if manifest_preexisting else None
+        )
+        expected_manifest_bytes = (
+            manifest_path.read_bytes() if manifest_preexisting else None
+        )
+
+        try:
+            # Atomically claim this exact directory.  A pre-check alone is
+            # racy and must never authorize cleanup of a peer ledger.
+            bundle_path.mkdir(parents=False, exist_ok=False)
+            owned_identity = _bundle_directory_identity(bundle_path)
+            marker_identity = _claim_owner_file(owner_marker, owner_token)
+            marker_created = True
+            if _bundle_directory_identity(bundle_path) != owned_identity:
+                raise FileExistsError("bundle directory changed during owner claim")
+            project = Project(GraphBundle.create(
+                root, manifest, force=False, manifest_source=manifest_path,
+            ))
+            # Keep the ownership marker live until the manifest has been
+            # published.  With no pre-existing manifest this is an atomic
+            # no-clobber operation; --force may replace only the exact bytes
+            # and inode observed under the init lock.
+            _atomic_write_text(
+                manifest_path, text, replace=manifest_preexisting,
+                expected_identity=expected_manifest_identity,
+                expected_bytes=expected_manifest_bytes,
+                directory_chain=manifest_directory_chain,
+            )
+            manifest_published = True
+            if marker_identity is not None:
+                _remove_owned_file(owner_marker, marker_identity, owner_token)
+        except BaseException as exc:
+            cleaned = False
+            if not manifest_published:
+                cleaned = _cleanup_owned_bundle(
+                    bundle_path, owned_identity, owner_token=owner_token,
+                    marker_required=marker_created,
+                    marker_identity=marker_identity,
+                )
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            suffix = "" if cleaned else "; owned partial state could not be removed"
+            raise CliError(
+                f"project initialization failed ({type(exc).__name__}){suffix}"
+            ) from exc
+    finally:
+        _remove_owned_file(lock_path, lock_identity, lock_token)
     _emit({
         "command": "init", "project_id": project.bundle.manifest.project_id,
         "project_root": str(root), "manifest": str(manifest_path),
@@ -91,12 +525,15 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     project = _open_project(args)
-    snapshot = project.bundle.latest_snapshot()
+    snapshot = (project.bundle.latest_snapshot()
+                or project.bundle.store.latest_candidate(
+                    project.bundle.manifest.project_id
+                ))
     if snapshot is None or not project.bundle.store.has_graph(snapshot.id):
-        payload = project.bundle.status()
+        payload = project.bundle.status(snapshot.id if snapshot else None)
         if snapshot is not None:
             payload["runs"] = len(project.bundle.store.runs(snapshot.id))
-            payload["diagnostics"] = [json_ready(item)
+            payload["diagnostics"] = [public_diagnostic(item)
                                       for item in project.bundle.store.diagnostics(snapshot.id)]
     else:
         payload = project.status().to_dict()
@@ -303,7 +740,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--top", required=True)
     init.add_argument("--source", required=True, help="project-relative HLS source path")
     init.add_argument("--manifest", default="hlsgraph.toml")
-    init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--force", action="store_true",
+        help="replace an existing manifest only when no .hlsgraph ledger exists",
+    )
     init.set_defaults(func=_cmd_init)
 
     index = sub.add_parser("index", help="build a new deterministic graph snapshot")

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ..bundle import GraphBundle
+from ..diagnostic_projection import public_diagnostic, redacted_diagnostic_record
 from ..model import json_ready
 from ..query import DEFAULT_IMPACT_RELATIONS, CoreService, ExploreSpec, QuerySpec
 from ..render import render as render_graph
@@ -233,7 +234,7 @@ class ReadOnlyMcpService:
             "schema_version": SCHEMA_VERSION,
             "snapshot_id": self.snapshot_id,
             "status": status,
-            "diagnostics": [json_ready(item) for item in diagnostics],
+            "diagnostics": [public_diagnostic(item) for item in diagnostics],
             "runs": [_run_summary(item) for item in self.bundle.store.runs(self.snapshot_id)],
         }
 
@@ -277,6 +278,31 @@ class ReadOnlyMcpService:
             "items": values[:limit], "truncated": len(values) > limit,
         }
 
+    def variants(self, parent_snapshot_id: str | None = None,
+                 action_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Read proposed actions and explicit prediction/result links without mutation."""
+        if self.snapshot_id is None:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "snapshot_id": None,
+                "parent_snapshot_id": parent_snapshot_id,
+                "record_class": "variant_action",
+                "lineage_semantics": "recorded_links_only",
+                "items": [],
+                "truncated": False,
+            }
+        core = self.core or CoreService(self.bundle, self.snapshot_id)
+        result = core.variants(
+            parent_snapshot_id=parent_snapshot_id, action_id=action_id,
+        )
+        values = result["items"]
+        limit = max(1, min(int(limit), 100))
+        return {
+            **result,
+            "items": values[:limit],
+            "truncated": len(values) > limit,
+        }
+
     def render(self, scope_id: str | None = None, format: str = "mermaid",
                max_chars: int = 500_000) -> dict[str, Any]:
         """Render in memory; this tool never writes files or mutates the graph."""
@@ -286,10 +312,14 @@ class ReadOnlyMcpService:
             raise ValueError("max_chars must be in 1000..5000000")
         core = self._require_core()
         graph = core.graph()
+        diagnostics = [
+            projected for item in self.bundle.store.active_diagnostics(core.snapshot_id)
+            if (projected := redacted_diagnostic_record(item)) is not None
+        ]
         content = render_graph(
             graph, format=format, scope_id=scope_id,
             observations=self.bundle.store.observations(core.snapshot_id),
-            diagnostics=self.bundle.store.active_diagnostics(core.snapshot_id),
+            diagnostics=diagnostics,
         )
         if len(content) > int(max_chars):
             raise ValueError(

@@ -3,6 +3,34 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.1.2 — 2026-07-18
+
+Developer-preview completion and release-boundary hardening:
+
+- close action lineage from a proposed `VariantAction`, through an optional
+  `PredictionEnvelope.action_id`, to explicitly linked result snapshots across
+  the SDK, REST, MCP, and leakage-aware ML export;
+- fail closed on inactive/conditionally ambiguous source pragmas, non-literal
+  Tcl directive contexts, compiler-reachable macro includes, path-dependent
+  compiler builtins, and unsafe project-root placeholder use;
+- make semantically empty plugin selections identity-neutral and isolate core
+  indexing from unrequested entry-point conflicts;
+- honor Windows compilation-database quoting, translation-unit working
+  directories, and response-file arguments consistently in snapshot closure
+  discovery and standard libclang extraction;
+- escape generated TOML safely, make `init` a no-clobber, no-follow,
+  rollback-safe creation transaction, and explicitly refuse replacing an
+  existing ledger;
+- expose diagnostics through a shared positive public projection while keeping
+  detailed messages and metadata in the local ledger;
+- export only a minimal hashed projection of variant actions by default, so
+  candidate deltas, rationale, proposer text, and private source remain local;
+- add automated config-directive scope and RTL-cosim mismatch acceptance cases;
+  and
+- record exact EPL corresponding-source lineage, expanded compiler/IR
+  references, release SBOM scope, and the clean public-history provenance
+  boundary.
+
 ## 0.1.1 — 2026-07-17
 
 Windows compatibility hotfix for isolated local execution:

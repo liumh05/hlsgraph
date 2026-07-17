@@ -24,6 +24,13 @@ project.export_dataset("dataset", format="jsonl")
 Use `project.index(degraded=True)` only when deliberately accepting the regex
 scanner. The result and health diagnostics preserve the degraded status.
 
+Candidate lineage is explicit and does not promote a proposal or prediction to
+fact. Record a `VariantAction` against its parent snapshot, optionally bind a
+`PredictionEnvelope.action_id`, and call
+`project.index(parent_snapshot_id=..., action_id=...)` only after applying the
+candidate inputs. `project.variants()` reports recorded prediction and result
+links; an empty result list means no result snapshot has been recorded.
+
 `Project.run(runner, stages=...)` executes only stage argv declared in the
 manifest. `LocalRunner` and `SSHRunner` require explicit execution enablement;
 `FakeRunner` and `ReplayRunner` are non-tool-truth paths for CI and cache tests.
@@ -153,6 +160,18 @@ stable sorting and snapshot-bound cursors. Queries can filter by entity kind,
 scope, stage, and authority. Exploration returns a bounded explicit-relation
 neighborhood plus observations, diagnostics, and artifact metadata.
 
+Diagnostics on these shared/public surfaces use a positive projection. It
+includes stable IDs, code, severity, stage, safe anchor fields, and
+`detail_sha256`, while setting `detail_redacted=true`. Tool/plugin messages,
+guidance, and metadata remain available only from the trusted local bundle
+store and are not serialized by CoreService query results, CLI status, REST, or
+MCP.
+
+As of v0.1.2 this projection also applies to previously exposed diagnostic
+records on all public surfaces. Consumers should use the stable code, severity,
+anchor, and `detail_sha256` fields; raw diagnostic message/metadata access is a
+local ledger operation, not a public wire guarantee.
+
 Cursors are tied to the query specification and snapshot. A cursor from another
 query or snapshot is rejected rather than silently reused.
 
@@ -216,6 +235,8 @@ The MCP server registers these read-only tools:
 - `health`, including degraded extraction, missing evidence, and staleness;
 - `runs`, which returns redacted execution/failure records, and `predictions`,
   which returns explicitly labeled prediction envelopes outside the fact layer;
+- `variants`, which reports only explicitly recorded action, prediction, and
+  result-snapshot lineage and never infers whether a candidate was applied;
 - `render`, which returns an in-memory rendering and does not write files;
 - `knowledge`, whose results are labeled `authority_class=knowledge_rule`.
 
@@ -240,7 +261,7 @@ and observations may still be sensitive. Review an export before publishing it.
 JSONL is the baseline format. The destination must not already exist and is
 published atomically. An export directory contains separate tables for
 nodes, edges, observations, non-truth observations, labels, splits, artifacts,
-runs, and predictions, plus
+runs, predictions, minimally projected variants, and snapshot lineage, plus
 `feature_spec.json` and a hashed manifest. Labels carry `snapshot_id`, stage,
 unit, mask, and censoring state. Present labels reference same-snapshot complete
 observations from successful fresh real-tool runs and intact retained reports;
@@ -249,6 +270,12 @@ Present labels must also satisfy the exact run-stage/report-kind compatibility
 policy recorded as `tool_evidence_policy_version` in `feature_spec.json`;
 unknown plugin report kinds require the explicit `hlsgraph_evidence` metadata
 contract documented in `schema.md`.
+
+`variants.jsonl` and `snapshot_lineage.jsonl` are non-feature lineage tables.
+The default export includes action identity/kind/scope links and hashes but not
+raw candidate deltas, rationale, proposer text, or source replacements. A
+result-only dataset may contain a minimal parent-action stub; it never copies
+the undeclared parent snapshot's private action payload.
 
 `observations.jsonl` is fail-closed at the public export boundary. A real-tool
 authority observation without a producer run rejects the export. A retained
@@ -280,7 +307,8 @@ hlsgraph export --project /path/to/project dataset \
 Packaged rules can be filtered without obtaining vendor documents:
 
 ```bash
-hlsgraph knowledge --project /path/to/project --vendor amd --stage schedule
+hlsgraph knowledge --project /path/to/project --vendor amd \
+  --tool vitis_hls --stage schedule
 ```
 
 The local indexer hashes metadata for a document the user lawfully possesses;

@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..graph import CanonicalGraph
-from ..manifest import project_path
+from ..manifest import project_path, resolve_compiler_arguments
 from ..model import (
     AuthorityClass,
     Completeness,
@@ -30,6 +31,186 @@ from .base import ExtractionContext, ExtractionError, ExtractionResult
 
 
 _PRAGMA = re.compile(r"^\s*#\s*pragma\s+HLS\s+([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$", re.I)
+_RAW_STRING = re.compile(
+    r'(?:u8|u|U|L)?R"(?P<delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=delimiter)"',
+    re.DOTALL,
+)
+_COMMENT_OR_LITERAL = re.compile(
+    r'//[^\r\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+    re.DOTALL,
+)
+_UNTRACKED_PREPROCESSOR_TOKEN = re.compile(
+    r"\b(?:__has_include|__has_include_next|__has_embed|__DATE__|__TIME__|"
+    r"__TIMESTAMP__|__FILE__|__FILE_NAME__|__BASE_FILE__|__builtin_FILE|"
+    r"__builtin_source_location)\b|"
+    r"^\s*#\s*embed\b",
+    re.MULTILINE,
+)
+_AMBIENT_COMPILER_ENVIRONMENT = frozenset({
+    "CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+    "OBJCPLUS_INCLUDE_PATH", "INCLUDE", "SDKROOT", "GCC_EXEC_PREFIX",
+    "COMPILER_PATH", "CCC_OVERRIDE_OPTIONS", "CL", "_CL_",
+    "MACOSX_DEPLOYMENT_TARGET", "IPHONEOS_DEPLOYMENT_TARGET",
+    "TVOS_DEPLOYMENT_TARGET", "WATCHOS_DEPLOYMENT_TARGET",
+    "XROS_DEPLOYMENT_TARGET",
+})
+
+
+def _blank_match(match: re.Match[str]) -> str:
+    """Remove prose/literals while preserving line boundaries for directives."""
+    return "".join("\n" if character == "\n" else " " for character in match.group(0))
+
+
+def _unsafe_preprocessor_tokens(text: str) -> set[str]:
+    # Translation phases replace trigraphs and splice physical lines before
+    # comments, literals, and preprocessing tokens are recognized.  Mirror
+    # those two transformations so a split reserved builtin cannot bypass the
+    # conservative v0.1 gate.
+    for source, replacement in (
+        ("??=", "#"), ("??/", "\\"), ("??'", "^"), ("??(", "["),
+        ("??)", "]"), ("??!", "|"), ("??<", "{"), ("??>", "}"),
+        ("??-", "~"), ("%:%:", "##"), ("%:", "#"),
+    ):
+        text = text.replace(source, replacement)
+    text = re.sub(r"\\\r?\n", "", text)
+    code = _RAW_STRING.sub(_blank_match, text)
+    code = _COMMENT_OR_LITERAL.sub(_blank_match, code)
+    result = {match.group(0).strip().split()[0]
+              for match in _UNTRACKED_PREPROCESSOR_TOKEN.finditer(code)}
+    if "##" in code:
+        result.add("preprocessor_token_paste")
+    return result
+
+
+def _ambient_compiler_environment() -> list[str]:
+    # Windows environment names are case-insensitive; case-fold everywhere so
+    # a mixed-case alias cannot bypass the deterministic-input boundary.
+    present = {str(key).upper() for key, value in os.environ.items() if value}
+    return sorted(present & _AMBIENT_COMPILER_ENVIRONMENT)
+
+
+def _skipped_preprocessor_line_ranges(cindex: Any, translation_unit: Any,
+                                      filename: Path) -> list[tuple[int, int]]:
+    """Read libclang's exact inactive conditional-compilation ranges.
+
+    The Python bindings do not currently wrap ``clang_getSkippedRanges`` even
+    though it is part of the stable libclang C API.  Binding it locally keeps
+    pragma activity tied to the same TranslationUnit that produced the AST.
+    Failure is propagated so callers can fail closed instead of upgrading raw
+    source text in an inactive ``#if`` branch to a requested directive.
+    """
+    from ctypes import POINTER, Structure, c_uint
+
+    class _SourceRangeList(Structure):
+        _fields_ = [
+            ("count", c_uint),
+            ("ranges", POINTER(cindex.SourceRange)),
+        ]
+
+    library = cindex.conf.lib
+    getter = library.clang_getSkippedRanges
+    disposer = library.clang_disposeSourceRangeList
+    getter.argtypes = [cindex.TranslationUnit, cindex.File]
+    getter.restype = POINTER(_SourceRangeList)
+    disposer.argtypes = [POINTER(_SourceRangeList)]
+    disposer.restype = None
+    source_file = cindex.File.from_name(translation_unit, str(filename))
+    ranges = getter(translation_unit, source_file)
+    if not ranges:
+        return []
+    try:
+        return [
+            (int(ranges.contents.ranges[index].start.line),
+             int(ranges.contents.ranges[index].end.line))
+            for index in range(int(ranges.contents.count))
+        ]
+    finally:
+        disposer(ranges)
+
+
+def _tri_and(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is True and right is True:
+        return True
+    return None
+
+
+def _tri_or(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is False and right is False:
+        return False
+    return None
+
+
+def _tri_not(value: bool | None) -> bool | None:
+    return None if value is None else not value
+
+
+def _literal_preprocessor_condition(expression: str) -> bool | None:
+    """Evaluate only the deliberately tiny literal subset used in degraded mode."""
+    value = expression.strip()
+    while value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    negate = False
+    while value.startswith("!"):
+        negate = not negate
+        value = value[1:].strip()
+    if value not in {"0", "1"}:
+        return None
+    result = value == "1"
+    return not result if negate else result
+
+
+def _degraded_pragma_activity(artifact_id: str, text: str) -> dict[tuple[str, int], bool | None]:
+    """Conservatively classify pragma activity without pretending to preprocess.
+
+    Literal ``#if 0/1`` nesting is deterministic.  Macro-dependent or otherwise
+    non-literal branches remain unknown, and their pragmas are withheld by the
+    caller with an explicit diagnostic.
+    """
+    code = _RAW_STRING.sub(_blank_match, text)
+    code = _COMMENT_OR_LITERAL.sub(_blank_match, code)
+    raw_lines = text.splitlines()
+    code_lines = code.splitlines()
+    if len(code_lines) < len(raw_lines):
+        code_lines.extend([""] * (len(raw_lines) - len(code_lines)))
+    current: bool | None = True
+    stack: list[dict[str, bool | None]] = []
+    result: dict[tuple[str, int], bool | None] = {}
+    conditional = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$", re.I)
+    for line_number, (raw_line, code_line) in enumerate(zip(raw_lines, code_lines), 1):
+        directive = conditional.match(code_line)
+        if directive:
+            name = directive.group(1).casefold()
+            expression = directive.group(2)
+            if name in {"if", "ifdef", "ifndef"}:
+                condition = (_literal_preprocessor_condition(expression)
+                             if name == "if" else None)
+                stack.append({"parent": current, "seen": condition})
+                current = _tri_and(current, condition)
+            elif name == "elif" and stack:
+                condition = _literal_preprocessor_condition(expression)
+                entry = stack[-1]
+                current = _tri_and(
+                    entry["parent"], _tri_and(_tri_not(entry["seen"]), condition),
+                )
+                entry["seen"] = _tri_or(entry["seen"], condition)
+            elif name == "else" and stack:
+                entry = stack[-1]
+                current = _tri_and(entry["parent"], _tri_not(entry["seen"]))
+                entry["seen"] = True
+            elif name == "endif" and stack:
+                current = stack.pop()["parent"]
+            else:
+                # Malformed conditional structure cannot safely certify any
+                # subsequent pragma in the degraded scanner.
+                current = None
+            continue
+        if _PRAGMA.match(raw_line):
+            result[(artifact_id, line_number)] = current
+    return result
 
 
 def _strip_inline_comments(text: str) -> str:
@@ -120,12 +301,66 @@ def _anchor(context: ExtractionContext, cursor: Any) -> SourceAnchor | None:
 
 
 def _unit_args(context: ExtractionContext, unit: TranslationUnit) -> list[str]:
-    root = str(context.project_root.resolve())
+    root_path = context.project_root.resolve()
+    root = str(root_path)
     source = str(project_path(context.project_root, unit.file))
-    raw = [arg.replace("${PROJECT_ROOT}", root) for arg in unit.arguments]
-    if raw and not raw[0].startswith("-"):
-        raw = raw[1:]
-    result: list[str] = []
+    working_directory = (root_path / unit.directory).resolve()
+    raw, _ = resolve_compiler_arguments(
+        root_path, working_directory, unit.arguments,
+    )
+    clang_cl = False
+    gxx_driver = False
+    if raw:
+        executable = re.split(r"[/\\]", raw[0])[-1].casefold()
+        stem = executable[:-4] if executable.endswith(".exe") else executable
+        if stem in {"ccache", "sccache", "distcc", "env"} or re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*", raw[0]
+        ):
+            raise ExtractionError(
+                "compiler wrapper/environment prefixes are unsupported; store the "
+                "fully expanded compiler arguments in the compilation database"
+            )
+        clang_cl = bool(re.fullmatch(r"(?:.+-)?clang-cl(?:-\d+)?", stem))
+        gxx_driver = bool(re.fullmatch(
+            r"(?:.+-)?(?:clang\+\+|g\+\+|c\+\+)(?:-\d+)?", stem,
+        ))
+        msvc_cl = stem == "cl"
+        known_driver = bool(
+            clang_cl or msvc_cl
+            or re.fullmatch(
+                r"(?:(?:.+-)?(?:clang\+\+|clang|gcc|g\+\+|cc|c\+\+))(?:-\d+)?",
+                stem,
+            )
+        )
+        windows_option = (
+            raw[0].casefold().startswith((
+                "/i", "/fi", "/d", "/u", "/c", "/fo", "/std:", "/eh",
+                "/zc", "/w", "/o", "/md", "/mt", "/gr", "/tp", "/tc",
+                "/permissive", "/external:", "/imsvc", "/clang:",
+            ))
+            and not (os.name != "nt" and Path(raw[0]).is_absolute())
+        )
+        if msvc_cl:
+            raise ExtractionError(
+                "cl.exe compilation databases are unsupported; use clang-cl with an "
+                "explicit, self-contained project-local compilation context"
+            )
+        if known_driver:
+            raw = raw[1:]
+        elif not raw[0].startswith("-") and not windows_option:
+            raise ExtractionError(
+                "unsupported compiler driver in translation-unit arguments"
+            )
+        elif windows_option:
+            # Explicit manifest translation units may omit argv[0].  A joined
+            # /I, /FI, /D, ... first option is context, not an executable path,
+            # and selects clang-cl argument semantics.
+            clang_cl = True
+    result: list[str] = [f"-working-directory={working_directory}"]
+    if clang_cl:
+        result.append("--driver-mode=cl")
+    elif gxx_driver:
+        result.append("--driver-mode=g++")
     skip = False
     for arg in raw:
         if skip:
@@ -133,8 +368,12 @@ def _unit_args(context: ExtractionContext, unit: TranslationUnit) -> list[str]:
             continue
         if arg in {"-c", "/c"}:
             continue
-        if arg in {"-o", "/Fo"}:
+        if arg in {"-o", "/Fo", "-working-directory"}:
             skip = True
+            continue
+        if ((arg.startswith("-o") and len(arg) > 2)
+                or (arg.startswith("/Fo") and len(arg) > 3)
+                or arg.startswith("-working-directory=")):
             continue
         if not arg.startswith("-"):
             candidate = Path(arg)
@@ -147,7 +386,10 @@ def _unit_args(context: ExtractionContext, unit: TranslationUnit) -> list[str]:
         result.extend(["-I", str(project_path(context.project_root, include))])
     for key, value in sorted(context.manifest.build.defines.items()):
         result.append(f"-D{key}={value}" if value else f"-D{key}")
-    result.extend(context.manifest.build.cflags)
+    global_flags, _ = resolve_compiler_arguments(
+        root_path, root_path, context.manifest.build.cflags,
+    )
+    result.extend(global_flags)
     return result
 
 
@@ -178,7 +420,7 @@ def _number(value: str) -> Any:
 
 class LibClangExtractor:
     name = "source.libclang"
-    version = "1"
+    version = "2"
 
     def supports(self, context: ExtractionContext) -> bool:
         # Being unsupported would silently omit the source plane.  The standard
@@ -251,10 +493,75 @@ class LibClangExtractor:
         graph = CanonicalGraph(snapshot_id=context.snapshot.id,
                                metadata={"source_backend": self.name, "fidelity": "ast"})
         result = ExtractionResult(graph=graph, capabilities=["source.ast", "directive.source_scope"])
+        ambient = _ambient_compiler_environment()
+        if ambient:
+            result.diagnostics.append(Diagnostic(
+                snapshot_id=context.snapshot.id,
+                code="source.ambient_compiler_environment",
+                severity=DiagnosticSeverity.ERROR,
+                message=("ambient compiler environment inputs are unsupported; express "
+                         "all preprocessing context in the project manifest"),
+                stage=Stage.AST.value,
+                metadata={"variable_names": ambient},
+            ))
+            return result
+
+        unsafe_tokens: set[str] = set()
+        compiler_text: dict[str, str] = {}
+        for artifact in sorted(context.artifacts.values(), key=lambda item: item.uri):
+            path = project_path(context.project_root, artifact.uri)
+            if (not artifact.metadata.get("hlsgraph.compiler_reachable_text")
+                    and not artifact.kind.startswith("source.")
+                    and artifact.role not in {"design_source", "header", "dependency"}):
+                continue
+            try:
+                source_bytes = path.read_bytes()
+            except OSError:
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id,
+                    code="source.unreadable_preprocessor_input",
+                    severity=DiagnosticSeverity.ERROR,
+                    message="a snapshotted textual compiler input could not be read",
+                    stage=Stage.SOURCE.value,
+                    artifact_id=artifact.id,
+                ))
+                return result
+            try:
+                if b"\x00" in source_bytes:
+                    raise UnicodeError("NUL byte")
+                source_text = source_bytes.decode("utf-8-sig")
+            except UnicodeError:
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id,
+                    code="source.unsupported_text_encoding",
+                    severity=DiagnosticSeverity.ERROR,
+                    message=("a snapshotted compiler-reachable source input is not "
+                             "NUL-free UTF-8"),
+                    stage=Stage.SOURCE.value,
+                    artifact_id=artifact.id,
+                ))
+                return result
+            compiler_text[artifact.id] = source_text
+            unsafe_tokens.update(_unsafe_preprocessor_tokens(source_text))
+        if unsafe_tokens:
+            result.diagnostics.append(Diagnostic(
+                snapshot_id=context.snapshot.id,
+                code="source.unsupported_preprocessor_input",
+                severity=DiagnosticSeverity.ERROR,
+                message=("source uses preprocessing features whose implicit file/time/path "
+                         "inputs are not represented by the v0.1 snapshot"),
+                stage=Stage.SOURCE.value,
+                metadata={"features": sorted(unsafe_tokens)},
+            ))
+            return result
+
         function_by_name: dict[str, list[str]] = defaultdict(list)
         pending_calls: list[tuple[str, str, SourceAnchor | None]] = []
         cursor_entity: dict[int, str] = {}
         untracked_project_inputs: set[str] = set()
+        untracked_external_inputs = 0
+        pragma_activity: dict[tuple[str, int], set[bool | None]] = defaultdict(set)
+        pragma_activity_available = True
         index = cindex.Index.create()
 
         for unit in context.manifest.build.translation_units:
@@ -267,6 +574,33 @@ class LibClangExtractor:
                 ))
                 continue
             args = _unit_args(context, unit)
+            unsafe_arguments: set[str] = set()
+            for argument in args:
+                # Scan argv independently: joining permits one value ending in
+                # ``//`` or an unmatched literal to lexically hide the next.
+                unsafe_arguments.update(_unsafe_preprocessor_tokens(argument))
+            if unsafe_arguments:
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id,
+                    code="source.unsupported_preprocessor_input",
+                    severity=DiagnosticSeverity.ERROR,
+                    message=("compiler arguments use preprocessing features whose implicit "
+                             "inputs are not represented by the v0.1 snapshot"),
+                    stage=Stage.AST.value,
+                    metadata={"features": sorted(unsafe_arguments)},
+                ))
+                continue
+            if any(arg == "-ivfsoverlay" or arg.startswith("-ivfsoverlay=")
+                   for arg in args):
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id,
+                    code="source.unsupported_vfs_overlay",
+                    severity=DiagnosticSeverity.ERROR,
+                    message=("VFS overlay compilation contexts are not supported by the "
+                             "standard extractor because backing-file attribution is incomplete"),
+                    stage=Stage.AST.value,
+                ))
+                continue
             try:
                 tu = index.parse(str(source), args=args,
                                  options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
@@ -276,10 +610,107 @@ class LibClangExtractor:
             # but macro includes, response files, or compiler-specific flags can
             # expand the real dependency set.  Never accept an AST whose
             # project-local input bytes were absent from the snapshot.
-            for inclusion in tu.get_includes():
-                relative = _relative_file(context, str(inclusion.include))
+            inclusions = list(tu.get_includes())
+            for inclusion in inclusions:
+                inclusion_path = str(inclusion.include)
+                relative = _relative_file(context, inclusion_path)
                 if relative and context.artifact_for_uri(relative) is None:
                     untracked_project_inputs.add(relative)
+                elif relative is None and Path(inclusion_path).is_absolute():
+                    untracked_external_inputs += 1
+            processed_paths = {source.resolve()}
+            processed_paths.update(
+                Path(str(inclusion.include)).resolve() for inclusion in inclusions
+            )
+            for processed_path in sorted(processed_paths, key=str):
+                relative = _relative_file(context, str(processed_path))
+                artifact = context.artifact_for_uri(relative) if relative else None
+                if artifact is None:
+                    continue
+                # Static include discovery intentionally does not try to expand
+                # macros.  Libclang's actual inclusion set is authoritative for
+                # reachability, so a tracked macro-expanded include must be
+                # scanned even if an explicit arbitrary kind/role kept it out
+                # of the conservative pre-scan set.
+                if artifact.id not in compiler_text:
+                    path = project_path(context.project_root, artifact.uri)
+                    try:
+                        source_bytes = path.read_bytes()
+                    except OSError:
+                        graph.entities.clear()
+                        graph.relations.clear()
+                        result.observations.clear()
+                        result.diagnostics.append(Diagnostic(
+                            snapshot_id=context.snapshot.id,
+                            code="source.unreadable_preprocessor_input",
+                            severity=DiagnosticSeverity.ERROR,
+                            message="a compiler-processed textual input could not be read",
+                            stage=Stage.SOURCE.value,
+                            artifact_id=artifact.id,
+                        ))
+                        return result
+                    try:
+                        if b"\x00" in source_bytes:
+                            raise UnicodeError("NUL byte")
+                        source_text = source_bytes.decode("utf-8-sig")
+                    except UnicodeError:
+                        graph.entities.clear()
+                        graph.relations.clear()
+                        result.observations.clear()
+                        result.diagnostics.append(Diagnostic(
+                            snapshot_id=context.snapshot.id,
+                            code="source.unsupported_text_encoding",
+                            severity=DiagnosticSeverity.ERROR,
+                            message=("a compiler-processed source input is not "
+                                     "NUL-free UTF-8"),
+                            stage=Stage.SOURCE.value,
+                            artifact_id=artifact.id,
+                        ))
+                        return result
+                    actual_unsafe_tokens = _unsafe_preprocessor_tokens(source_text)
+                    if actual_unsafe_tokens:
+                        graph.entities.clear()
+                        graph.relations.clear()
+                        result.observations.clear()
+                        result.diagnostics.append(Diagnostic(
+                            snapshot_id=context.snapshot.id,
+                            code="source.unsupported_preprocessor_input",
+                            severity=DiagnosticSeverity.ERROR,
+                            message=("compiler-processed source uses preprocessing features "
+                                     "whose implicit file/time/path inputs are not represented "
+                                     "by the v0.1 snapshot"),
+                            stage=Stage.SOURCE.value,
+                            artifact_id=artifact.id,
+                            metadata={"features": sorted(actual_unsafe_tokens)},
+                        ))
+                        return result
+                    compiler_text[artifact.id] = source_text
+                try:
+                    skipped_ranges = _skipped_preprocessor_line_ranges(
+                        cindex, tu, processed_path,
+                    )
+                except Exception as exc:
+                    pragma_activity_available = False
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="source.preprocessor_activity_unavailable",
+                        severity=DiagnosticSeverity.ERROR,
+                        message=("libclang could not provide inactive preprocessor ranges; "
+                                 "source pragmas were not promoted to directive facts"),
+                        stage=Stage.AST.value,
+                        artifact_id=artifact.id,
+                        metadata={"error_type": type(exc).__name__, "tu": unit.file},
+                    ))
+                    continue
+                for line_number, line in enumerate(
+                    compiler_text[artifact.id].splitlines(), 1,
+                ):
+                    if not _PRAGMA.match(line):
+                        continue
+                    inactive = any(
+                        start <= line_number <= end for start, end in skipped_ranges
+                    )
+                    pragma_activity[(artifact.id, line_number)].add(not inactive)
             for diagnostic in tu.diagnostics:
                 severity = {
                     0: DiagnosticSeverity.INFO,
@@ -303,9 +734,13 @@ class LibClangExtractor:
             def visit(cursor: Any, parent_entity: str | None = None,
                       current_function_id: str | None = None,
                       current_function_qname: str | None = None) -> None:
-                relative = _relative_file(context, str(cursor.location.file) if cursor.location.file else None)
+                nonlocal untracked_external_inputs
+                location_file = str(cursor.location.file) if cursor.location.file else None
+                relative = _relative_file(context, location_file)
                 kind_name = cursor.kind.name
                 if relative is None and kind_name != "TRANSLATION_UNIT":
+                    if location_file and Path(location_file).is_absolute():
+                        untracked_external_inputs += 1
                     return
                 if (relative is not None
                         and context.artifact_for_uri(relative) is None):
@@ -385,6 +820,17 @@ class LibClangExtractor:
                 stage=Stage.AST.value, metadata={"path": relative},
             ))
 
+        if untracked_external_inputs:
+            result.diagnostics.append(Diagnostic(
+                snapshot_id=context.snapshot.id,
+                code="source.untracked_external_include",
+                severity=DiagnosticSeverity.ERROR,
+                message=("libclang read source outside the project-local snapshot; mirror "
+                         "licensed dependencies into the project or use project-local stubs"),
+                stage=Stage.AST.value,
+                metadata={"occurrences": untracked_external_inputs},
+            ))
+
         for owner, callee, anchor in pending_calls:
             targets = sorted(set(function_by_name.get(callee, [])))
             if len(targets) == 1:
@@ -402,7 +848,10 @@ class LibClangExtractor:
                     stage=Stage.AST.value, subject_id=owner,
                 ))
 
-        self._attach_source_pragmas(context, result)
+        self._attach_source_pragmas(
+            context, result,
+            pragma_activity if pragma_activity_available else None,
+        )
         result.coverage = {
             "translation_units": len(context.manifest.build.translation_units),
             "entities": len(graph.entities), "relations": len(graph.relations),
@@ -432,10 +881,17 @@ class LibClangExtractor:
         return None
 
     @staticmethod
-    def _attach_source_pragmas(context: ExtractionContext, result: ExtractionResult) -> None:
+    def _attach_source_pragmas(
+        context: ExtractionContext,
+        result: ExtractionResult,
+        activity: dict[tuple[str, int], set[bool | None]] | None,
+        *,
+        activity_mode: str = "libclang",
+    ) -> None:
         graph = result.graph
         for artifact in sorted(context.artifacts.values(), key=lambda item: item.uri):
-            if not artifact.kind.startswith("source."):
+            if (not artifact.metadata.get("hlsgraph.compiler_reachable_text")
+                    and not artifact.kind.startswith("source.")):
                 continue
             path = project_path(context.project_root, artifact.uri)
             if not path.is_file():
@@ -445,14 +901,62 @@ class LibClangExtractor:
                 match = _PRAGMA.match(line)
                 if not match:
                     continue
+                anchor = SourceAnchor(artifact_id=artifact.id, start_line=line_number,
+                                      start_column=max(1, line.find("#") + 1),
+                                      end_line=line_number, end_column=len(line) + 1)
+                if activity is None:
+                    # A standard extraction already emitted an error explaining
+                    # why activity was unavailable.  Withhold every pragma fact.
+                    continue
+                states = activity.get((artifact.id, line_number), set())
+                if states == {False}:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.inactive_source_pragma",
+                        severity=DiagnosticSeverity.INFO,
+                        message=("source pragma is in an inactive preprocessing branch "
+                                 "and was not promoted to a directive fact"),
+                        stage=Stage.SOURCE.value,
+                        artifact_id=artifact.id,
+                        anchor=anchor,
+                        metadata={"activity_mode": activity_mode},
+                    ))
+                    continue
+                if None in states:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.preprocessor_activity_unknown",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=("source pragma activity could not be proven by the "
+                                 f"{activity_mode} extractor and was withheld"),
+                        stage=Stage.SOURCE.value,
+                        artifact_id=artifact.id,
+                        anchor=anchor,
+                        metadata={"activity_mode": activity_mode},
+                    ))
+                    continue
+                if states == {False, True}:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.translation_unit_dependent_activity",
+                        severity=DiagnosticSeverity.ERROR,
+                        message=("source pragma is active in only part of the compilation "
+                                 "context; v0.1 cannot represent it as one unconditional fact"),
+                        stage=Stage.SOURCE.value,
+                        artifact_id=artifact.id,
+                        anchor=anchor,
+                    ))
+                    continue
+                if states != {True}:
+                    # The artifact closure deliberately over-approximates
+                    # same-name include candidates.  An unprocessed candidate
+                    # contributes bytes to identity but no directive fact.
+                    continue
                 directive_kind = match.group(1).upper()
                 # Comments are source prose, not pragma semantics.  Keeping
                 # them here would leak private source through graph/REST/MCP/ML
                 # exports and could also invent bogus directive flags.
                 options = _tokens_to_options(_strip_inline_comments(match.group(2)))
-                anchor = SourceAnchor(artifact_id=artifact.id, start_line=line_number,
-                                      start_column=max(1, line.find("#") + 1),
-                                      end_line=line_number, end_column=len(line) + 1)
                 target = _scope_for_pragma(
                     graph, artifact.id, line_number, directive_kind, options
                 )
@@ -584,6 +1088,7 @@ class RegexSourceExtractor:
         graph = CanonicalGraph(snapshot_id=context.snapshot.id,
                                metadata={"source_backend": self.name, "fidelity": "degraded"})
         result = ExtractionResult(graph=graph, capabilities=["source.degraded"])
+        degraded_activity: dict[tuple[str, int], set[bool | None]] = defaultdict(set)
         function_pattern = re.compile(
             r"(?:^|\n)\s*(?:[A-Za-z_]\w*(?:\s*<[^;{}]+>)?[\s*&]+)+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{",
             re.MULTILINE,
@@ -594,6 +1099,8 @@ class RegexSourceExtractor:
             if artifact is None:
                 continue
             text = project_path(context.project_root, unit.file).read_text(encoding="utf-8", errors="replace")
+            for location, state in _degraded_pragma_activity(artifact.id, text).items():
+                degraded_activity[location].add(state)
             lines = text.splitlines()
             functions: list[Entity] = []
             for match in function_pattern.finditer(text):
@@ -638,7 +1145,9 @@ class RegexSourceExtractor:
             message="regex source scanning was explicitly enabled; hardware topology and precise scope are incomplete",
             stage=Stage.SOURCE.value,
         ))
-        LibClangExtractor._attach_source_pragmas(context, result)
+        LibClangExtractor._attach_source_pragmas(
+            context, result, degraded_activity, activity_mode="regex_degraded",
+        )
         result.coverage = {"fidelity": "regex_degraded", "entities": len(graph.entities),
                            "relations": len(graph.relations)}
         return result

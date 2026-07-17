@@ -1289,7 +1289,7 @@ def test_label_spec_rejects_ambiguous_mask_and_malformed_identifiers() -> None:
 def test_release_metadata_and_sbom_are_consistent() -> None:
     root = Path(__file__).parents[1]
     sbom = json.loads((root / "sbom.spdx.json").read_text(encoding="utf-8"))
-    assert sbom["name"] == "hlsgraph-0.1.1"
+    assert sbom["name"] == "hlsgraph-0.1.2"
     packages = {item["name"]: item for item in sbom["packages"]}
     assert {"hlsgraph", "cytoscape", "elkjs", "tomli"}.issubset(packages)
     from tools.audit_release import (
@@ -1408,7 +1408,7 @@ def test_release_audit_accepts_crlf_metadata_and_only_standard_sdist_egg_info() 
     metadata = (
         b"Metadata-Version: 2.4\r\n"
         b"Name: hlsgraph\r\n"
-        b"Version: 0.1.1\r\n"
+        b"Version: 0.1.2\r\n"
         b"Project-URL: Source, https://github.com/liumh05/hlsgraph\r\n\r\n"
     )
     assert _audit_wheel_metadata(metadata) == []

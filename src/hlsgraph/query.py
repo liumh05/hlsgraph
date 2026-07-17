@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .bundle import GraphBundle
+from .diagnostic_projection import public_diagnostic
 from .graph import CanonicalGraph
 from .model import (
     AuthorityClass, DiagnosticSeverity, Entity, GateKind, GateStatus, hash_artifact_bytes,
@@ -351,7 +352,8 @@ class CoreService:
             entities=[json_ready(item) for item in entities],
             relations=[json_ready(item) for item in sorted(relations, key=lambda value: value.id)],
             observations=[json_ready(item) for item in sorted(observations, key=lambda value: value.id)],
-            diagnostics=[json_ready(item) for item in sorted(diagnostics, key=lambda value: value.id)],
+            diagnostics=[public_diagnostic(item)
+                         for item in sorted(diagnostics, key=lambda value: value.id)],
             evidence=[json_ready(item) for item in sorted(artifacts, key=lambda value: value.id)],
             incomplete=incomplete, next_cursor=next_cursor,
         )
@@ -417,7 +419,8 @@ class CoreService:
             "artifacts": [json_ready(artifacts[item]) for item in sorted(artifact_ids) if item in artifacts],
             "derivations": derivations,
             "verifications": verifications,
-            "diagnostics": [json_ready(item) for item in self.bundle.store.active_diagnostics(self.snapshot_id)
+            "diagnostics": [public_diagnostic(item)
+                            for item in self.bundle.store.active_diagnostics(self.snapshot_id)
                             if item.subject_id == entity_id],
         }
 
@@ -465,6 +468,62 @@ class CoreService:
                         "resource, correctness, or timing changes."),
         })
         return traversed
+
+    def variants(self, *, parent_snapshot_id: str | None = None,
+                 action_id: str | None = None) -> dict[str, Any]:
+        """Return proposed actions with explicit prediction/result lineage only."""
+        if action_id is not None:
+            if not isinstance(action_id, str) or not action_id.strip():
+                raise ValueError("action_id must be a non-empty string or None")
+            action = self.bundle.store.variant(action_id)
+            if action is None:
+                raise KeyError(action_id)
+            action_parent = action["parent_snapshot_id"]
+            if (parent_snapshot_id is not None
+                    and parent_snapshot_id != action_parent):
+                raise ValueError(
+                    "action_id belongs to a different parent_snapshot_id"
+                )
+            parent_snapshot_id = action_parent
+        parent_snapshot_id = parent_snapshot_id or self.snapshot_id
+        parent = self.bundle.store.snapshot(parent_snapshot_id)
+        if parent.project_id != self.bundle.manifest.project_id:
+            raise ValueError("variant parent belongs to another project")
+
+        actions = self.bundle.store.variants(
+            parent_snapshot_id, action_id=action_id,
+        )
+        predictions = self.bundle.store.predictions(parent_snapshot_id)
+        items = []
+        for action in actions:
+            linked_predictions = sorted(
+                item["id"] for item in predictions
+                if item.get("action_id") == action["id"]
+            )
+            snapshots = self.bundle.store.result_snapshots(
+                action["id"], parent_snapshot_id=parent_snapshot_id,
+            )
+            result_rows = [{
+                "snapshot_id": item.id,
+                "parent_snapshot_id": item.parent_snapshot_id,
+                "action_id": item.action_id,
+                "created_at": item.created_at,
+                "graph_available": self.bundle.store.has_graph(item.id),
+            } for item in snapshots]
+            items.append({
+                **action,
+                "prediction_ids": linked_predictions,
+                "result_snapshot_ids": [item["snapshot_id"] for item in result_rows],
+                "result_snapshots": result_rows,
+            })
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "snapshot_id": self.snapshot_id,
+            "parent_snapshot_id": parent_snapshot_id,
+            "record_class": "variant_action",
+            "lineage_semantics": "recorded_links_only",
+            "items": items,
+        }
 
     def status(self) -> StatusResult:
         graph = self.graph()

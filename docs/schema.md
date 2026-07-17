@@ -77,8 +77,11 @@ a different stage meaning.
 
 These states must remain distinct:
 
-- **Requested** is design intent. Source pragmas and external directives emit
-  `directive.requested` with `authority=declared_constraint`.
+- **Requested** is design intent. Active source pragmas and literal, top-level
+  external directives emit `directive.requested` with
+  `authority=declared_constraint`. Inactive preprocessor regions and Tcl whose
+  control/substitution context cannot be proven literal are diagnostics, not
+  directive facts.
 - **Effective declared** is the winner after deterministic precedence among
   declarations. `directive.effective` means HLSGraph resolved the declarations;
   its metadata explicitly says `tool_applied=false`.
@@ -103,7 +106,7 @@ an achieved csynth value is not silently replaced by a post-route value.
 | `ConstraintSet` | Performance, resource, power, numerical, interface, and XDC intent. |
 | `ArtifactRef` | Kind, URI, SHA-256, size, license, producer, retention, access, and metadata; no required body. |
 | `DesignSnapshot` | Immutable identity over manifest, artifacts, build, target, constraints, toolchain, and extraction profile. |
-| `VariantAction` | A proposed delta from a parent snapshot; it is not proof that the delta was applied or succeeded. |
+| `VariantAction` | A proposed delta from a parent snapshot; it is not proof that the delta was applied or succeeded. Result lineage requires an explicit matching action/parent pair in a new snapshot. |
 
 Snapshot IDs are stable hashes of identity fields, not creation timestamps.
 `created_at` records the ledger event but does not change the ID. Entity and
@@ -130,8 +133,13 @@ both manifest and toolchain snapshot hashes.
 | `VerificationResult` | Independent correctness evidence for a specific method and optional workload. |
 | `ToolRun` | Immutable stage request/result with backend, command, status, failure class, artifacts, and gates. |
 | `KnowledgeRule` | Versioned documentation rule and citation, stored outside design observations. |
-| `PredictionEnvelope` | Model output with model/data/schema version, uncertainty, applicability, and OOD metadata. |
+| `PredictionEnvelope` | Model output with model/data/schema version, uncertainty, applicability, OOD metadata, and an optional action link; it remains outside the fact layer. |
 | `LabelSpec` | Snapshot-scoped ML label reference to a real observation, including stage, unit, mask, and missing/censoring state. |
+
+When a prediction carries `action_id`, that action must belong to the
+prediction's input snapshot. Any result snapshot linked to the action must
+record the same action and parent. These are stored links, not evidence that a
+candidate was applied correctly or improved QoR.
 
 Entity, relation, artifact, predicate, action, backend, and plugin identifiers
 are namespaced strings (for example `amd.vitis.csynth_xml` or

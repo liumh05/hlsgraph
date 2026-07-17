@@ -15,7 +15,7 @@ from hlsgraph.extract import (
     LibClangExtractor,
     VitisReportExtractor,
 )
-from hlsgraph.manifest import minimal_manifest
+from hlsgraph.manifest import load_manifest, minimal_manifest
 from hlsgraph.model import ArtifactRef, AuthorityClass, Stage
 from hlsgraph.sdk import Project
 
@@ -199,6 +199,70 @@ def test_stage_scoped_observations_and_verification_evidence_coexist(golden):
 
     gates = project.service().verification_gates()
     assert gates["correctness"]["status"] == "pass"
+    assert gates["resource_fits"]["status"] == "pass"
+    assert gates["post_route_timing"]["status"] == "fail"
+    assert gates["verified"] is False
+
+
+def test_config_scope_and_cosim_mismatch_trace_through_independent_gates(tmp_path):
+    if not LibClangExtractor.available():
+        pytest.skip("the full AST-to-report fixture requires the hlsgraph[clang] extra")
+    root = tmp_path / "cosim_failure"
+    shutil.copytree(
+        FIXTURE, root,
+        ignore=shutil.ignore_patterns(".hlsgraph", "__pycache__", "*.pyc"),
+    )
+    manifest = load_manifest(root / "hlsgraph.toml")
+    (root / "hlsgraph.cfg").write_text(
+        "syn.directive.unroll = compute_loop,factor=2\n", encoding="utf-8",
+    )
+    manifest.build.config_files = ["hlsgraph.cfg"]
+    manifest.artifact_paths = [
+        item for item in manifest.artifact_paths
+        if item.get("path") != "reports/dut_cosim.rpt"
+    ]
+    manifest.artifact_paths.append({
+        "path": "cases/cosim_fail.rpt",
+        "kind": "amd.vitis.cosim_rpt",
+        "role": "cosim_report",
+        "access": "project",
+        "license": "Apache-2.0",
+        "metadata": {
+            "workload_id": "tb.mismatch",
+            "fixture_authority": "synthetic",
+        },
+    })
+    project = Project(GraphBundle.create(root, manifest))
+    result = project.index()
+    assert result.success is True
+
+    graph = project.service().graph()
+    config_directives = [item for item in graph.entities.values()
+                         if item.kind == "hls.directive"
+                         and item.name == "UNROLL"
+                         and item.attrs.get("origin") == "config"]
+    assert len(config_directives) == 1
+    annotation = next(item for item in graph.relations.values()
+                      if item.kind == "hls.annotates"
+                      and item.src == config_directives[0].id)
+    assert graph.entities[annotation.dst].name == "compute_loop"
+    assert annotation.attrs["scope_node_id"] == annotation.dst
+    config_values = {
+        item.predicate: item for item in
+        project.bundle.store.observations(result.snapshot_id)
+        if item.subject_id == config_directives[0].id
+    }
+    assert config_values["directive.requested"].value == {"factor": 2}
+    assert config_values["directive.effective"].value == {"factor": 2}
+    assert config_values["directive.effective"].metadata["tool_applied"] is False
+
+    verifications = project.bundle.store.verifications(result.snapshot_id)
+    cosim = [item for item in verifications if item["kind"] == "rtl_cosim"]
+    assert len(cosim) == 1
+    assert cosim[0]["status"] == "fail"
+    assert cosim[0]["workload_id"] == "tb.mismatch"
+    gates = project.service().verification_gates()
+    assert gates["correctness"]["status"] == "fail"
     assert gates["resource_fits"]["status"] == "pass"
     assert gates["post_route_timing"]["status"] == "fail"
     assert gates["verified"] is False

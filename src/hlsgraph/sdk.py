@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -37,6 +38,38 @@ DEFAULT_STAGE_ORDER = (
 )
 
 
+def _canonical_extraction_value(value: Any, path: str = "options") -> Any:
+    """Return the exact JSON-domain value used for extraction identity.
+
+    Plugins may read arbitrary option keys and may contribute a runtime
+    identity.  Accepting sets, custom containers, non-string mapping keys, or
+    non-finite floats would make one logical request hash differently across
+    processes (or fail only after work had begun), so the whole extraction
+    profile is normalized before snapshot creation.
+    """
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite float")
+        return value
+    if type(value) in {list, tuple}:
+        return [
+            _canonical_extraction_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise ValueError(f"{path} mapping keys must be strings")
+        return {
+            key: _canonical_extraction_value(value[key], f"{path}.{key}")
+            for key in sorted(value)
+        }
+    raise ValueError(
+        f"{path} must contain only canonical JSON values; got {type(value).__name__}"
+    )
+
+
 @dataclass(slots=True)
 class IndexResult:
     snapshot_id: str
@@ -49,6 +82,8 @@ class IndexResult:
     diagnostics: int
     success: bool
     capabilities: list[str]
+    parent_snapshot_id: str | None = None
+    action_id: str | None = None
 
 
 class Project:
@@ -64,20 +99,64 @@ class Project:
         return cls(GraphBundle.open(project_root))
 
     def index(self, *, degraded: bool = False,
-              options: dict[str, Any] | None = None) -> IndexResult:
+              options: dict[str, Any] | None = None,
+              parent_snapshot_id: str | None = None,
+              action_id: str | None = None) -> IndexResult:
         with self.bundle.execution_lock():
-            return self._index_locked(degraded=degraded, options=options)
+            return self._index_locked(
+                degraded=degraded, options=options,
+                parent_snapshot_id=parent_snapshot_id, action_id=action_id,
+            )
 
     def _index_locked(self, *, degraded: bool = False,
-                      options: dict[str, Any] | None = None) -> IndexResult:
+                      options: dict[str, Any] | None = None,
+                      parent_snapshot_id: str | None = None,
+                      action_id: str | None = None) -> IndexResult:
         self.bundle.refresh_manifest()
-        index_options = dict(options or {})
+        if action_id is not None:
+            if not isinstance(action_id, str) or not action_id.strip():
+                raise ValueError("action_id must be a non-empty string or None")
+            action = self.bundle.store.variant(action_id)
+            if action is None:
+                raise KeyError(action_id)
+            action_parent = action["parent_snapshot_id"]
+            if (parent_snapshot_id is not None
+                    and parent_snapshot_id != action_parent):
+                raise ValueError(
+                    "action_id belongs to a different parent_snapshot_id"
+                )
+            parent_snapshot_id = action_parent
+        if options is not None and type(options) is not dict:
+            raise ValueError("options must be a dictionary with string keys")
+        if (options is not None and "extractor_plugins" in options
+                and not isinstance(options["extractor_plugins"], (list, tuple))):
+            raise ValueError("extractor_plugins must be an ordered list or tuple")
+        index_options = _canonical_extraction_value(options or {})
+        # Semantic no-ops must not create a new extraction profile.  In
+        # particular, CLI adapters naturally produce an empty list for a
+        # repeated --extractor-plugin option while the Python SDK defaults to
+        # no key at all.  Canonicalize both to the same profile so SDK/CLI/REST
+        # consumers agree on snapshot, entity, and graph identities.
+        plugin_option = index_options.get("extractor_plugins")
+        if plugin_option is not None:
+            if not isinstance(plugin_option, (list, tuple)):
+                raise ValueError("extractor_plugins must be an ordered list or tuple")
+            raw_plugin_names = list(plugin_option)
+            if any(not isinstance(item, str) or not item.strip() or item != item.strip()
+                   for item in raw_plugin_names):
+                raise ValueError("extractor plugin names must be non-empty trimmed strings")
+            plugin_names = list(dict.fromkeys(raw_plugin_names))
+            if plugin_names:
+                index_options["extractor_plugins"] = plugin_names
+            else:
+                index_options.pop("extractor_plugins", None)
+        else:
+            plugin_names = []
         source_extractor = RegexSourceExtractor() if degraded else LibClangExtractor()
         extractors = [
             source_extractor, ExternalDirectiveExtractor(), MlirTextExtractor(), LlvmIrExtractor(),
             VitisReportExtractor(), VivadoReportExtractor(),
         ]
-        plugin_names = list(index_options.get("extractor_plugins", []))
         extractors.extend(load_extractors(plugin_names))
         extractor_identities = []
         for item in extractors:
@@ -86,13 +165,17 @@ class Project:
             if callable(runtime_identity):
                 identity["runtime"] = runtime_identity()
             extractor_identities.append(identity)
-        extraction_profile = {
+        extraction_profile = _canonical_extraction_value({
             "profile": "hlsgraph.canonical_index.v1", "degraded": degraded,
             "extractors": extractor_identities,
             "options": index_options,
-        }
+        }, "extraction_profile")
         extraction_hash = stable_hash(extraction_profile)
-        snapshot = self.bundle.snapshot(extraction_hash=extraction_hash)
+        snapshot = self.bundle.snapshot(
+            parent_snapshot_id=parent_snapshot_id,
+            action_id=action_id,
+            extraction_hash=extraction_hash,
+        )
         artifacts = self.bundle.store.artifacts(snapshot.id)
         context = ExtractionContext(
             project_root=self.bundle.project_root, manifest=self.bundle.manifest,
@@ -216,6 +299,8 @@ class Project:
             observations=len(result.observations), derivations=len(result.derivations),
             verifications=len(result.verifications), diagnostics=len(result.diagnostics),
             success=not fatal, capabilities=result.capabilities,
+            parent_snapshot_id=snapshot.parent_snapshot_id,
+            action_id=snapshot.action_id,
         )
 
     def service(self, snapshot_id: str | None = None) -> CoreService:
@@ -247,6 +332,13 @@ class Project:
 
     def compare(self, other_snapshot_id: str) -> dict[str, Any]:
         return self.service().compare(other_snapshot_id)
+
+    def variants(self, *, parent_snapshot_id: str | None = None,
+                 action_id: str | None = None) -> dict[str, Any]:
+        """Read proposed actions and only their explicitly recorded lineage."""
+        return self.service().variants(
+            parent_snapshot_id=parent_snapshot_id, action_id=action_id,
+        )
 
     def record_variant_action(self, action: VariantAction) -> str:
         self.bundle.store.add_variant(action)

@@ -383,6 +383,18 @@ class LedgerStore:
         previous = connection.execute(
             f"SELECT payload_json FROM {table} WHERE id=?", (item_id,)
         ).fetchone()
+        if previous and previous[0] != payload and table == "predictions":
+            # v0.1.x added an optional action_id without changing legacy
+            # prediction identities.  Treat an absent key and an explicit null
+            # as the same payload so a pre-upgrade row can be re-recorded
+            # idempotently after deserialization.
+            old_value = json.loads(previous[0])
+            new_value = json.loads(payload)
+            if old_value.get("action_id") is None and new_value.get("action_id") is None:
+                old_value.pop("action_id", None)
+                new_value.pop("action_id", None)
+                if old_value == new_value:
+                    return True
         if previous and previous[0] != payload:
             raise StoreError(f"immutable {table} row changed: {item_id}")
         return previous is not None
@@ -1079,6 +1091,20 @@ class LedgerStore:
                 ).fetchone()
                 if parent is None or parent[0] != snapshot.project_id:
                     raise StoreError("snapshot parent must exist in the same project")
+            if snapshot.action_id:
+                action = connection.execute(
+                    "SELECT parent_snapshot_id FROM variants WHERE id=?",
+                    (snapshot.action_id,),
+                ).fetchone()
+                # Legacy snapshots may carry an opaque action identifier whose
+                # action row was never imported.  Once a row exists, however,
+                # the action's recorded input snapshot is authoritative for
+                # lineage and must match exactly (including rejecting None).
+                if (action is not None
+                        and snapshot.parent_snapshot_id != action[0]):
+                    raise StoreError(
+                        "snapshot parent_snapshot_id does not match its recorded action"
+                    )
             snapshot_payload = self._payload(snapshot)
             previous_snapshot = connection.execute(
                 "SELECT payload_json FROM snapshots WHERE id=?", (snapshot.id,)
@@ -2026,6 +2052,19 @@ class LedgerStore:
                 raise StoreError("variant actions require a successful parent graph")
             if value.scope_id:
                 self._require_subject(connection, value.parent_snapshot_id, value.scope_id)
+            # Preserve compatibility with opaque legacy snapshot lineage, but
+            # do not allow a subsequently imported action row to contradict
+            # any snapshot that already names that action identifier.
+            for row in connection.execute(
+                "SELECT payload_json FROM snapshots ORDER BY rowid"
+            ).fetchall():
+                snapshot = DesignSnapshot.from_dict(json.loads(row[0]))
+                if (snapshot.action_id == value.id
+                        and snapshot.parent_snapshot_id != value.parent_snapshot_id):
+                    raise StoreError(
+                        "variant action parent_snapshot_id conflicts with existing "
+                        "snapshot lineage"
+                    )
             payload = self._payload(value)
             if self._immutable_payload(connection, "variants", value.id, payload):
                 return
@@ -2034,23 +2073,63 @@ class LedgerStore:
                 (value.id, value.parent_snapshot_id, value.kind, payload),
             )
 
-    def variants(self, parent_snapshot_id: str | None = None) -> list[dict[str, Any]]:
+    def variants(self, parent_snapshot_id: str | None = None, *,
+                 action_id: str | None = None) -> list[dict[str, Any]]:
         with self.read() as connection:
+            clauses = []
+            values: list[str] = []
             if parent_snapshot_id:
-                rows = connection.execute(
-                    "SELECT payload_json FROM variants WHERE parent_snapshot_id=? ORDER BY id",
-                    (parent_snapshot_id,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT payload_json FROM variants ORDER BY id"
-                ).fetchall()
+                clauses.append("parent_snapshot_id=?")
+                values.append(parent_snapshot_id)
+            if action_id:
+                clauses.append("id=?")
+                values.append(action_id)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = connection.execute(
+                f"SELECT payload_json FROM variants{where} ORDER BY id", values,
+            ).fetchall()
             return [json.loads(row[0]) for row in rows]
+
+    def variant(self, action_id: str) -> dict[str, Any] | None:
+        values = self.variants(action_id=action_id)
+        return values[0] if values else None
+
+    def result_snapshots(self, action_id: str, *,
+                         parent_snapshot_id: str | None = None) -> list[DesignSnapshot]:
+        """Return only snapshots with an explicit, matching action lineage.
+
+        Snapshot payloads are decoded instead of name-matched or inferred from
+        graph differences.  Failed index candidates are intentionally retained;
+        callers can use ``has_graph`` to distinguish published graph views.
+        """
+        with self.read() as connection:
+            snapshots = [DesignSnapshot.from_dict(json.loads(row[0])) for row in
+                         connection.execute(
+                             "SELECT payload_json FROM snapshots ORDER BY rowid"
+                         ).fetchall()]
+        return sorted(
+            (item for item in snapshots
+             if item.action_id == action_id
+             and (parent_snapshot_id is None
+                  or item.parent_snapshot_id == parent_snapshot_id)),
+            key=lambda item: item.id,
+        )
 
     def add_prediction(self, value: PredictionEnvelope) -> None:
         value = self._revalidate_model(value, PredictionEnvelope, "prediction")
         with self.write() as connection:
             self._require_subject(connection, value.snapshot_id, value.subject_id)
+            if value.action_id is not None:
+                action = connection.execute(
+                    "SELECT parent_snapshot_id FROM variants WHERE id=?",
+                    (value.action_id,),
+                ).fetchone()
+                if action is None:
+                    raise KeyError(value.action_id)
+                if action[0] != value.snapshot_id:
+                    raise StoreError(
+                        "prediction action must belong to its input snapshot"
+                    )
             payload = self._payload(value)
             if self._immutable_payload(connection, "predictions", value.id, payload):
                 return

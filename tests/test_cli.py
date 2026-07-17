@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 
+import hlsgraph.cli as cli_module
+from hlsgraph import Project
+from hlsgraph.bundle import GraphBundle
 from hlsgraph.cli import build_parser, main
+from hlsgraph.manifest import load_manifest
 
 
 def _invoke(capsys, *argv: str) -> tuple[int, dict]:
@@ -47,6 +53,121 @@ def test_parser_exposes_public_commands() -> None:
     assert args.allow_execution is False
 
 
+def test_init_toml_escapes_user_strings_and_round_trips(tmp_path: Path, capsys) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    name = 'Quoted "demo" \\ laboratory'
+    top = 'dut"variant'
+    code, result = _invoke(
+        capsys, "init", "--project", str(tmp_path), "--project-id", "test.quoted_init",
+        "--name", name, "--top", top, "--source", "kernel.cpp",
+    )
+    assert code == 0, result
+    manifest = load_manifest(tmp_path / "hlsgraph.toml")
+    assert manifest.name == name
+    assert manifest.build.top == top
+    assert Project.open(tmp_path).bundle.manifest.name == name
+
+
+def test_init_validates_before_atomic_manifest_replacement(tmp_path: Path, capsys) -> None:
+    manifest_path = tmp_path / "hlsgraph.toml"
+    original = "# existing user manifest\n"
+    manifest_path.write_text(original, encoding="utf-8")
+    code, result = _invoke(
+        capsys, "init", "--project", str(tmp_path), "--force",
+        "--project-id", "invalid project id", "--name", "invalid",
+        "--top", "dut", "--source", "kernel.cpp",
+    )
+    assert code == 1
+    assert result["type"] in {"ManifestError", "ValueError"}
+    assert manifest_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".hlsgraph").exists()
+
+
+def test_init_failure_rolls_back_new_bundle_and_preserves_manifest(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "hlsgraph.toml"
+    original = "# existing user manifest\n"
+    manifest_path.write_text(original, encoding="utf-8")
+
+    def broken_create(cls, project_root, manifest, **kwargs):
+        partial = Path(project_root) / ".hlsgraph"
+        (partial / "partial-state").write_text("incomplete", encoding="utf-8")
+        raise sqlite3.OperationalError("simulated database initialization failure")
+
+    monkeypatch.setattr(GraphBundle, "create", classmethod(broken_create))
+    code, result = _invoke(
+        capsys, "init", "--project", str(tmp_path), "--force",
+        "--project-id", "test.rollback", "--name", "rollback",
+        "--top", "dut", "--source", "kernel.cpp",
+    )
+    assert code == 1
+    assert result["type"] == "CliError"
+    assert manifest_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".hlsgraph").exists()
+
+
+def test_init_refuses_existing_ledger_without_leaving_alternate_manifest(
+    tmp_path: Path, capsys,
+) -> None:
+    root = _indexed_project(tmp_path, capsys)
+    snapshot_id = Project.open(root).bundle.latest_snapshot().id
+    alternate = root / "alternate.toml"
+    code, result = _invoke(
+        capsys, "init", "--project", str(root), "--force",
+        "--manifest", alternate.name, "--project-id", "test.alternate",
+        "--name", "alternate", "--top", "dut", "--source", "kernel.cpp",
+    )
+    assert code == 1
+    assert "will not replace" in result["error"]
+    assert not alternate.exists()
+    assert Project.open(root).bundle.latest_snapshot().id == snapshot_id
+
+
+def test_init_rollback_never_deletes_a_peer_replacement(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    def peer_replaces_claim(cls, project_root, manifest, **kwargs):
+        bundle = Path(project_root) / ".hlsgraph"
+        shutil.rmtree(bundle)
+        bundle.mkdir()
+        (bundle / "peer-owned").write_text("keep", encoding="utf-8")
+        raise sqlite3.OperationalError("simulated concurrent replacement")
+
+    monkeypatch.setattr(GraphBundle, "create", classmethod(peer_replaces_claim))
+    code, result = _invoke(
+        capsys, "init", "--project", str(tmp_path),
+        "--project-id", "test.peer", "--name", "peer",
+        "--top", "dut", "--source", "kernel.cpp",
+    )
+    assert code == 1
+    assert "could not be removed" in result["error"]
+    assert (tmp_path / ".hlsgraph/peer-owned").read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "hlsgraph.toml").exists()
+
+
+def test_init_owner_marker_failure_removes_only_the_claimed_empty_directory(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    original_claim = cli_module._claim_owner_file
+
+    def fail_owner_marker(path, token):
+        if path.name == ".init-owner":
+            raise PermissionError("simulated owner marker failure")
+        return original_claim(path, token)
+
+    monkeypatch.setattr(cli_module, "_claim_owner_file", fail_owner_marker)
+    code, result = _invoke(
+        capsys, "init", "--project", str(tmp_path),
+        "--project-id", "test.marker", "--name", "marker",
+        "--top", "dut", "--source", "kernel.cpp",
+    )
+    assert code == 1
+    assert result["type"] == "CliError"
+    assert not (tmp_path / ".hlsgraph").exists()
+    assert not (tmp_path / "hlsgraph.toml").exists()
+
+
 def test_cli_init_index_query_status_render_and_export(tmp_path: Path, capsys) -> None:
     root = _indexed_project(tmp_path, capsys)
 
@@ -76,6 +197,19 @@ def test_cli_init_index_query_status_render_and_export(tmp_path: Path, capsys) -
     assert code == 0
     exported = json.loads(Path(result["output"]).read_text(encoding="utf-8"))
     assert "graph" in exported or "entities" in exported
+
+
+def test_default_cli_and_sdk_index_share_canonical_identity(tmp_path: Path, capsys) -> None:
+    root = _indexed_project(tmp_path, capsys)
+    sdk_result = Project.open(root).index(degraded=True)
+    assert sdk_result.success
+
+    code, cli_result = _invoke(
+        capsys, "index", "--project", str(root), "--degraded", "--force",
+    )
+    assert code == 0
+    assert cli_result["snapshot_id"] == sdk_result.snapshot_id
+    assert cli_result["graph_hash"] == sdk_result.graph_hash
 
 
 def test_run_requires_explicit_backend_and_execution_acknowledgement(

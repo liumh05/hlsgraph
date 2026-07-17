@@ -364,5 +364,6 @@ def test_optional_fastmcp_registers_only_read_tools(indexed_bundle):
     registered = {item.name for item in asyncio.run(server.list_tools())}
     assert registered == {
         "overview", "search", "context", "module_or_region", "traverse", "impact",
-        "evidence", "compare", "health", "runs", "predictions", "render", "knowledge",
+        "evidence", "compare", "health", "runs", "predictions", "variants",
+        "render", "knowledge",
     }

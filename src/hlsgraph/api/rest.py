@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..bundle import GraphBundle
+from ..diagnostic_projection import public_diagnostic
 from ..model import json_ready, stable_hash
 from ..query import CoreService, ExploreSpec, QuerySpec
 from ..run_projection import (
@@ -212,7 +213,7 @@ class RestApplication:
                             "runs": len(self.bundle.store.runs(selected.id)),
                             "observations": len(self.bundle.store.observations(selected.id)),
                             "diagnostic_history": len(self.bundle.store.diagnostics(selected.id)),
-                            "diagnostics": [json_ready(item) for item in
+                            "diagnostics": [public_diagnostic(item) for item in
                                             self.bundle.store.diagnostics(selected.id)],
                             "completeness": "unavailable",
                         })
@@ -247,7 +248,9 @@ class RestApplication:
                     severity = _one(params, "severity")
                     if severity:
                         values = [item for item in values if str(item.severity) == severity]
-                    return self._ok(self._page(snapshot_key, values, params))
+                    return self._ok(self._page(
+                        snapshot_key, [public_diagnostic(item) for item in values], params,
+                    ))
                 values = self.bundle.store.runs(snapshot_key) if snapshot_key else []
                 stage = _one(params, "stage")
                 status = _one(params, "status")
@@ -336,7 +339,9 @@ class RestApplication:
             severity = _one(params, "severity")
             if severity:
                 values = [item for item in values if str(item.severity) == severity]
-            return self._ok(self._page(service.snapshot_id, values, params))
+            return self._ok(self._page(
+                service.snapshot_id, [public_diagnostic(item) for item in values], params,
+            ))
         if route == "/runs":
             values = self.bundle.store.runs(service.snapshot_id)
             stage = _one(params, "stage")
@@ -375,11 +380,17 @@ class RestApplication:
                 service.snapshot_id, self.bundle.store.predictions(service.snapshot_id), params
             ))
         if route == "/variants":
-            parent = _one(params, "parent_snapshot_id") or service.snapshot_id
-            return self._ok(self._page(
-                service.snapshot_id,
-                self.bundle.store.variants(parent), params
-            ))
+            lineage = service.variants(
+                parent_snapshot_id=_one(params, "parent_snapshot_id"),
+                action_id=_one(params, "action_id"),
+            )
+            response = self._page(service.snapshot_id, lineage["items"], params)
+            response.update({
+                "parent_snapshot_id": lineage["parent_snapshot_id"],
+                "record_class": lineage["record_class"],
+                "lineage_semantics": lineage["lineage_semantics"],
+            })
+            return self._ok(response)
         if route == "/knowledge":
             from ..knowledge import filter_rules
             applicability = {key: value for key, value in {
@@ -442,7 +453,9 @@ def openapi_document() -> dict[str, Any]:
         "/api/v1/entities": ("entities", "List or search canonical entities"),
         "/api/v1/entities/{entity_id}": ("entity", "Read one canonical entity"),
         "/api/v1/observations": ("observations", "Tool observations with stage and authority"),
-        "/api/v1/diagnostics": ("diagnostics", "Extraction and tool diagnostics"),
+        "/api/v1/diagnostics": (
+            "diagnostics", "Redacted extraction and tool diagnostic summaries",
+        ),
         "/api/v1/runs": ("runs", "Immutable tool-run ledger entries"),
         "/api/v1/artifacts": ("artifacts", "Content-addressed artifact metadata without private bodies"),
         "/api/v1/artifacts/{artifact_id}": ("artifact", "Read one artifact metadata record"),
@@ -485,6 +498,7 @@ def openapi_document() -> dict[str, Any]:
         ],
         "/api/v1/variants": [
             ("parent_snapshot_id", False, "string", "parent snapshot; defaults to selected"),
+            ("action_id", False, "string", "exact recorded variant action ID"),
         ],
         "/api/v1/knowledge": [
             ("q", False, "string", "rule title/summary/section search"),

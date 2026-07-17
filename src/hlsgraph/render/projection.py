@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from ..diagnostic_projection import redacted_diagnostic_record
 from ..graph import CanonicalGraph
 from ..model import Diagnostic, DiagnosticSeverity, Observation, json_ready, stable_hash
 
@@ -91,6 +92,11 @@ def _scope(graph: CanonicalGraph, scope_id: str | None) -> set[str]:
 
 def to_render_data(graph: CanonicalGraph, observations: list[Observation],
                    diagnostics: list[Diagnostic], *, scope_id: str | None = None) -> dict[str, Any]:
+    # Rendering is a public output surface even when invoked directly through
+    # the SDK.  Normalize at the lowest shared boundary so HTML/JSON/static
+    # formats cannot accidentally serialize vendor/plugin diagnostic details.
+    diagnostics = [projected for item in diagnostics
+                   if (projected := redacted_diagnostic_record(item)) is not None]
     allowed = _scope(graph, scope_id)
     dataflow = [item for item in graph.relations.values()
                 if _is_hardware_dataflow(item)

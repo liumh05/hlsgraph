@@ -107,8 +107,15 @@ PUBLIC_BOUNDARY_SHORT_EXCLUSIONS = frozenset({
 REQUIRED_SDIST = {
     "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
     "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "DCO", "CITATION.cff",
-    "sbom.spdx.json", "docs/references.md", "docs/privacy-and-security.md",
+    "sbom.spdx.json", "docs/references.md",
+    "docs/privacy-and-security.md",
 }
+RELEASE_VERSION = "0.1.2"
+ELK_SOURCE_REVISIONS = frozenset({
+    "a8304cf79fde75bc2ab1a89d28320f53f8637436",
+    "62d5909f96fad541bc101ad52dabaece6b7eab7e",
+    "7ca51784e42a24201f29bc13e458728b6fc61cdc",
+})
 SOURCE_SKIP_DIRS = frozenset({
     ".git", ".hlsgraph", ".mypy_cache", ".nox", ".packaging-test",
     ".pytest_cache", ".ruff_cache", ".tox", ".venv", ".wheel-test",
@@ -203,6 +210,42 @@ def _audit_sbom(sbom_data: bytes, root: Path) -> list[str]:
         return [f"invalid root SBOM: {exc}"]
     if sbom.get("spdxVersion") != "SPDX-2.3":
         issues.append("root SBOM is not SPDX-2.3")
+    if sbom.get("name") != f"hlsgraph-{RELEASE_VERSION}":
+        issues.append("root SBOM release name does not match the package version")
+
+    packages = {
+        item.get("SPDXID"): item for item in sbom.get("packages", [])
+        if isinstance(item, dict) and isinstance(item.get("SPDXID"), str)
+    }
+    hlsgraph = packages.get("SPDXRef-Package-HLSGraph", {})
+    if hlsgraph.get("versionInfo") != RELEASE_VERSION:
+        issues.append("root SBOM HLSGraph package version is stale")
+    elkjs = packages.get("SPDXRef-Package-ELKJS", {})
+    source_info = elkjs.get("sourceInfo")
+    external_refs = elkjs.get("externalRefs")
+    source_text = source_info if isinstance(source_info, str) else ""
+    ref_text = " ".join(
+        item.get("referenceLocator", "") for item in external_refs or []
+        if isinstance(item, dict) and isinstance(item.get("referenceLocator"), str)
+    )
+    missing_revisions = sorted(
+        revision for revision in ELK_SOURCE_REVISIONS
+        if revision not in source_text or revision not in ref_text
+    )
+    if missing_revisions:
+        issues.append(
+            "SBOM elkjs corresponding-source lineage is incomplete: "
+            + ", ".join(missing_revisions)
+        )
+    try:
+        notice_text = (root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    except OSError as exc:
+        issues.append(f"cannot read THIRD_PARTY_NOTICES.md: {exc}")
+    else:
+        if any(revision not in notice_text for revision in ELK_SOURCE_REVISIONS):
+            issues.append("THIRD_PARTY_NOTICES.md lacks exact elkjs/ELK source revisions")
+        if "corresponding source availability" not in notice_text.casefold():
+            issues.append("THIRD_PARTY_NOTICES.md lacks an EPL source-availability section")
 
     file_data: dict[str, tuple[str, bytes]] = {}
     for item in sbom.get("files", []):
@@ -257,8 +300,8 @@ def _audit_wheel_metadata(data: bytes) -> list[str]:
     """Validate core metadata using RFC-aware parsing (LF and CRLF safe)."""
     issues: list[str] = []
     metadata = BytesParser(policy=policy.compat32).parsebytes(data)
-    if metadata.get("Version") != "0.1.1":
-        issues.append("wheel metadata is not final v0.1.1")
+    if metadata.get("Version") != RELEASE_VERSION:
+        issues.append(f"wheel metadata is not final v{RELEASE_VERSION}")
     urls = metadata.get_all("Project-URL", [])
     if not any("https://github.com/liumh05/hlsgraph" in url for url in urls):
         issues.append("wheel metadata has stale repository URLs")
@@ -363,15 +406,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
     root_sbom = (root / "sbom.spdx.json").read_bytes()
-    wheels = sorted(args.dist.glob("hlsgraph-0.1.1-*.whl"))
-    sdists = sorted(args.dist.glob("hlsgraph-0.1.1.tar.gz"))
+    wheels = sorted(args.dist.glob(f"hlsgraph-{RELEASE_VERSION}-*.whl"))
+    sdists = sorted(args.dist.glob(f"hlsgraph-{RELEASE_VERSION}.tar.gz"))
     issues = _audit_source_tree(root) + _audit_sbom(root_sbom, root)
     if len(wheels) != 1:
-        issues.append(f"expected one v0.1.1 wheel, found {len(wheels)}")
+        issues.append(f"expected one v{RELEASE_VERSION} wheel, found {len(wheels)}")
     else:
         issues.extend(_audit_wheel(wheels[0], root, root_sbom))
     if len(sdists) != 1:
-        issues.append(f"expected one v0.1.1 sdist, found {len(sdists)}")
+        issues.append(f"expected one v{RELEASE_VERSION} sdist, found {len(sdists)}")
     else:
         issues.extend(_audit_sdist(sdists[0], root_sbom))
     if issues:

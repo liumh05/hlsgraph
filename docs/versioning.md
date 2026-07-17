@@ -134,7 +134,8 @@ vendor result.
 
 Prediction IDs cover every field that changes prediction meaning: snapshot and
 subject, predicate, model and model version, input schema, trainset hash, value
-and unit, uncertainty, applicability, OOD assessment, and semantic metadata.
+and unit, uncertainty, applicability, OOD assessment, semantic metadata, and
+an optional linked action ID.
 `created_at` is event-time metadata rather than prediction semantics and is not
 an identity input. Changing any semantic field creates a distinct immutable
 `PredictionEnvelope`; predictions never reuse observation or fact authority.

@@ -582,6 +582,22 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     predictions_by_snapshot = {
         key: bundle.store.predictions(key) for key in sorted(declared_snapshots)
     }
+    snapshots_by_id = {
+        key: bundle.store.snapshot(key) for key in sorted(declared_snapshots)
+    }
+    variants_by_id = {
+        item["id"]: item
+        for key in sorted(declared_snapshots)
+        for item in bundle.store.variants(key)
+    }
+    # A result-only export still retains the recorded action that produced its
+    # snapshot.  Missing legacy action rows remain missing; an action is never
+    # reconstructed from a diff or guessed from its opaque identifier.
+    for snapshot in snapshots_by_id.values():
+        if snapshot.action_id and snapshot.action_id not in variants_by_id:
+            action = bundle.store.variant(snapshot.action_id)
+            if action is not None:
+                variants_by_id[action["id"]] = action
     runs_by_snapshot = {
         key: bundle.store.runs(key) for key in sorted(declared_snapshots)
     }
@@ -789,6 +805,55 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
                      for item in sorted(artifacts_by_snapshot[key], key=lambda item: item.id)]
     prediction_rows = [item for key in sorted(predictions_by_snapshot)
                        for item in predictions_by_snapshot[key]]
+    exported_prediction_ids = {item["id"] for item in prediction_rows}
+    exported_node_ids_by_snapshot = {
+        key: {item["node_id"] for item in node_rows if item["snapshot_id"] == key}
+        for key in sorted(declared_snapshots)
+    }
+    variant_rows = []
+    for action in sorted(variants_by_id.values(), key=lambda item: item["id"]):
+        parent_id = action["parent_snapshot_id"]
+        parent_exported = parent_id in declared_snapshots
+        prediction_ids = sorted(
+            item["id"] for item in predictions_by_snapshot.get(parent_id, [])
+            if item.get("action_id") == action["id"]
+            and item["id"] in exported_prediction_ids
+        )
+        result_snapshots = bundle.store.result_snapshots(
+            action["id"], parent_snapshot_id=parent_id,
+        )
+        result_ids = [
+            item.id for item in result_snapshots if item.id in declared_snapshots
+        ]
+        public_action = {
+            "id": action["id"],
+            "parent_snapshot_id": parent_id,
+            "prediction_ids": prediction_ids,
+            "result_snapshot_ids": result_ids,
+            "details_exported": parent_exported,
+        }
+        if parent_exported:
+            scope_id = action.get("scope_id")
+            scope_exported = bool(
+                scope_id
+                and scope_id in exported_node_ids_by_snapshot.get(parent_id, set())
+            )
+            public_action.update({
+                "kind": action["kind"],
+                "scope_present": scope_id is not None,
+                "scope_exported": scope_exported,
+                "delta_sha256": stable_hash(action.get("delta", {})),
+            })
+            if scope_exported:
+                public_action["scope_id"] = scope_id
+            elif scope_id is not None:
+                public_action["scope_id_sha256"] = stable_hash(scope_id)
+        variant_rows.append(public_action)
+    snapshot_lineage_rows = [{
+        "snapshot_id": key,
+        "parent_snapshot_id": snapshots_by_id[key].parent_snapshot_id,
+        "action_id": snapshots_by_id[key].action_id,
+    } for key in sorted(snapshots_by_id)]
     run_rows = [_public_run(item) for key in sorted(runs_by_snapshot)
                 for item in sorted(runs_by_snapshot[key], key=lambda value: value.id)]
 
@@ -821,6 +886,12 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         # Predictions remain a physically separate table and can never satisfy a
         # label or observation lookup.
         "predictions": _write_jsonl(output_dir / "predictions.jsonl", prediction_rows),
+        # Proposed actions and snapshot lineage are separate from both static
+        # input features and real-tool truth tables.
+        "variants": _write_jsonl(output_dir / "variants.jsonl", variant_rows),
+        "snapshot_lineage": _write_jsonl(
+            output_dir / "snapshot_lineage.jsonl", snapshot_lineage_rows,
+        ),
     }
     feature_spec = {
         "schema_version": SCHEMA_VERSION,
@@ -835,6 +906,36 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         "provenance_tables": ["runs", "artifacts"],
         "provenance_tables_are_input_features": False,
         "prediction_table": "predictions",
+        "variant_table": "variants",
+        "snapshot_lineage_table": "snapshot_lineage",
+        "action_lineage_contract": (
+            "variant and prediction links use stored action_id values; only declared result "
+            "snapshots and exported prediction rows are linked; result snapshots are listed "
+            "only when their immutable payload records the same action and parent"
+        ),
+        "variant_public_projection": {
+            "mode": "minimal_positive_allowlist",
+            "always_fields": [
+                "id", "parent_snapshot_id", "prediction_ids",
+                "result_snapshot_ids", "details_exported",
+            ],
+            "declared_parent_fields": [
+                "kind", "scope_present", "scope_exported", "scope_id",
+                "scope_id_sha256", "delta_sha256",
+            ],
+            "omitted_sensitive_fields": [
+                "delta", "rationale", "proposer", "created_at",
+            ],
+            "undeclared_parent_policy": "opaque_lineage_stub",
+            "scope_policy": (
+                "raw scope_id is emitted only when it names an exported node; otherwise "
+                "only presence and a one-way hash are retained"
+            ),
+            "action_payload_policy": (
+                "delta is represented only by delta_sha256; rationale and proposer are omitted"
+            ),
+        },
+        "action_lineage_tables_are_input_features": False,
         "label_contract": (
             "present labels reference same-snapshot complete observations from successful "
             "fresh real-tool runs and stage-compatible typed retained reports; values are "
@@ -887,6 +988,8 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         "snapshots": {
             key: {
                 "graph_hash": graphs[key].graph_hash,
+                "parent_snapshot_id": snapshots_by_id[key].parent_snapshot_id,
+                "action_id": snapshots_by_id[key].action_id,
                 "target_profile": _public_target(
                     snapshot_manifests[key].target, artifacts_by_snapshot[key]
                 ),

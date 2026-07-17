@@ -2,17 +2,18 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "hlsgraph-0.1.1",
-  "documentNamespace": "https://github.com/liumh05/hlsgraph/sbom/0.1.1",
+  "name": "hlsgraph-0.1.2",
+  "documentNamespace": "https://github.com/liumh05/hlsgraph/sbom/0.1.2",
+  "comment": "Scope: files shipped by the base HLSGraph distribution, vendored components, and mandatory runtime dependencies. Optional, build, and development dependencies are separately disclosed in THIRD_PARTY_NOTICES.md and are not represented as base-package dependencies because they are not installed or bundled by the base package.",
   "creationInfo": {
-    "created": "2026-07-16T16:51:33Z",
+    "created": "2026-07-16T21:57:59Z",
     "creators": ["Tool: HLSGraph repository audit"]
   },
   "packages": [
     {
       "name": "hlsgraph",
       "SPDXID": "SPDXRef-Package-HLSGraph",
-      "versionInfo": "0.1.1",
+      "versionInfo": "0.1.2",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
@@ -31,7 +32,7 @@
       "packageVerificationCode": {
         "packageVerificationCodeValue": "abc71e329d522da6f3c7fd6d0bc617582d2e002b"
       },
-      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium",
+      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium; Copyright (c) 2013-2014 Ralf S. Engelschall; Copyright Gaetan Renaudeau; Copyright Koen Bok",
       "hasFiles": ["SPDXRef-File-Cytoscape"]
     },
     {
@@ -43,6 +44,29 @@
       "licenseConcluded": "EPL-2.0 AND Apache-2.0",
       "licenseDeclared": "EPL-2.0",
       "licenseInfoFromFiles": ["Apache-2.0", "EPL-2.0"],
+      "sourceInfo": "The exact elkjs 0.9.3 wrapper/build revision is a8304cf79fde75bc2ab1a89d28320f53f8637436. The official release identifies ELK v0.9.1 at 62d5909f96fad541bc101ad52dabaece6b7eab7e as its baseline and includes ELK PR 955 merge commit 7ca51784e42a24201f29bc13e458728b6fc61cdc. Source availability and reconstruction instructions are in THIRD_PARTY_NOTICES.md.",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/elkjs@0.9.3"
+        },
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "vcs",
+          "referenceLocator": "https://github.com/kieler/elkjs/commit/a8304cf79fde75bc2ab1a89d28320f53f8637436"
+        },
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "vcs",
+          "referenceLocator": "https://github.com/eclipse-elk/elk/commit/62d5909f96fad541bc101ad52dabaece6b7eab7e"
+        },
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "vcs",
+          "referenceLocator": "https://github.com/eclipse-elk/elk/commit/7ca51784e42a24201f29bc13e458728b6fc61cdc"
+        }
+      ],
       "packageVerificationCode": {
         "packageVerificationCodeValue": "4a9b937193343bca0f05aa080e147cb47005fd5b"
       },
@@ -70,7 +94,7 @@
       }],
       "licenseConcluded": "MIT",
       "licenseInfoInFiles": ["MIT"],
-      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium"
+      "copyrightText": "Copyright (c) 2016-2024, The Cytoscape Consortium; Copyright (c) 2013-2014 Ralf S. Engelschall; Copyright Gaetan Renaudeau; Copyright Koen Bok"
     },
     {
       "fileName": "./src/hlsgraph/render/vendor/elk.bundled.js",

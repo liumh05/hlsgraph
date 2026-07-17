@@ -26,6 +26,7 @@ def to_html(data: dict[str, Any]) -> str:
 _TEMPLATE = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<link rel="icon" href="data:,"/>
 <title>HLSGraph architecture view</title>
 <style>
 :root{--bg:#f7f8fa;--bar:#171a21;--barfg:#f1f3f5;--panel:#fff;--fg:#17202a;--muted:#687384;
@@ -62,7 +63,7 @@ const edgeWidth=d=>Math.max(1.5,Math.min(7,1.2+1.4*Math.log2((Number(d)||1)+1)))
 const color=n=>n.is_bottleneck?css('--bottleneck'):(n.category==='compute'?css('--compute'):css('--mem'));
 const NODE_W=132,NODE_H=48;
 const elements={nodes:DATA.nodes.map(n=>({data:{...n,color:color(n)}})),edges:DATA.edges.map(e=>({data:{...e,width_hint:edgeWidth(e.fifo_depth)}}))};
-const cy=cytoscape({container:document.getElementById('cy'),elements,wheelSensitivity:.22,boxSelectionEnabled:false,style:[
+const cy=cytoscape({container:document.getElementById('cy'),elements,boxSelectionEnabled:false,style:[
 {selector:'node',style:{width:NODE_W,height:NODE_H,shape:'round-rectangle',label:e=>{const ii=e.data('metrics').achieved_II;return e.data('label')+(ii!=null?'\nII '+ii:'')},'font-size':11,'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':NODE_W-12,'line-height':1.15,color:'#fff','background-color':'data(color)','border-width':1.5,'border-color':css('--border')}},
 {selector:'node[?is_bottleneck]',style:{'border-width':4,'border-color':'#7d1713'}},{selector:'edge',style:{width:'data(width_hint)','curve-style':'taxi','taxi-direction':'horizontal','taxi-turn':'50%','line-color':css('--edge'),'target-arrow-color':css('--edge'),'target-arrow-shape':'triangle','arrow-scale':1.05,opacity:.86}},
 {selector:'edge[type="CONTAINS"]',style:{'line-style':'dashed',width:1.3}},{selector:'edge.showlabel',style:{label:e=>e.data('fifo_depth')==null?e.data('type'):'FIFO '+e.data('fifo_depth'),'font-size':10,color:css('--fg'),'text-background-color':css('--panel'),'text-background-opacity':.92,'text-background-padding':2}},

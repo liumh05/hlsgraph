@@ -127,7 +127,9 @@ quotes. See [the knowledge pack policy](governance/KNOWLEDGE_PACK_POLICY.md).
   unsound snapshot.
 - **Directives:** inline pragmas, Tcl, and config declarations are normalized,
   scoped, and resolved by declared precedence. Declared effectiveness is not
-  the same as proof that a tool applied the directive.
+  the same as proof that a tool applied the directive. Inactive source regions,
+  Tcl control blocks, command substitutions, and other non-literal contexts are
+  diagnostic-only rather than guessed declarations.
 - **MLIR/HLS IR:** text adapters preserve dialect operation and location
   evidence. Hardware/dataflow projection occurs only for supported semantics,
   such as explicit Handshake relations; generic SSA flow is not promoted to

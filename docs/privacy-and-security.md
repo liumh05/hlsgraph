@@ -28,6 +28,15 @@ Project-relative paths, symbol names, hashes, commands, diagnostics, report
 values, and source spans can themselves be sensitive. Treat `.hlsgraph/` and
 all exports as project data even when no source body is present.
 
+Diagnostic messages, remediation guidance, and extension metadata remain raw
+only in the trusted local bundle. Public CoreService query results, CLI status,
+REST, and MCP expose a positive diagnostic projection: stable IDs, code,
+severity, stage, safe evidence anchor, and a `detail_sha256` correlation digest.
+They set `detail_redacted=true` and replace the message with fixed generic text;
+raw guidance and metadata are omitted. An operator with local bundle access can
+look up the diagnostic ID to inspect the original details. This projection is a
+disclosure boundary, not a claim that `.hlsgraph/` itself is non-sensitive.
+
 Public source/IR anchor strings are bounded. Embedded host-absolute Windows,
 UNC, rooted-Windows, and POSIX paths are replaced at construction by a stable
 `redacted.sha256:<digest>` marker that contains none of the original path; a
@@ -85,7 +94,8 @@ mean non-sensitive.
 ## MCP deployment
 
 MCP tools are read-only with respect to graph facts and predictions. They can
-return symbol names, artifact metadata, observations, diagnostics, and an HTML
+return symbol names, artifact metadata, observations, redacted diagnostic
+summaries, and an HTML
 or text rendering. Configure the MCP process with the minimum filesystem access
 needed for the selected bundle, and do not assume the LLM/client is authorized
 for every project on the host.

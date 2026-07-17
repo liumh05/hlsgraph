@@ -25,6 +25,7 @@ from .base import ExtractionContext, ExtractionResult
 
 
 _TCL_DIRECTIVE = re.compile(r"^\s*set_directive_([A-Za-z0-9_]+)\s+(.+?)\s*$", re.I)
+_TCL_DIRECTIVE_MARKER = re.compile(r"\bset_directive_[A-Za-z0-9_]*", re.I)
 _CONFIG_DIRECTIVE = re.compile(r"^\s*(?:syn\.)?directive\.([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$", re.I)
 
 
@@ -75,6 +76,155 @@ def _tcl_tokens(text: str) -> list[str]:
         return shlex.split(text.replace("{", '"').replace("}", '"'), posix=True)
     except ValueError:
         return text.split()
+
+
+def _advance_tcl_lexical_state(
+    text: str, state: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], bool]:
+    """Advance a conservative Tcl ``brace/quote/bracket`` context stack.
+
+    The stack is intentionally lexical rather than evaluative.  An open frame
+    means the next physical line cannot be proven to start a top-level command.
+    ``malformed`` records an unmatched closing delimiter and permanently moves
+    the file into fail-closed mode.
+    """
+    frames = list(state)
+    escaped = False
+    malformed = False
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        current = frames[-1] if frames else None
+        if current == "brace":
+            if char == "{":
+                frames.append("brace")
+            elif char == "}":
+                frames.pop()
+            continue
+        if current == "quote":
+            if char == '"':
+                frames.pop()
+            elif char == "[":
+                # Command substitution is parsed as a nested Tcl script and
+                # returns to the surrounding quote after its closing bracket.
+                frames.append("bracket")
+            continue
+
+        # Top-level script text and bracket command substitutions share the
+        # same word-level delimiter rules.
+        if char == "{":
+            frames.append("brace")
+        elif char == '"':
+            frames.append("quote")
+        elif char == "[":
+            frames.append("bracket")
+        elif char == "]":
+            if current == "bracket":
+                frames.pop()
+            else:
+                malformed = True
+        elif char == "}":
+            malformed = True
+    return tuple(frames), malformed
+
+
+def _tcl_line_profile(text: str) -> dict[str, Any]:
+    """Return the small lexical profile needed by the literal Tcl policy.
+
+    This is deliberately not a Tcl interpreter.  Its only purpose is to prove
+    that a candidate is one complete, top-level command made from literal
+    words.  Anything requiring Tcl evaluation remains diagnostic-only.
+    """
+    brace_depth = 0
+    minimum_brace_depth = 0
+    quote = False
+    escaped = False
+    semicolon = False
+    substitution = False
+    unsupported_quote = False
+    backslash = False
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            backslash = True
+            escaped = True
+            continue
+        if quote:
+            if char == '"':
+                quote = False
+            elif char in {"$", "["}:
+                substitution = True
+            continue
+        if char == '"' and brace_depth == 0:
+            quote = True
+        elif char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth -= 1
+            minimum_brace_depth = min(minimum_brace_depth, brace_depth)
+        elif brace_depth == 0 and char == ";":
+            semicolon = True
+        elif brace_depth == 0 and char in {"$", "["}:
+            substitution = True
+        elif brace_depth == 0 and char == "'":
+            # A single quote has no grouping semantics in Tcl, while shlex
+            # would interpret it as a quote.  Reject it rather than parse a
+            # different command from the one Tcl would execute.
+            unsupported_quote = True
+    lexical_state, lexical_malformed = _advance_tcl_lexical_state(text)
+    return {
+        "brace_delta": brace_depth,
+        "minimum_brace_depth": minimum_brace_depth,
+        "quote_unclosed": quote,
+        "semicolon": semicolon,
+        "substitution": substitution,
+        "unsupported_quote": unsupported_quote,
+        "backslash": backslash,
+        "lexical_open": bool(lexical_state),
+        "lexical_malformed": lexical_malformed,
+    }
+
+
+def _tcl_literal_rejection(
+    text: str, *, lexical_context_open: bool, continued_from_previous: bool,
+    structure_uncertain: bool,
+) -> str | None:
+    """Explain why a Tcl directive cannot be asserted as a declaration."""
+    if structure_uncertain:
+        return "uncertain_script_structure"
+    if continued_from_previous:
+        return "continued_command"
+    if lexical_context_open:
+        return "nested_script_context"
+    if not _TCL_DIRECTIVE.match(text):
+        return "embedded_or_constructed_command"
+    profile = _tcl_line_profile(text)
+    if (profile["lexical_open"] or profile["lexical_malformed"]
+            or profile["brace_delta"] != 0
+            or profile["minimum_brace_depth"] < 0
+            or profile["quote_unclosed"]):
+        return "incomplete_command"
+    if profile["semicolon"]:
+        return "multiple_commands"
+    if profile["substitution"] or re.search(r"(?:^|\s)\{\*\}", text):
+        return "dynamic_substitution"
+    if profile["backslash"]:
+        return "escape_or_continuation"
+    if profile["unsupported_quote"]:
+        return "unsupported_quoting"
+    return None
+
+
+def _tcl_continues(text: str) -> bool:
+    stripped = text.rstrip()
+    trailing = len(stripped) - len(stripped.rstrip("\\"))
+    return bool(trailing % 2)
 
 
 def _parse_options(tokens: list[str]) -> tuple[dict[str, Any], str | None]:
@@ -131,6 +281,7 @@ class ExternalDirectiveExtractor:
         sources = [(path, "tcl", 30) for path in context.manifest.build.tcl_files]
         sources += [(path, "config", 20) for path in context.manifest.build.config_files]
         count = 0
+        ambiguous_tcl = 0
         for relative, origin, precedence in sources:
             artifact = context.artifact_for_uri(relative)
             path = project_path(context.project_root, relative)
@@ -142,8 +293,60 @@ class ExternalDirectiveExtractor:
                     stage=Stage.SOURCE.value, artifact_id=artifact.id if artifact else None,
                 ))
                 continue
-            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                line = _strip_comment(line)
+            tcl_lexical_state: tuple[str, ...] = ()
+            tcl_continued = False
+            tcl_structure_uncertain = False
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line_number, raw_line in enumerate(lines, 1):
+                line = _strip_comment(raw_line)
+                if origin == "tcl":
+                    lexical_state_before = tcl_lexical_state
+                    continued_from_previous = tcl_continued
+                    uncertain_before = tcl_structure_uncertain
+                    tcl_lexical_state, malformed = _advance_tcl_lexical_state(
+                        line, tcl_lexical_state,
+                    )
+                    if malformed:
+                        tcl_structure_uncertain = True
+                    # Continuation is a physical-line property.  Computing it
+                    # after stripping a comment would incorrectly promote the
+                    # next line of ``# disabled \\`` as a fresh command.
+                    tcl_continued = _tcl_continues(raw_line)
+                    if _TCL_DIRECTIVE_MARKER.search(line):
+                        rejection = _tcl_literal_rejection(
+                            line, lexical_context_open=bool(lexical_state_before),
+                            continued_from_previous=continued_from_previous,
+                            structure_uncertain=uncertain_before,
+                        )
+                        if rejection:
+                            ambiguous_tcl += 1
+                            anchor = SourceAnchor(
+                                artifact_id=artifact.id, start_line=line_number,
+                                start_column=1, end_line=line_number,
+                                end_column=len(line) + 1,
+                            )
+                            result.diagnostics.append(Diagnostic(
+                                snapshot_id=context.snapshot.id,
+                                code="directive.tcl_nonliteral_context",
+                                severity=DiagnosticSeverity.WARNING,
+                                message=("a possible Tcl directive was not imported because "
+                                         "v0.1 only accepts complete, top-level literal commands"),
+                                stage=Stage.SOURCE.value, artifact_id=artifact.id,
+                                anchor=anchor,
+                                id=("diagnostic_" + stable_hash({
+                                    "snapshot": context.snapshot.id,
+                                    "code": "directive.tcl_nonliteral_context",
+                                    "artifact": artifact.id,
+                                    "line": line_number,
+                                    "reason": rejection,
+                                })[:24]),
+                                metadata={
+                                    "reason": rejection,
+                                    "completeness": Completeness.AMBIGUOUS.value,
+                                    "parse_policy": "hlsgraph.tcl_literal_top_level_v1",
+                                },
+                            ))
+                            continue
                 directive_kind: str | None = None
                 options: dict[str, Any] = {}
                 scope: str | None = None
@@ -176,7 +379,11 @@ class ExternalDirectiveExtractor:
                     stage=Stage.SOURCE.value,
                     attrs={"directive_kind": directive_kind, "options": options,
                            "scope_text": scope, "origin": origin,
-                           "precedence": precedence, "state": "requested"},
+                           "precedence": precedence, "state": "requested",
+                           "parse_policy": (
+                               "hlsgraph.tcl_literal_top_level_v1"
+                               if origin == "tcl" else "hlsgraph.config_literal_v1"
+                           )},
                     anchors=[anchor],
                     completeness=(Completeness.COMPLETE if target
                                   else Completeness.AMBIGUOUS),
@@ -198,7 +405,8 @@ class ExternalDirectiveExtractor:
                         authority=AuthorityClass.DECLARED_CONSTRAINT,
                         artifact_id=artifact.id, anchor=anchor,
                         metadata={"directive_kind": directive_kind, "scope_id": target.id,
-                                  "origin": origin, "precedence": precedence},
+                                  "origin": origin, "precedence": precedence,
+                                  "parse_policy": directive.attrs["parse_policy"]},
                     ))
                 else:
                     result.diagnostics.append(Diagnostic(
@@ -208,7 +416,12 @@ class ExternalDirectiveExtractor:
                         stage=Stage.SOURCE.value, subject_id=directive.id,
                         artifact_id=artifact.id, anchor=anchor,
                     ))
-        result.coverage = {"external_directives": count, "policy": "declared_precedence_v1"}
+        result.coverage = {
+            "external_directives": count,
+            "ambiguous_tcl_directives": ambiguous_tcl,
+            "policy": "declared_precedence_v1",
+            "tcl_parse_policy": "hlsgraph.tcl_literal_top_level_v1",
+        }
         return result
 
 

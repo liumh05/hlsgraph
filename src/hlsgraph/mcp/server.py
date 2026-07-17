@@ -85,6 +85,12 @@ def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> A
         return tools.predictions(subject_id, predicate, model_id, limit)
 
     @mcp.tool()
+    def variants(parent_snapshot_id: str | None = None,
+                 action_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Read proposed actions and their explicitly recorded lineage only."""
+        return tools.variants(parent_snapshot_id, action_id, limit)
+
+    @mcp.tool()
     def render(scope_id: str | None = None, format: str = "mermaid",
                max_chars: int = 500_000) -> dict[str, Any]:
         """Render the graph in memory without changing files or facts."""

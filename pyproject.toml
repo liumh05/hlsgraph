@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "hlsgraph"
-version = "0.1.1"
+version = "0.1.2"
 description = "Deterministic, evidence-backed HLS architecture graph infrastructure for agents and ML4HLS."
 readme = "README.md"
 license = "Apache-2.0"
