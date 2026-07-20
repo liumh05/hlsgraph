@@ -3,6 +3,29 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.2.0 — 2026-07-20
+
+Developer-preview contract update:
+
+- add generic typed evidence references and evidence-backed entity
+  correspondences without inferring mappings from names;
+- record every variant application as an immutable materialized, no-op, or
+  failed attempt, and refuse unchanged candidates without advancing the active
+  graph;
+- add opt-in static feature-evidence and correspondence queries across SDK,
+  CLI, REST, and MCP, with fail-closed ambiguous candidate groups;
+- export feature evidence, entity correspondences, and action materializations
+  as separate ML tables; feature/correspondence tables default to empty and
+  outcome-shaped feature evidence is rejected;
+- derive versioned, evidence-backed static scope features during indexing,
+  retaining unknown values as masked `null` records and keeping software-call
+  targets outside hardware topology;
+- introduce the `hlsgraph.runner.v2` execution contract with runner-declared,
+  run-scoped staged outputs, verified local/SSH transfer, explicit plugin
+  discovery, and runner-owned preflight/runtime resource guards; and
+- provide an explicit, resumable `0.1.0 -> 0.2.0` bundle/SQLite migration that
+  preserves historical snapshot manifests and legacy derivation IDs.
+
 ## 0.1.2 — 2026-07-18
 
 Developer-preview completion and release-boundary hardening:

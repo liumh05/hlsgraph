@@ -71,7 +71,7 @@ mode, but the database is not encrypted. Filesystem permissions are the primary
 local control. Backup and deletion policies must cover the ledger, managed
 artifacts, renderings, and ML exports.
 
-ML export refuses `include_source=True` in v0.1. Artifact rows still include
+ML export refuses `include_source=True` in v0.2. Artifact rows still include
 URI, hash, size, role, license, and access policy. Review dataset manifests and
 licenses before sharing. The self-contained HTML view embeds graph/evidence
 metadata and should receive the same review.

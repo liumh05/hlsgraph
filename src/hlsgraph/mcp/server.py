@@ -63,6 +63,27 @@ def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> A
         return tools.evidence(entity_id)
 
     @mcp.tool()
+    def feature_evidence(entity_id: str | None = None,
+                         predicates: list[str] | None = None,
+                         stages: list[str] | None = None,
+                         limit: int = 100) -> dict[str, Any]:
+        """Read opt-in deterministic feature evidence without outcome data."""
+        return tools.feature_evidence(
+            entity_id, predicates or (), stages or (), limit,
+        )
+
+    @mcp.tool()
+    def correspondences(entity_id: str | None = None,
+                        other_snapshot_id: str | None = None,
+                        kinds: list[str] | None = None,
+                        direction: str = "both",
+                        limit: int = 100) -> dict[str, Any]:
+        """Read explicit entity mappings; ambiguous candidates remain unresolved."""
+        return tools.correspondences(
+            entity_id, other_snapshot_id, kinds or (), direction, limit,
+        )
+
+    @mcp.tool()
     def compare(other_snapshot_id: str) -> dict[str, Any]:
         """Compare the active snapshot with another immutable snapshot."""
         return tools.compare(other_snapshot_id)

@@ -21,6 +21,7 @@ from .diagnostic_projection import public_diagnostic
 from .doctor import diagnose
 from .manifest import manifest_template, parse_manifest_text, safe_relative_path
 from .model import DatasetManifest, json_ready
+from .plugins import load_runners
 from .query import ExploreSpec, QuerySpec
 from .runner import FakeRunner, LocalRunner, SSHRunner
 from .sdk import Project
@@ -504,7 +505,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _cmd_index(args: argparse.Namespace) -> int:
     root = _project_root(args)
-    if args.manifest:
+    if args.action_id:
+        if args.manifest:
+            raise CliError("--action-id cannot be combined with --manifest")
+        if not (root / GraphBundle.DIRECTORY / "manifest.json").is_file():
+            raise CliError("variant indexing requires an existing bundle")
+        project = Project.open(root)
+    elif args.manifest:
         manifest = Path(args.manifest)
         if not manifest.is_absolute():
             manifest = root / manifest
@@ -516,8 +523,11 @@ def _cmd_index(args: argparse.Namespace) -> int:
         if not manifest.is_file():
             raise CliError("no bundle or hlsgraph.toml found; run `hlsgraph init` first")
         project = Project.create_from_manifest(manifest, force=args.force)
-    result = project.index(degraded=args.degraded,
-                           options={"extractor_plugins": args.extractor_plugin})
+    options = {"extractor_plugins": args.extractor_plugin}
+    result = (
+        project.index_variant(args.action_id, degraded=args.degraded, options=options)
+        if args.action_id else project.index(degraded=args.degraded, options=options)
+    )
     payload = {"command": "index", **json_ready(result)}
     _emit(payload, args)
     return 0 if result.success else 1
@@ -542,12 +552,34 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_query(args: argparse.Namespace) -> int:
-    result = _open_project(args).query(QuerySpec(
-        query=args.query, kinds=args.kind, scope_id=args.scope,
-        stages=args.stage, authorities=args.authority,
-        limit=args.limit, cursor=args.cursor,
-    ))
-    _emit({"command": "query", **result.to_dict()}, args)
+    project = _open_project(args)
+    service = project.service(args.snapshot_id)
+    if args.record_class == "entity":
+        if not args.query:
+            raise CliError("entity query requires search text")
+        payload = service.query(QuerySpec(
+            query=args.query, kinds=args.kind, scope_id=args.scope,
+            stages=args.stage, authorities=args.authority,
+            limit=args.limit if args.limit is not None else 20,
+            cursor=args.cursor,
+        )).to_dict()
+    elif args.record_class == "feature-evidence":
+        if args.query is not None:
+            raise CliError("feature-evidence query uses --entity-id and --predicate filters")
+        payload = service.feature_evidence(
+            args.entity_id, predicates=args.predicate,
+            stages=args.stage,
+            limit=args.limit if args.limit is not None else 100,
+        )
+    else:
+        if args.query is not None:
+            raise CliError("correspondence query uses explicit endpoint filters")
+        payload = service.correspondences(
+            args.entity_id, other_snapshot_id=args.other_snapshot_id,
+            kinds=args.correspondence_kind, direction=args.direction,
+            limit=args.limit if args.limit is not None else 100,
+        )
+    _emit({"command": "query", **payload}, args)
     return 0
 
 
@@ -573,7 +605,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
             raise CliError("SSH execution requires the explicit --allow-execution flag")
         if not args.host or not args.remote_project_root:
             raise CliError("SSH execution requires --host and --remote-project-root")
-        runner = SSHRunner(args.host, args.remote_project_root, allow_execution=True)
+        runner = SSHRunner(
+            args.host, args.remote_project_root,
+            project_root=project.bundle.project_root, allow_execution=True,
+        )
+    elif args.backend == "plugin":
+        if not args.allow_execution:
+            raise CliError("runner plugin execution requires the explicit --allow-execution flag")
+        if not args.runner_plugin:
+            raise CliError("plugin execution requires --runner-plugin")
+        try:
+            config = json.loads(args.runner_config)
+        except json.JSONDecodeError as exc:
+            raise CliError("--runner-config must be a JSON object") from exc
+        if not isinstance(config, dict):
+            raise CliError("--runner-config must be a JSON object")
+        runner = load_runners(
+            [args.runner_plugin], {args.runner_plugin: config},
+        )[0]
     else:  # defensive for callers constructing Namespace directly
         raise CliError(f"unsupported runner backend: {args.backend}")
     result = project.run(runner, stages=args.stage or None, timeout_s=args.timeout)
@@ -584,7 +633,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "gates_complete": result.gates_complete,
         "verified": result.verified, "stopped_after_stage": result.stopped_after_stage,
         "tool_truth": result.tool_truth,
-        "backend_can_produce_tool_truth": args.backend in {"local", "ssh"},
+        "backend_can_produce_tool_truth": (
+            str(getattr(runner, "name", "")).casefold()
+            not in {"runner.fake", "runner.replay"}
+        ),
     }
     _emit(payload, args)
     failed = (
@@ -618,12 +670,17 @@ def _cmd_export(args: argparse.Namespace) -> int:
         snapshot = project.bundle.latest_snapshot()
         if snapshot is None:
             raise CliError("project has no indexed snapshot")
+        snapshot_ids = list(dict.fromkeys(args.snapshot_id or [snapshot.id]))
         dataset = DatasetManifest(
             dataset_id=args.dataset_id or f"dataset.{project.bundle.manifest.project_id}",
             feature_schema_version=FEATURE_SCHEMA_VERSION,
-            snapshot_ids=[snapshot.id],
+            snapshot_ids=snapshot_ids,
+            feature_evidence_predicates=args.feature_evidence_predicate,
+            entity_correspondence_kinds=args.entity_correspondence_kind,
         )
-        result = project.export_dataset(output, dataset, format=args.format)
+        result = project.export_dataset(
+            output, dataset, format=args.format, snapshot_id=snapshot_ids[0],
+        )
         payload = {"command": "export", "kind": "dataset", **json_ready(result)}
     _emit(payload, args)
     return 0
@@ -639,11 +696,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
-    bundle = GraphBundle.open(_project_root(args))
-    plan = bundle.store.migration_plan(args.to_version)
+    root = _project_root(args)
+    plan = GraphBundle.migration_plan(root, args.to_version)
     applied: list[dict[str, str]] = []
     if args.apply:
-        applied = bundle.store.migrate(args.to_version)
+        applied = GraphBundle.migrate(root, args.to_version)
     _emit({
         "command": "migrate", "target_version": args.to_version,
         "apply_requested": bool(args.apply), "plan": plan, "applied": applied,
@@ -754,6 +811,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="explicitly use the regex source scanner instead of libclang")
     index.add_argument("--extractor-plugin", action="append", default=[],
                        help="explicitly enable a named hlsgraph.extractors.v1 entry point")
+    index.add_argument("--action-id",
+                       help="materialize one previously recorded variant action")
     index.set_defaults(func=_cmd_index)
 
     status = sub.add_parser("status", help="show bundle, graph, run, and staleness status")
@@ -762,12 +821,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     query = sub.add_parser("query", help="search entities through the shared query service")
     project_option(query)
-    query.add_argument("query")
+    query.add_argument("query", nargs="?")
+    query.add_argument(
+        "--record-class",
+        choices=("entity", "feature-evidence", "correspondence"),
+        default="entity",
+    )
+    query.add_argument("--snapshot-id", help="immutable snapshot to query")
     query.add_argument("--kind", action="append", default=[])
     query.add_argument("--scope")
     query.add_argument("--stage", action="append", default=[])
     query.add_argument("--authority", action="append", default=[])
-    query.add_argument("--limit", type=int, default=20)
+    query.add_argument("--entity-id")
+    query.add_argument("--predicate", action="append", default=[])
+    query.add_argument("--other-snapshot-id")
+    query.add_argument("--correspondence-kind", action="append", default=[])
+    query.add_argument("--direction", choices=("source", "target", "both"),
+                       default="both")
+    query.add_argument("--limit", type=int)
     query.add_argument("--cursor")
     query.set_defaults(func=_cmd_query)
 
@@ -783,13 +854,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="execute manifest stages through an explicit runner")
     project_option(run)
-    run.add_argument("--backend", choices=("local", "ssh", "fake"), required=True)
+    run.add_argument("--backend", choices=("local", "ssh", "fake", "plugin"), required=True)
     run.add_argument("--allow-execution", action="store_true",
                      help="required safety acknowledgement for local or SSH execution")
     run.add_argument("--stage", action="append", default=[])
     run.add_argument("--timeout", type=float, default=7200.0)
     run.add_argument("--host", help="SSH destination")
     run.add_argument("--remote-project-root", help="absolute project root on SSH host")
+    run.add_argument("--runner-plugin", help="explicit hlsgraph.runners.v2 entry-point name")
+    run.add_argument("--runner-config", default="{}",
+                     help="JSON object passed as keyword arguments to the selected runner plugin")
     run.set_defaults(func=_cmd_run)
 
     render = sub.add_parser("render", help="render the shared canonical graph projection")
@@ -806,6 +880,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--kind", choices=("graph", "dataset"), default="graph")
     export.add_argument("--format", choices=("jsonl", "parquet"), default="jsonl")
     export.add_argument("--dataset-id")
+    export.add_argument("--snapshot-id", action="append", default=[],
+                        help="snapshot to include; repeat for a multi-snapshot dataset")
+    export.add_argument("--feature-evidence-predicate", action="append", default=[],
+                        help="opt in one deterministic feature-evidence predicate")
+    export.add_argument("--entity-correspondence-kind", action="append", default=[],
+                        help="opt in one explicit entity-correspondence kind")
     export.set_defaults(func=_cmd_export)
 
     doctor = sub.add_parser("doctor", help="perform read-only environment and bundle checks")

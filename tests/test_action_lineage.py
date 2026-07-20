@@ -98,9 +98,13 @@ def test_action_prediction_snapshot_lineage_is_closed_across_interfaces(tmp_path
     )
     project.record_prediction(prediction)
 
-    # Project.index resolves the action's stored parent when it is omitted and
-    # publishes the resulting snapshot with both links intact.
-    second = project.index(degraded=True, action_id=action.id)
+    # A consumer materializes the action before asking HLSGraph to index it.
+    source_path = tmp_path / "kernel.cpp"
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8") + "\n// materialized action\n",
+        encoding="utf-8",
+    )
+    second = project.index_variant(action.id, degraded=True)
     assert second.success
     assert second.parent_snapshot_id == first.snapshot_id
     assert second.action_id == action.id
@@ -118,12 +122,16 @@ def test_action_prediction_snapshot_lineage_is_closed_across_interfaces(tmp_path
     project.record_variant_action(pending)
 
     sdk = project.variants(action_id=action.id)
+    materializations = project.materializations(action.id)
     assert sdk["parent_snapshot_id"] == first.snapshot_id
     assert sdk["record_class"] == "variant_action"
-    assert sdk["lineage_semantics"] == "recorded_links_only"
+    assert sdk["lineage_semantics"] == (
+        "explicit_materialization_records_with_legacy_snapshot_fallback"
+    )
     assert sdk["items"] == [{
         **json_ready(action),
         "prediction_ids": [prediction.id],
+        "materializations": materializations,
         "result_snapshot_ids": [second.snapshot_id],
         "result_snapshots": [{
             "snapshot_id": second.snapshot_id,
@@ -136,6 +144,7 @@ def test_action_prediction_snapshot_lineage_is_closed_across_interfaces(tmp_path
     assert PRIVATE_SOURCE_SENTINEL in json.dumps(sdk, ensure_ascii=False)
     pending_item = project.variants(action_id=pending.id)["items"][0]
     assert pending_item["prediction_ids"] == []
+    assert pending_item["materializations"] == []
     assert pending_item["result_snapshot_ids"] == []
     assert pending_item["result_snapshots"] == []
 
@@ -248,7 +257,12 @@ def test_action_consistency_checks_fail_before_creating_false_lineage(tmp_path) 
         proposer="test.fixture",
     )
     project.record_variant_action(action)
-    second = project.index(degraded=True, action_id=action.id)
+    source_path = tmp_path / "kernel.cpp"
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8") + "\n// materialized action\n",
+        encoding="utf-8",
+    )
+    second = project.index_variant(action.id, degraded=True)
     second_kernel = next(
         item for item in project.service(second.snapshot_id).graph().entities.values()
         if item.kind == "hls.kernel"

@@ -32,9 +32,9 @@ Keep changes focused and include tests. In the pull request, state:
 - which low-cost tests were run; and
 - which vendor-dependent tests were not run and why.
 
-Do not commit private designs, credentials, license files, generated checkpoints,
-vendor binaries, UG PDFs, extracted manuals, or reports whose redistribution is
-not authorized.
+Do not commit private designs, credentials, license files, generated binary
+artifacts, vendor binaries, UG PDFs, extracted manuals, or reports whose
+redistribution is not authorized.
 
 ## Truth-model checklist
 

@@ -418,6 +418,146 @@ def _number(value: str) -> Any:
             return value
 
 
+_DECIMAL_INTEGER = re.compile(r"^[+-]?\d+$")
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _decimal_integer(tokens: list[str]) -> int | None:
+    """Parse only an unambiguous decimal integer token sequence.
+
+    Constant folding belongs to the compiler/IR layer.  The AST adapter therefore
+    accepts only a literal (with an optional separate sign token) and leaves every
+    expression, macro, enum, or symbolic bound unknown.
+    """
+    text = "".join(tokens)
+    return int(text, 10) if _DECIMAL_INTEGER.fullmatch(text) else None
+
+
+def _positive_trip_count(lower: int, upper: int, step: int,
+                         comparison: str) -> int | None:
+    if step > 0 and comparison in {"lt", "le"}:
+        distance = upper - lower
+        if comparison == "le":
+            distance += 1
+        if distance <= 0:
+            return None
+        count = (distance + step - 1) // step
+        return count if count > 0 else None
+    if step < 0 and comparison in {"gt", "ge"}:
+        stride = -step
+        distance = lower - upper
+        if comparison == "ge":
+            distance += 1
+        if distance <= 0:
+            return None
+        count = (distance + stride - 1) // stride
+        return count if count > 0 else None
+    return None
+
+
+def _constant_for_loop_facts(cursor: Any) -> dict[str, Any]:
+    """Extract facts from one exact canonical constant ``for`` header.
+
+    This intentionally recognizes a very small token-level grammar.  It does not
+    evaluate names or infer bounds from a variable spelling, which keeps symbolic
+    loops explicitly incomplete until higher-fidelity compiler evidence exists.
+    """
+    try:
+        tokens = [str(item.spelling) for item in cursor.get_tokens()]
+    except Exception:
+        return {}
+    try:
+        start = tokens.index("(")
+    except ValueError:
+        return {}
+    depth = 0
+    header: list[str] = []
+    for token in tokens[start + 1:]:
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        header.append(token)
+    else:
+        return {}
+
+    sections: list[list[str]] = [[]]
+    depth = 0
+    for token in header:
+        if token in {"(", "[", "{"}:
+            depth += 1
+        elif token in {")", "]", "}"}:
+            depth -= 1
+        if token == ";" and depth == 0:
+            sections.append([])
+        else:
+            sections[-1].append(token)
+    if len(sections) != 3 or any(not section for section in sections):
+        return {}
+
+    initializer, condition, increment = sections
+    if initializer.count("=") != 1:
+        return {}
+    equals = initializer.index("=")
+    lhs, rhs = initializer[:equals], initializer[equals + 1:]
+    if not lhs or not _IDENTIFIER.fullmatch(lhs[-1]):
+        return {}
+    induction = lhs[-1]
+    lower = _decimal_integer(rhs)
+    if lower is None or len(condition) < 3:
+        return {}
+
+    operator_index = next(
+        (index for index, token in enumerate(condition)
+         if token in {"<", "<=", ">", ">="}),
+        -1,
+    )
+    if operator_index != 1 or condition[0] != induction:
+        return {}
+    if any(token in {"<", "<=", ">", ">="}
+           for token in condition[operator_index + 1:-1]):
+        return {}
+    upper = _decimal_integer(condition[operator_index + 1:])
+    if upper is None:
+        return {}
+    comparison = {"<": "lt", "<=": "le", ">": "gt", ">=": "ge"}[
+        condition[operator_index]
+    ]
+
+    step: int | None = None
+    compact_increment = "".join(increment)
+    if compact_increment in {f"++{induction}", f"{induction}++"}:
+        step = 1
+    elif compact_increment in {f"--{induction}", f"{induction}--"}:
+        step = -1
+    elif len(increment) >= 3 and increment[0] == induction \
+            and increment[1] in {"+=", "-="}:
+        magnitude = _decimal_integer(increment[2:])
+        if magnitude is not None and magnitude > 0:
+            step = magnitude if increment[1] == "+=" else -magnitude
+    if step is None:
+        return {}
+
+    bounds = {
+        "lower": lower,
+        "upper": upper,
+        "step": step,
+        "comparison": comparison,
+        "upper_inclusive": comparison in {"le", "ge"},
+    }
+    result: dict[str, Any] = {
+        "loop_bounds": bounds,
+        "loop_bounds_exact": True,
+        "loop_fact_source": "libclang.tokens.v1",
+    }
+    trip_count = _positive_trip_count(lower, upper, step, comparison)
+    if trip_count is not None:
+        result["trip_count"] = trip_count
+    return result
+
+
 class LibClangExtractor:
     name = "source.libclang"
     version = "2"
@@ -765,6 +905,8 @@ class LibClangExtractor:
                     display_name = self._loop_label(context, relative, line) or f"loop@{line}"
                     qname = f"{current_function_qname or relative}::{display_name}@{line}"
                     attrs = {"loop_kind": kind_name.lower().replace("_stmt", "")}
+                    if kind_name == "FOR_STMT":
+                        attrs.update(_constant_for_loop_facts(cursor))
                 elif kind_name == "PARM_DECL" and current_function_id:
                     entity_kind = "hls.port"
                     qname = f"{current_function_qname}::{cursor.spelling}"
@@ -831,6 +973,7 @@ class LibClangExtractor:
                 metadata={"occurrences": untracked_external_inputs},
             ))
 
+        call_diagnostics: set[tuple[str, str, str]] = set()
         for owner, callee, anchor in pending_calls:
             targets = sorted(set(function_by_name.get(callee, [])))
             if len(targets) == 1:
@@ -838,14 +981,32 @@ class LibClangExtractor:
                     src=owner, dst=targets[0], kind="software.calls", snapshot_id=context.snapshot.id,
                     authority=AuthorityClass.STATIC_FACT, stage=Stage.AST.value,
                     anchors=[anchor] if anchor else [],
-                    attrs={"hardware_instance": False},
+                    attrs={"hardware_instance": False, "ml_input_evidence": True},
                 ))
             elif len(targets) > 1:
+                diagnostic_key = (owner, callee, "ambiguous")
+                if diagnostic_key in call_diagnostics:
+                    continue
+                call_diagnostics.add(diagnostic_key)
                 result.diagnostics.append(Diagnostic(
                     snapshot_id=context.snapshot.id, code="mapping.ambiguous_call",
                     severity=DiagnosticSeverity.WARNING,
                     message=f"call to {callee!r} has {len(targets)} project-local candidates; no edge was guessed",
                     stage=Stage.AST.value, subject_id=owner,
+                ))
+            else:
+                diagnostic_key = (owner, callee, "unresolved")
+                if diagnostic_key in call_diagnostics:
+                    continue
+                call_diagnostics.add(diagnostic_key)
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id, code="mapping.unresolved_call",
+                    severity=DiagnosticSeverity.INFO,
+                    message=(f"call to {callee!r} has no project-local function target; "
+                             "no software call edge was created"),
+                    stage=Stage.AST.value, subject_id=owner,
+                    artifact_id=anchor.artifact_id if anchor else None,
+                    anchor=anchor,
                 ))
 
         self._attach_source_pragmas(

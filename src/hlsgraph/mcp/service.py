@@ -216,6 +216,27 @@ class ReadOnlyMcpService:
         """Trace one entity to observations, anchors, artifact metadata, and diagnostics."""
         return self._require_core().evidence(entity_id)
 
+    def feature_evidence(self, entity_id: str | None = None,
+                         predicates: Iterable[str] = (),
+                         stages: Iterable[str] = (),
+                         limit: int = 100) -> dict[str, Any]:
+        """Read selected deterministic feature evidence, never labels or predictions."""
+        return self._require_core().feature_evidence(
+            entity_id, predicates=predicates, stages=stages,
+            limit=max(1, min(int(limit), 1000)),
+        )
+
+    def correspondences(self, entity_id: str | None = None,
+                        other_snapshot_id: str | None = None,
+                        kinds: Iterable[str] = (), direction: str = "both",
+                        limit: int = 100) -> dict[str, Any]:
+        """Read explicit entity mappings and surface ambiguous candidate groups."""
+        return self._require_core().correspondences(
+            entity_id, other_snapshot_id=other_snapshot_id,
+            kinds=kinds, direction=direction,
+            limit=max(1, min(int(limit), 1000)),
+        )
+
     def compare(self, other_snapshot_id: str) -> dict[str, Any]:
         """Compare the selected immutable snapshot with another ledger snapshot."""
         return self._require_core().compare(other_snapshot_id)

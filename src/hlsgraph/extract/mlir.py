@@ -32,10 +32,72 @@ _OP = re.compile(r"^\s*(?:(%[\w.$#-]+)(?:\s*:\s*\d+)?\s*=\s*)?([A-Za-z_][\w-]*(?
 _SSA = re.compile(r"%[\w.$#-]+")
 _LOCATION = re.compile(r'loc\("([^"]+)":(\d+):(\d+)\)')
 _SLOTS = re.compile(r"(?:numSlots|num_slots|slots)\s*=\s*(\d+)", re.I)
+_INTEGER_WIDTH = re.compile(r"(?<![\w!])(?:[su]?i)([1-9]\d*)\b", re.I)
+_CONSTANT_LOOP = re.compile(
+    r"(?<![\w.$-])(%?[A-Za-z_$][\w.$-]*)\s*=\s*(-?\d+)\s+to\s+(-?\d+)"
+    r"(?:\s+step\s+(-?\d+))?\b"
+)
+_INDEX_LIST = re.compile(r"\[([^\]]*)\]")
 _KNOWN_DIALECTS = frozenset({
     "affine", "arith", "builtin", "cf", "func", "handshake", "hls",
     "llvm", "memref", "scf",
 })
+
+
+def _integer_widths(text: str) -> list[int]:
+    return [int(value) for value in _INTEGER_WIDTH.findall(text)]
+
+
+def _memory_access_kind(op_name: str) -> str | None:
+    folded = op_name.casefold()
+    if folded.endswith((".load", ".read", ".transfer_read")):
+        return "load"
+    if folded.endswith((".store", ".write", ".transfer_write")):
+        return "store"
+    if folded.startswith("memref.") and folded.endswith((".alloc", ".alloca")):
+        return "allocate"
+    if folded == "memref.dealloc":
+        return "deallocate"
+    if folded in {"memref.copy", "memref.dma_start", "memref.dma_wait"}:
+        return "transfer"
+    return None
+
+
+def _index_kinds(op_name: str, tail: str) -> list[str]:
+    if _memory_access_kind(op_name) not in {"load", "store"}:
+        return []
+    values: list[str] = []
+    for match in _INDEX_LIST.finditer(tail):
+        values.extend(item.strip() for item in match.group(1).split(",") if item.strip())
+    return ["constant" if re.fullmatch(r"-?\d+", value) else "dynamic"
+            for value in values]
+
+
+def _positive_trip_count(lower: int, upper: int, step: int) -> int | None:
+    if step <= 0 or upper <= lower:
+        return None
+    count = (upper - lower + step - 1) // step
+    return count if count > 0 else None
+
+
+def _constant_loop_facts(op_name: str, tail: str) -> dict[str, Any]:
+    if op_name not in {"affine.for", "scf.for", "hls.loop"}:
+        return {}
+    match = _CONSTANT_LOOP.search(tail)
+    if not match:
+        return {}
+    _induction, lower_text, upper_text, step_text = match.groups()
+    lower, upper = int(lower_text), int(upper_text)
+    step = int(step_text) if step_text is not None else 1
+    bounds = {
+        "lower": lower, "upper": upper, "step": step,
+        "comparison": "lt", "upper_inclusive": False,
+    }
+    result: dict[str, Any] = {"loop_bounds": bounds}
+    trip_count = _positive_trip_count(lower, upper, step)
+    if trip_count is not None:
+        result["trip_count"] = trip_count
+    return result
 
 
 class MlirTextExtractor:
@@ -53,6 +115,7 @@ class MlirTextExtractor:
                                   capabilities=["ir.mlir.evidence", "ir.mlir.locations"])
         dialect_counts: dict[str, int] = defaultdict(int)
         operation_count = 0
+        complete_feature_artifacts = 0
         max_operations = int(context.options.get("max_ir_operations", 100_000))
         for artifact in sorted(context.artifacts.values(), key=lambda item: item.uri):
             if not artifact.uri.lower().endswith(".mlir"):
@@ -66,6 +129,10 @@ class MlirTextExtractor:
                                  "parser": "experimental_text"},
                           anchors=[SourceAnchor(artifact_id=artifact.id)])
             graph.add_entity(unit)
+            artifact_entity_ids = [unit.id]
+            artifact_dialects: set[str] = set()
+            artifact_dialect_counts: dict[str, int] = defaultdict(int)
+            artifact_truncated = False
             current_parent = unit.id
             function_entities: dict[str, str] = {}
             definitions: dict[str, str] = {}
@@ -77,17 +144,25 @@ class MlirTextExtractor:
                 func_match = _FUNC.search(line)
                 if func_match:
                     name = func_match.group(1)
+                    function_attrs = {
+                        "plane": "evidence", "hot": False,
+                        "dialect": line.strip().split()[0].split(".")[0],
+                    }
+                    artifact_dialects.add(str(function_attrs["dialect"]))
+                    widths = _integer_widths(line)
+                    if widths:
+                        function_attrs["bitwidths"] = widths
                     function = Entity(
                         kind="ir.mlir.function", name=name,
                         qualified_name=f"{artifact.uri}::{name}", snapshot_id=context.snapshot.id,
                         authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                        attrs={"plane": "evidence", "hot": False,
-                               "dialect": line.strip().split()[0].split(".")[0]},
+                        attrs=function_attrs,
                         anchors=[SourceAnchor(artifact_id=artifact.id, start_line=line_number,
                                               start_column=1, end_line=line_number,
                                               end_column=len(line) + 1)],
                     )
                     graph.add_entity(function)
+                    artifact_entity_ids.append(function.id)
                     graph.add_relation(Relation(src=unit.id, dst=function.id, kind="ir.contains",
                                                 snapshot_id=context.snapshot.id,
                                                 authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION),
@@ -100,6 +175,7 @@ class MlirTextExtractor:
                 if op_match and not line.lstrip().startswith(("//", "#", "!")):
                     operation_count += 1
                     if operation_count > max_operations:
+                        artifact_truncated = True
                         result.diagnostics.append(Diagnostic(
                             snapshot_id=context.snapshot.id, code="mlir.operation_limit",
                             severity=DiagnosticSeverity.WARNING,
@@ -109,21 +185,35 @@ class MlirTextExtractor:
                         break
                     result_name, op_name, tail = op_match.groups()
                     dialect = op_name.split(".", 1)[0]
+                    artifact_dialects.add(dialect)
                     dialect_counts[dialect] += 1
+                    artifact_dialect_counts[dialect] += 1
                     location = self._source_location(context, artifact.id, line)
+                    bitwidths = _integer_widths(tail)
+                    memory_kind = _memory_access_kind(op_name)
+                    index_kinds = _index_kinds(op_name, tail)
+                    loop_facts = _constant_loop_facts(op_name, tail)
                     op = Entity(
                         kind="ir.mlir.operation", name=op_name,
                         qualified_name=f"{artifact.uri}:{line_number}:{op_name}:{result_name or '-'}",
                         snapshot_id=context.snapshot.id,
                         authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                        attrs={"plane": "evidence", "hot": False, "dialect": dialect,
-                               "operation": op_name, "ssa_result": result_name,
-                               "pass_stage": artifact.metadata.get("pass_stage")},
+                        attrs={
+                            "plane": "evidence", "hot": False, "dialect": dialect,
+                            "operation": op_name, "ssa_result": result_name,
+                            "pass_stage": artifact.metadata.get("pass_stage"),
+                            **({"bitwidths": bitwidths} if bitwidths else {}),
+                            **({"memory_access_kind": memory_kind}
+                               if memory_kind else {}),
+                            **({"index_kinds": index_kinds} if index_kinds else {}),
+                            **loop_facts,
+                        },
                         anchors=[SourceAnchor(artifact_id=artifact.id, start_line=line_number,
                                               start_column=1, end_line=line_number,
                                               end_column=len(line) + 1)] + ([location] if location else []),
                     )
                     graph.add_entity(op)
+                    artifact_entity_ids.append(op.id)
                     graph.add_relation(Relation(src=current_parent, dst=op.id, kind="ir.contains",
                                                 snapshot_id=context.snapshot.id,
                                                 authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION),
@@ -135,9 +225,11 @@ class MlirTextExtractor:
                             pending_uses.append((operand, op.id, op_name))
 
                     projected = self._project_hardware_entity(context, artifact, line_number,
-                                                               op_name, tail, location)
+                                                               op_name, tail, location,
+                                                               op.attrs)
                     if projected:
                         graph.add_entity(projected)
+                        artifact_entity_ids.append(projected.id)
                         projections[op.id] = projected.id
                         graph.add_relation(Relation(
                             src=op.id, dst=projected.id, kind="cross.projects_to",
@@ -182,19 +274,36 @@ class MlirTextExtractor:
                                "projection": "handshake_semantics"},
                     ))
 
+            feature_domain_complete = (
+                not artifact_truncated
+                and artifact_dialects.issubset(_KNOWN_DIALECTS)
+            )
+            for entity_id in artifact_entity_ids:
+                graph.entities[entity_id].attrs[
+                    "static_feature_domain_complete"
+                ] = feature_domain_complete
+            if feature_domain_complete:
+                complete_feature_artifacts += 1
+            for dialect in sorted(artifact_dialects - _KNOWN_DIALECTS):
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id, code="mlir.unsupported_dialect",
+                    severity=DiagnosticSeverity.WARNING,
+                    message=(f"MLIR dialect {dialect!r} has no registered semantic "
+                             "adapter; operations remain evidence-only and produce "
+                             "no hardware projection"),
+                    stage=Stage.MLIR.value, subject_id=unit.id,
+                    artifact_id=artifact.id,
+                    metadata={"dialect": dialect,
+                              "operations": artifact_dialect_counts[dialect],
+                              "hardware_projection": False},
+                ))
+
         result.coverage = {"operations": operation_count,
                            "dialects": dict(sorted(dialect_counts.items())),
+                           "complete_static_feature_artifacts": complete_feature_artifacts,
                            "fidelity": "experimental_text"}
-        for dialect in sorted(set(dialect_counts) - _KNOWN_DIALECTS):
-            result.diagnostics.append(Diagnostic(
-                snapshot_id=context.snapshot.id, code="mlir.unsupported_dialect",
-                severity=DiagnosticSeverity.WARNING,
-                message=(f"MLIR dialect {dialect!r} has no registered semantic adapter; "
-                         "operations remain evidence-only and produce no hardware projection"),
-                stage=Stage.MLIR.value,
-                metadata={"dialect": dialect, "operations": dialect_counts[dialect],
-                          "hardware_projection": False},
-            ))
+        if complete_feature_artifacts:
+            result.capabilities.append("ir.mlir.complete_static_feature_domain")
         result.diagnostics.append(Diagnostic(
             snapshot_id=context.snapshot.id, code="mlir.experimental_text_parser",
             severity=DiagnosticSeverity.INFO,
@@ -243,11 +352,15 @@ class MlirTextExtractor:
     @staticmethod
     def _project_hardware_entity(context: ExtractionContext, artifact: Any, line: int,
                                  op_name: str, tail: str,
-                                 source_location: SourceAnchor | None) -> Entity | None:
+                                 source_location: SourceAnchor | None,
+                                 operation_attrs: dict[str, Any]) -> Entity | None:
         kind: str | None = None
         attrs: dict[str, Any] = {"source_operation": op_name, "projection_fidelity": "experimental"}
         if op_name in {"scf.for", "affine.for", "hls.loop"}:
             kind = "hls.loop"
+            for key in ("loop_bounds", "trip_count"):
+                if key in operation_attrs:
+                    attrs[key] = operation_attrs[key]
         elif op_name == "handshake.buffer":
             kind = "hls.buffer"
             slots = _SLOTS.search(tail)

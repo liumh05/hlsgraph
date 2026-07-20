@@ -23,13 +23,18 @@ from .extract import (
     VivadoReportExtractor,
 )
 from .model import (
-    DatasetManifest, Diagnostic, DiagnosticSeverity, FailureClass, GateKind, GateStatus,
-    PredictionEnvelope, RunStatus, ToolRun, VariantAction, VerificationKind,
-    hash_artifact_bytes, stable_hash, utc_now,
+    ActionMaterialization, ActionMaterializationStatus, DatasetManifest, Diagnostic,
+    DiagnosticSeverity, EntityCorrespondence, FailureClass, GateKind, GateStatus,
+    EvidenceKind, PredictionEnvelope, RunStatus, ToolRun, VariantAction, VerificationKind,
+    hash_artifact_bytes, json_ready, stable_hash, utc_now,
 )
 from .manifest import project_path
 from .query import CoreService, ExploreResult, ExploreSpec, QueryResult, QuerySpec, StatusResult
-from .runner import Runner, StageOrchestrator, StageResult, ToolRunRequest
+from .runner import (
+    DeclaredOutput, Runner, RunnerExecution, RunnerInput, StageOrchestrator,
+    StageResult, ToolRunRequest,
+)
+from .runner.staging import DEFAULT_MAX_OUTPUT_BYTES, StagingError, read_verified_file
 from .plugins import load_extractors
 
 
@@ -84,6 +89,8 @@ class IndexResult:
     capabilities: list[str]
     parent_snapshot_id: str | None = None
     action_id: str | None = None
+    materialization_id: str | None = None
+    materialization_status: str | None = None
 
 
 class Project:
@@ -106,12 +113,33 @@ class Project:
             return self._index_locked(
                 degraded=degraded, options=options,
                 parent_snapshot_id=parent_snapshot_id, action_id=action_id,
+                require_material_change=action_id is not None,
+            )
+
+    def index_variant(self, action_id: str, *, degraded: bool = False,
+                      options: dict[str, Any] | None = None) -> IndexResult:
+        """Index one externally materialized action, rejecting semantic no-ops.
+
+        HLSGraph does not edit source or directives.  A consumer first records
+        ``VariantAction``, materializes it in project inputs, then calls this
+        method.  If those immutable inputs did not change relative to the
+        action's parent, the attempt is retained as ``no_op`` and no graph is
+        published.
+        """
+        if not isinstance(action_id, str) or not action_id.strip():
+            raise ValueError("action_id must be a non-empty string")
+        with self.bundle.execution_lock():
+            return self._index_locked(
+                degraded=degraded, options=options,
+                parent_snapshot_id=None, action_id=action_id,
+                require_material_change=True,
             )
 
     def _index_locked(self, *, degraded: bool = False,
                       options: dict[str, Any] | None = None,
                       parent_snapshot_id: str | None = None,
-                      action_id: str | None = None) -> IndexResult:
+                      action_id: str | None = None,
+                      require_material_change: bool = False) -> IndexResult:
         self.bundle.refresh_manifest()
         if action_id is not None:
             if not isinstance(action_id, str) or not action_id.strip():
@@ -177,6 +205,81 @@ class Project:
             extraction_hash=extraction_hash,
         )
         artifacts = self.bundle.store.artifacts(snapshot.id)
+        material_change_fields: list[str] = []
+        if require_material_change:
+            if action_id is None or parent_snapshot_id is None:
+                raise ValueError("variant indexing requires a recorded action and parent")
+            parent = self.bundle.store.snapshot(parent_snapshot_id)
+            for field_name in (
+                "artifact_hashes", "build_hash", "target_hash",
+                "constraint_hash", "toolchain_hash",
+            ):
+                if getattr(parent, field_name) != getattr(snapshot, field_name):
+                    material_change_fields.append(field_name)
+            if not material_change_fields:
+                started = utc_now()
+                request_hash = stable_hash({
+                    "action": action_id,
+                    "parent": parent_snapshot_id,
+                    "candidate": snapshot.id,
+                    "materialization": "no_op",
+                    "extractors": extractor_identities,
+                    "options": index_options,
+                })
+                run = ToolRun(
+                    snapshot_id=snapshot.id, stage="index",
+                    backend="action.materialization",
+                    request_hash=request_hash, status=RunStatus.FAILED,
+                    failure_class=FailureClass.INPUT,
+                    started_at=started, finished_at=utc_now(),
+                    message="variant inputs are unchanged from the recorded parent snapshot",
+                    metadata={
+                        "action_id": action_id,
+                        "parent_snapshot_id": parent_snapshot_id,
+                        "materialization_status": "no_op",
+                        "changed_input_classes": [],
+                        "tool_truth": False,
+                        "partial_graph_persisted": False,
+                    },
+                )
+                diagnostic = Diagnostic(
+                    snapshot_id=snapshot.id,
+                    code="action.materialization_no_op",
+                    severity=DiagnosticSeverity.ERROR,
+                    stage="source",
+                    run_id=run.id,
+                    message=(
+                        "recorded action did not change source, build, target, "
+                        "constraint, or toolchain inputs"
+                    ),
+                    metadata={
+                        "action_id": action_id,
+                        "parent_snapshot_id": parent_snapshot_id,
+                    },
+                )
+                run.diagnostics = [diagnostic.id]
+                materialization = ActionMaterialization(
+                    action_id=action_id,
+                    parent_snapshot_id=parent_snapshot_id,
+                    status=ActionMaterializationStatus.NO_OP,
+                    diagnostic_ids=[diagnostic.id],
+                    attempted_at=started,
+                    metadata={"changed_input_classes": []},
+                )
+                self.bundle.store.commit_index_failure(
+                    run=run, diagnostics=[diagnostic],
+                    materialization=materialization,
+                )
+                return IndexResult(
+                    snapshot_id=snapshot.id, graph_hash="", entities=0,
+                    relations=0, observations=0, derivations=0,
+                    verifications=0, diagnostics=1, success=False,
+                    capabilities=["action.materialization"],
+                    parent_snapshot_id=parent_snapshot_id,
+                    action_id=action_id,
+                    materialization_id=materialization.id,
+                    materialization_status=str(materialization.status),
+                )
         context = ExtractionContext(
             project_root=self.bundle.project_root, manifest=self.bundle.manifest,
             snapshot=snapshot, artifacts={item.id: item for item in artifacts},
@@ -193,6 +296,7 @@ class Project:
             "extractor_identities": extractor_identities,
         })
         entity_ids = set(result.graph.entities)
+        relation_ids = set(result.graph.relations)
         artifact_ids = set(context.artifacts)
         observation_ids = {item.id for item in result.observations}
         derivation_ids = {item.id for item in result.derivations}
@@ -209,6 +313,33 @@ class Project:
                 evidence_errors.append(f"derivation {item.id} has an unresolved subject")
             if not set(item.input_observation_ids).issubset(observation_ids):
                 evidence_errors.append(f"derivation {item.id} has unavailable input observations")
+            for reference in item.evidence_refs:
+                kind = str(reference.kind)
+                target = reference.target_id
+                if reference.snapshot_id not in {None, snapshot.id}:
+                    evidence_errors.append(
+                        f"derivation {item.id} has cross-snapshot evidence"
+                    )
+                elif kind == "observation" and target not in observation_ids:
+                    evidence_errors.append(
+                        f"derivation {item.id} has unavailable observation evidence"
+                    )
+                elif kind == "derivation" and target not in derivation_ids:
+                    evidence_errors.append(
+                        f"derivation {item.id} has unavailable derivation evidence"
+                    )
+                elif kind == "artifact" and target not in artifact_ids:
+                    evidence_errors.append(
+                        f"derivation {item.id} has unavailable artifact evidence"
+                    )
+                elif kind == "entity_anchor" and target not in entity_ids:
+                    evidence_errors.append(
+                        f"derivation {item.id} has unavailable entity evidence"
+                    )
+                elif kind == "relation" and target not in relation_ids:
+                    evidence_errors.append(
+                        f"derivation {item.id} has unavailable relation evidence"
+                    )
         available_evidence = observation_ids | derivation_ids
         for item in result.verifications:
             if not set(item.evidence_ids).issubset(available_evidence):
@@ -219,7 +350,7 @@ class Project:
             result.diagnostics.append(Diagnostic(
                 snapshot_id=snapshot.id, code="extractor.kernel_boundary",
                 severity=DiagnosticSeverity.ERROR,
-                message=("v0.1 canonical indexing requires exactly one hls.kernel whose "
+                message=("canonical indexing requires exactly one hls.kernel whose "
                          "name equals manifest build.top"),
                 metadata={"expected_top": self.bundle.manifest.build.top,
                           "kernel_count": len(kernels),
@@ -277,6 +408,18 @@ class Project:
             ))
         result.diagnostics = scoped_diagnostics
         run.diagnostics = [item.id for item in scoped_diagnostics]
+        materialization = None
+        if action_id is not None and parent_snapshot_id is not None:
+            materialization = ActionMaterialization(
+                action_id=action_id,
+                parent_snapshot_id=parent_snapshot_id,
+                status=(ActionMaterializationStatus.FAILED if fatal
+                        else ActionMaterializationStatus.MATERIALIZED),
+                result_snapshot_id=snapshot.id,
+                diagnostic_ids=[item.id for item in scoped_diagnostics],
+                attempted_at=started,
+                metadata={"changed_input_classes": sorted(material_change_fields)},
+            )
         # A failed extraction is an immutable run/diagnostic event, not a
         # partially-authoritative canonical graph.  This also permits a retry of
         # the same design snapshot after its environment is repaired.
@@ -289,9 +432,13 @@ class Project:
                 derivations=result.derivations,
                 verifications=result.verifications,
                 diagnostics=result.diagnostics,
+                materialization=materialization,
             )
         else:
-            self.bundle.store.commit_index_failure(run=run, diagnostics=result.diagnostics)
+            self.bundle.store.commit_index_failure(
+                run=run, diagnostics=result.diagnostics,
+                materialization=materialization,
+            )
         stats = result.graph.stats()
         return IndexResult(
             snapshot_id=snapshot.id, graph_hash=result.graph.graph_hash,
@@ -301,6 +448,9 @@ class Project:
             success=not fatal, capabilities=result.capabilities,
             parent_snapshot_id=snapshot.parent_snapshot_id,
             action_id=snapshot.action_id,
+            materialization_id=(materialization.id if materialization else None),
+            materialization_status=(str(materialization.status)
+                                    if materialization else None),
         )
 
     def service(self, snapshot_id: str | None = None) -> CoreService:
@@ -330,6 +480,23 @@ class Project:
     def evidence(self, entity_id: str) -> dict[str, Any]:
         return self.service().evidence(entity_id)
 
+    def feature_evidence(self, entity_id: str | None = None, *,
+                         predicates: Sequence[str] = (),
+                         stages: Sequence[str] = (),
+                         limit: int = 100) -> dict[str, Any]:
+        return self.service().feature_evidence(
+            entity_id, predicates=predicates, stages=stages, limit=limit,
+        )
+
+    def correspondences(self, entity_id: str | None = None, *,
+                        other_snapshot_id: str | None = None,
+                        kinds: Sequence[str] = (), direction: str = "both",
+                        limit: int = 100) -> dict[str, Any]:
+        return self.service().correspondences(
+            entity_id, other_snapshot_id=other_snapshot_id,
+            kinds=kinds, direction=direction, limit=limit,
+        )
+
     def compare(self, other_snapshot_id: str) -> dict[str, Any]:
         return self.service().compare(other_snapshot_id)
 
@@ -344,6 +511,17 @@ class Project:
         self.bundle.store.add_variant(action)
         return action.id
 
+    def record_entity_correspondence(self, value: EntityCorrespondence) -> str:
+        """Persist one deterministic, evidence-backed cross-snapshot mapping."""
+        self.bundle.store.add_correspondence(value)
+        return value.id
+
+    def materializations(self, action_id: str | None = None, *,
+                         status: str | None = None) -> list[dict[str, Any]]:
+        return [json_ready(item) for item in self.bundle.store.materializations(
+            action_id, status=status,
+        )]
+
     def record_prediction(self, prediction: PredictionEnvelope) -> str:
         graph = self.bundle.store.load_graph(prediction.snapshot_id)
         if prediction.subject_id not in graph.entities:
@@ -352,18 +530,46 @@ class Project:
         return prediction.id
 
     def run(self, runner: Runner, stages: Sequence[str] | None = None, *,
-            timeout_s: float = 7200.0) -> StageResult:
+            timeout_s: float = 7200.0,
+            snapshot_id: str | None = None) -> StageResult:
+        """Execute stages against one explicitly selectable immutable snapshot.
+
+        ``snapshot_id=None`` preserves the active/latest behavior.  A pinned
+        historical snapshot is accepted only while its exact manifest and
+        artifact bytes are materialized locally and its canonical graph exists;
+        selecting it never silently falls forward to a newer sibling.
+        """
         with self.bundle.execution_lock():
-            return self._run_locked(runner, stages=stages, timeout_s=timeout_s)
+            return self._run_locked(
+                runner, stages=stages, timeout_s=timeout_s,
+                snapshot_id=snapshot_id,
+            )
 
     def _run_locked(self, runner: Runner, stages: Sequence[str] | None = None, *,
-                    timeout_s: float = 7200.0) -> StageResult:
-        snapshot = self.bundle.latest_snapshot()
+                    timeout_s: float = 7200.0,
+                    snapshot_id: str | None = None) -> StageResult:
+        bind_project_root = getattr(runner, "bind_project_root", None)
+        if callable(bind_project_root):
+            bind_project_root(self.bundle.project_root)
+        if snapshot_id is not None and (
+                not isinstance(snapshot_id, str) or not snapshot_id.strip()):
+            raise ValueError("snapshot_id must be a non-empty string or None")
+        snapshot = (
+            self.bundle.store.snapshot(snapshot_id)
+            if snapshot_id is not None else self.bundle.latest_snapshot()
+        )
         if snapshot is None:
             raise ValueError("index the project before running tool stages")
+        if snapshot.project_id != self.bundle.manifest.project_id:
+            raise BundleError("selected snapshot belongs to a different project")
+        if not self.bundle.store.has_graph(snapshot.id):
+            raise BundleError(
+                "selected snapshot has no canonical graph; complete indexing before execution"
+            )
         if self.bundle.is_stale(snapshot):
             raise BundleError(
-                "active snapshot is stale; re-index before running tool stages"
+                "selected snapshot is stale; materialize its exact inputs or re-index before "
+                "running tool stages"
             )
         artifacts = self.bundle.store.artifacts(snapshot.id)
         immutable_inputs = [item for item in artifacts if not item.producer_run_id]
@@ -404,24 +610,6 @@ class Project:
                     raise ValueError(
                         f"stage dependency order requires {producer!r} before {consumer!r}"
                     )
-        existing_outputs = sorted(
-            spec.path for stage in selected
-            for spec in snapshot_manifest.stage_outputs.get(stage, [])
-            if project_path(self.bundle.project_root, spec.path).exists()
-        )
-        if existing_outputs:
-            raise BundleError(
-                "declared stage outputs must be run-isolated and absent before execution: "
-                + ", ".join(existing_outputs)
-            )
-        if (any(snapshot_manifest.stage_outputs.get(stage) for stage in selected)
-                and getattr(runner, "provides_local_output_bytes", False) is not True):
-            raise BundleError(
-                f"{getattr(runner, 'name', type(runner).__name__)} declared-output ingestion "
-                "is unavailable: the runner does not explicitly guarantee that verified "
-                "output bytes are synchronously available beneath the local project root"
-            )
-
         # Execute stage-by-stage so a missing/malformed declared report stops
         # the flow before a later vendor stage is launched.
         completed_runs: list[ToolRun] = []
@@ -443,12 +631,29 @@ class Project:
                    if stage in consumers)],
                 key=lambda item: item.id,
             )
+            runner_inputs = [RunnerInput(
+                artifact_id=item.id,
+                source_path=item.uri,
+                staged_path=(
+                    str(item.metadata.get("declared_output_path"))
+                    if item.producer_run_id and item.metadata.get("declared_output_path")
+                    else item.uri
+                ),
+                sha256=item.sha256,
+                size=item.size,
+            ) for item in current_inputs]
+            declared_outputs = [DeclaredOutput(
+                path=item.path,
+                required=item.required,
+                max_bytes=item.metadata.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES),
+            ) for item in output_specs]
             stage_metadata: dict[str, Any] = {
                 "project_id": snapshot_manifest.project_id,
                 "input_artifacts": [
-                    {"id": item.id, "uri": item.uri,
+                    {"id": item.artifact_id, "uri": item.source_path,
+                     "staged_path": item.staged_path,
                      "sha256": item.sha256, "size": item.size}
-                    for item in current_inputs
+                    for item in runner_inputs
                 ],
                 "declared_outputs": [
                     {"path": item.path, "kind": item.kind, "required": item.required,
@@ -473,12 +678,13 @@ class Project:
                 toolchain_id=toolchain.id,
                 environment_hash=toolchain.environment_hash,
                 input_artifact_ids=[item.id for item in current_inputs],
+                inputs=runner_inputs, declared_outputs=declared_outputs,
                 nonzero_failure=FailureClass.CORRECTNESS
                 if stage in {"csim", "rtl_cosim"} else FailureClass.DESIGN_COMPILE,
                 metadata=stage_metadata,
             )
             pre_mismatches = self._artifact_byte_mismatches(
-                current_inputs, verify_declared_paths=True,
+                current_inputs, verify_declared_paths=False,
             )
             pre_stale = self.bundle.is_stale(snapshot)
             if pre_mismatches or pre_stale:
@@ -491,57 +697,61 @@ class Project:
                 stopped = request.stage
                 break
             partial = StageOrchestrator(runner).execute([request])
-            run = partial.runs[0]
-            post_mismatches = self._artifact_byte_mismatches(
-                current_inputs, verify_declared_paths=True,
-            )
-            post_stale = self.bundle.is_stale(snapshot)
-            if post_mismatches or post_stale:
-                run = self._input_validation_failure_run(
-                    request, runner, mismatches=post_mismatches,
-                    stale=post_stale, execution_started=True,
-                    previous=run,
+            execution = partial.executions[0]
+            run = execution.run
+            try:
+                post_mismatches = self._artifact_byte_mismatches(
+                    current_inputs, verify_declared_paths=False,
                 )
-                self.bundle.store.add_run(run)
+                post_stale = self.bundle.is_stale(snapshot)
+                if post_mismatches or post_stale:
+                    run = self._input_validation_failure_run(
+                        request, runner, mismatches=post_mismatches,
+                        stale=post_stale, execution_started=True,
+                        previous=run,
+                    )
+                    self.bundle.store.add_run(run)
+                    completed_runs.append(run)
+                    stopped = request.stage
+                    break
                 completed_runs.append(run)
-                stopped = request.stage
-                break
-            completed_runs.append(run)
-            runner_gate_failed = any(gate.status == GateStatus.FAIL for gate in run.gates)
-            if run.status not in {RunStatus.SUCCEEDED, RunStatus.CACHED}:
-                self.bundle.store.add_run(run)
-                stopped = request.stage
-                break
-            if output_specs:
-                extraction = self._commit_declared_run_outputs(
-                    snapshot, snapshot_manifest, run, output_specs,
-                )
-                produced = {item.id: item for item in
-                            self.bundle.store.artifacts(snapshot.id)
-                            if item.id in set(run.output_artifact_ids)}
-                for artifact in produced.values():
-                    consumers = {str(item) for item in
-                                 artifact.metadata.get("consumed_by_stages", [])}
-                    if consumers:
-                        chained_artifacts[artifact.id] = (artifact, consumers)
-                report_failed = any(
-                    item.severity in {DiagnosticSeverity.ERROR, DiagnosticSeverity.CRITICAL}
-                    for item in extraction.diagnostics
-                )
-                gate_failed = any(
-                    item.status == GateStatus.FAIL for item in extraction.verifications
-                ) or any(
-                    item.predicate in {"gate.resource_fits", "gate.post_route_timing"}
-                    and item.value is False for item in extraction.derivations
-                )
-                if report_failed or gate_failed or runner_gate_failed:
+                runner_gate_failed = any(gate.status == GateStatus.FAIL for gate in run.gates)
+                if run.status not in {RunStatus.SUCCEEDED, RunStatus.CACHED}:
+                    self.bundle.store.add_run(run)
                     stopped = request.stage
                     break
-            else:
-                self.bundle.store.add_run(run)
-                if runner_gate_failed:
-                    stopped = request.stage
-                    break
+                if output_specs:
+                    extraction = self._commit_declared_run_outputs(
+                        snapshot, snapshot_manifest, run, output_specs, execution,
+                    )
+                    produced = {item.id: item for item in
+                                self.bundle.store.artifacts(snapshot.id)
+                                if item.id in set(run.output_artifact_ids)}
+                    for artifact in produced.values():
+                        consumers = {str(item) for item in
+                                     artifact.metadata.get("consumed_by_stages", [])}
+                        if consumers:
+                            chained_artifacts[artifact.id] = (artifact, consumers)
+                    report_failed = any(
+                        item.severity in {DiagnosticSeverity.ERROR, DiagnosticSeverity.CRITICAL}
+                        for item in extraction.diagnostics
+                    )
+                    gate_failed = any(
+                        item.status == GateStatus.FAIL for item in extraction.verifications
+                    ) or any(
+                        item.predicate in {"gate.resource_fits", "gate.post_route_timing"}
+                        and item.value is False for item in extraction.derivations
+                    )
+                    if report_failed or gate_failed or runner_gate_failed:
+                        stopped = request.stage
+                        break
+                else:
+                    self.bundle.store.add_run(run)
+                    if runner_gate_failed:
+                        stopped = request.stage
+                        break
+            finally:
+                execution.cleanup()
 
         gate_payload = self.service(snapshot.id).verification_gates()
         required = {GateKind.CORRECTNESS, GateKind.RESOURCE_FITS,
@@ -625,17 +835,31 @@ class Project:
         )
 
     def _commit_declared_run_outputs(
-        self, snapshot: Any, manifest: Any, run: ToolRun, output_specs: Sequence[Any]
+        self, snapshot: Any, manifest: Any, run: ToolRun, output_specs: Sequence[Any],
+        execution: RunnerExecution,
     ) -> ExtractionResult:
         """Attach declared report outputs and parsed evidence in one ledger commit."""
         managed = []
         missing: list[str] = []
+        staged = {item.path: item for item in execution.staged_outputs}
         for spec in output_specs:
-            source = project_path(self.bundle.project_root, spec.path)
-            if not source.is_file():
+            output = staged.get(spec.path)
+            if output is None:
                 if spec.required:
                     missing.append(spec.path)
                 continue
+            if execution.staging_directory is None:
+                raise BundleError("runner returned staged outputs without a staging directory")
+            try:
+                _data, size, digest, source = read_verified_file(
+                    execution.staging_directory, output.path,
+                    expected_size=output.size, expected_sha256=output.sha256,
+                    max_bytes=output.size,
+                )
+            except StagingError as exc:
+                raise BundleError(f"staged output changed before commit: {output.path}") from exc
+            if size != output.size or digest != output.sha256 or source != output.local_path:
+                raise BundleError(f"staged output identity changed before commit: {output.path}")
             artifact, _stored_path, _created = self.bundle.prepare_managed_artifact(
                 source, kind=spec.kind, role=spec.role, access=spec.access,
                 producer_run_id=run.id, license=spec.license,
@@ -694,14 +918,44 @@ class Project:
         extraction.observations = rebound_observations
         derivation_ids: dict[str, str] = {}
         rebound_derivations = []
-        for item in extraction.derivations:
-            rebound = replace(
-                item, id="",
-                input_observation_ids=[observation_ids.get(value, value)
-                                       for value in item.input_observation_ids],
-            )
-            derivation_ids[item.id] = rebound.id
-            rebound_derivations.append(rebound)
+        pending_derivations = list(extraction.derivations)
+        batch_derivation_ids = {item.id for item in pending_derivations}
+        while pending_derivations:
+            remaining = []
+            for item in pending_derivations:
+                dependencies = {
+                    reference.target_id for reference in item.evidence_refs
+                    if reference.kind == EvidenceKind.DERIVATION
+                    and reference.target_id in batch_derivation_ids
+                }
+                if not dependencies.issubset(derivation_ids):
+                    remaining.append(item)
+                    continue
+                evidence_refs = []
+                for reference in item.evidence_refs:
+                    target_id = reference.target_id
+                    if reference.kind == EvidenceKind.OBSERVATION:
+                        target_id = observation_ids.get(target_id, target_id)
+                    elif reference.kind == EvidenceKind.DERIVATION:
+                        target_id = derivation_ids.get(target_id, target_id)
+                    evidence_refs.append(
+                        reference if target_id == reference.target_id else replace(
+                            reference, id="", target_id=target_id,
+                        )
+                    )
+                rebound = replace(
+                    item, id="",
+                    input_observation_ids=[observation_ids.get(value, value)
+                                           for value in item.input_observation_ids],
+                    evidence_refs=evidence_refs,
+                )
+                derivation_ids[item.id] = rebound.id
+                rebound_derivations.append(rebound)
+            if len(remaining) == len(pending_derivations):
+                raise BundleError(
+                    "declared output derivations contain a cyclic same-batch dependency"
+                )
+            pending_derivations = remaining
         extraction.derivations = rebound_derivations
         extraction.verifications = [replace(
             item, id="", run_id=run.id,
@@ -817,8 +1071,12 @@ class Project:
         return export_graph_json(self.bundle, snapshot.id, output)
 
     def export_dataset(self, output_dir: str | Path, dataset: DatasetManifest | None = None,
-                       *, format: str = "jsonl") -> dict[str, Any]:
-        snapshot = self.bundle.latest_snapshot()
+                       *, format: str = "jsonl",
+                       snapshot_id: str | None = None) -> dict[str, Any]:
+        snapshot = (self.bundle.store.snapshot(snapshot_id)
+                    if snapshot_id is not None else self.bundle.latest_snapshot())
         if not snapshot:
             raise ValueError("bundle has no snapshot")
+        if not self.bundle.store.has_graph(snapshot.id):
+            raise ValueError("selected snapshot has no canonical graph")
         return export_dataset(self.bundle, snapshot.id, output_dir, dataset, format=format)

@@ -19,6 +19,36 @@ _BRANCH = re.compile(r"label\s+%([\w.$-]+)")
 _DBG = re.compile(r"!dbg\s+!(\d+)")
 _DILOC = re.compile(r"!(\d+)\s*=\s*!DILocation\(line:\s*(\d+),\s*column:\s*(\d+),\s*scope:\s*!(\d+)")
 _DIFILE = re.compile(r'!(\d+)\s*=\s*!DIFile\(filename:\s*"([^"]+)",\s*directory:\s*"([^"]*)"')
+_INTEGER_WIDTH = re.compile(r"(?<![\w!])i([1-9]\d*)\b")
+_TYPED_INDEX = re.compile(r"\bi[1-9]\d*\s+(-?\d+|%[\w.$-]+)\b")
+
+
+def _integer_widths(text: str) -> list[int]:
+    return [int(value) for value in _INTEGER_WIDTH.findall(text)]
+
+
+def _index_kinds(opcode: str, tail: str) -> list[str]:
+    values: list[str] = []
+    if opcode == "getelementptr":
+        values = _TYPED_INDEX.findall(tail)
+    elif opcode in {"extractelement", "insertelement"}:
+        typed = _TYPED_INDEX.findall(tail)
+        values = typed[-1:] if typed else []
+    elif opcode in {"extractvalue", "insertvalue"}:
+        values = re.findall(r",\s*(-?\d+)\b", tail)
+    return ["constant" if re.fullmatch(r"-?\d+", value) else "dynamic"
+            for value in values]
+
+
+def _memory_access_kind(opcode: str) -> str | None:
+    return {
+        "load": "load",
+        "store": "store",
+        "getelementptr": "address",
+        "atomicrmw": "atomic",
+        "cmpxchg": "atomic",
+        "fence": "ordering",
+    }.get(opcode)
 
 
 class LlvmIrExtractor:
@@ -71,11 +101,15 @@ class LlvmIrExtractor:
                 define = _DEFINE.match(line)
                 if define:
                     name = define.group(1)
+                    function_attrs = {"plane": "evidence", "hot": False}
+                    widths = _integer_widths(line)
+                    if widths:
+                        function_attrs["bitwidths"] = widths
                     current_function = Entity(
                         kind="ir.llvm.function", name=name,
                         qualified_name=f"{artifact.uri}::{name}", snapshot_id=context.snapshot.id,
                         authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.LLVM.value,
-                        attrs={"plane": "evidence", "hot": False},
+                        attrs=function_attrs,
                         anchors=[SourceAnchor(artifact_id=artifact.id, start_line=line_number,
                                               start_column=1, end_line=line_number,
                                               end_column=len(line) + 1)],
@@ -139,14 +173,22 @@ class LlvmIrExtractor:
                                                 ir_location=f"!dbg !{dbg.group(1)}",
                                                 mapping_kind="llvm.debug",
                                                 ambiguity="debug file scope requires DI scope traversal"))
+                memory_kind = _memory_access_kind(opcode)
+                bitwidths = _integer_widths(tail)
+                index_kinds = _index_kinds(opcode, tail)
                 operation = Entity(
                     kind="ir.llvm.operation", name=opcode,
                     qualified_name=f"{artifact.uri}:{line_number}:{opcode}:{result_name or '-'}",
                     snapshot_id=context.snapshot.id,
                     authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.LLVM.value,
-                    attrs={"plane": "evidence", "hot": False, "opcode": opcode,
-                           "ssa_result": result_name, "cfg_is_hls_topology": False,
-                           "memory_access": opcode in {"load", "store", "getelementptr", "atomicrmw"}},
+                    attrs={
+                        "plane": "evidence", "hot": False, "opcode": opcode,
+                        "ssa_result": result_name, "cfg_is_hls_topology": False,
+                        "memory_access": memory_kind is not None,
+                        **({"memory_access_kind": memory_kind} if memory_kind else {}),
+                        **({"bitwidths": bitwidths} if bitwidths else {}),
+                        **({"index_kinds": index_kinds} if index_kinds else {}),
+                    },
                     anchors=anchors,
                 )
                 graph.add_entity(operation)

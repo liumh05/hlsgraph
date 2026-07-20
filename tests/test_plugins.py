@@ -8,7 +8,8 @@ import hlsgraph.plugins as plugins
 import hlsgraph.sdk as sdk
 from hlsgraph.bundle import GraphBundle
 from hlsgraph.manifest import minimal_manifest
-from hlsgraph.plugins import PluginError, load_extractors
+from hlsgraph.plugins import PluginError, load_extractors, load_runners
+from hlsgraph.runner import FakeRunner, PROTOCOL_VERSION
 from hlsgraph.sdk import Project
 
 
@@ -49,6 +50,14 @@ def test_empty_plugin_selection_does_not_discover_host_entry_points(monkeypatch)
 
     monkeypatch.setattr(plugins, "_entries", forbidden)
     assert load_extractors([]) == []
+
+
+def test_empty_runner_selection_does_not_discover_host_entry_points(monkeypatch) -> None:
+    def forbidden(group: str):
+        raise AssertionError(f"entry-point discovery was not expected for {group}")
+
+    monkeypatch.setattr(plugins, "_entries", forbidden)
+    assert load_runners([]) == []
 
 
 @pytest.mark.parametrize("names", [[""], [" plugin"], [1]])
@@ -149,3 +158,80 @@ def test_explicit_plugin_contract_is_validated_after_unique_load(monkeypatch) ->
     with pytest.raises(PluginError, match="is missing 'name'"):
         load_extractors(["incomplete"])
     assert incomplete.load_count == 1
+
+
+def test_runner_v2_plugin_is_explicit_configured_and_protocol_checked(monkeypatch) -> None:
+    class ConfiguredRunner(FakeRunner):
+        name = "runner.fixture"
+
+        def __init__(self, marker: str):
+            super().__init__()
+            self.marker = marker
+
+    entry = FakeEntryPoint("fixture", "pkg:runner", ConfiguredRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    loaded = load_runners(["fixture"], {"fixture": {"marker": "selected"}})
+    assert len(loaded) == 1
+    assert loaded[0].marker == "selected"
+    assert loaded[0].capabilities()["protocol_version"] == PROTOCOL_VERSION
+    assert entry.load_count == 1
+
+
+def test_runner_plugin_rejects_legacy_protocol(monkeypatch) -> None:
+    class LegacyRunner(FakeRunner):
+        name = "runner.legacy"
+
+        def capabilities(self):
+            value = super().capabilities()
+            value["protocol_version"] = "hlsgraph.runner.v1"
+            return value
+
+    entry = FakeEntryPoint("legacy", "pkg:runner", LegacyRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    with pytest.raises(PluginError, match="hlsgraph.runner.v2"):
+        load_runners(["legacy"])
+
+
+def test_runner_plugin_resource_guard_authority_is_explicit_boolean(monkeypatch) -> None:
+    class GuardCapableRunner(FakeRunner):
+        name = "runner.guard_capable"
+        can_report_resource_guard = True
+
+    entry = FakeEntryPoint("guard", "pkg:runner", GuardCapableRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    loaded = load_runners(["guard"])
+    assert loaded[0].capabilities()["can_report_resource_guard"] is True
+
+    class AmbiguousRunner(GuardCapableRunner):
+        def capabilities(self):
+            value = super().capabilities()
+            value["can_report_resource_guard"] = "yes"
+            return value
+
+    ambiguous = FakeEntryPoint("ambiguous", "pkg:runner", AmbiguousRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [ambiguous])
+    with pytest.raises(PluginError, match="boolean can_report_resource_guard"):
+        load_runners(["ambiguous"])
+
+
+def test_runner_plugin_runtime_guard_authority_is_explicit_boolean(monkeypatch) -> None:
+    class RuntimeCapableRunner(FakeRunner):
+        name = "runner.runtime_guard_capable"
+        can_report_runtime_resource_guard = True
+
+    entry = FakeEntryPoint("runtime", "pkg:runner", RuntimeCapableRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    loaded = load_runners(["runtime"])
+    assert loaded[0].capabilities()["can_report_runtime_resource_guard"] is True
+
+    class AmbiguousRunner(RuntimeCapableRunner):
+        def capabilities(self):
+            value = super().capabilities()
+            value["can_report_runtime_resource_guard"] = "yes"
+            return value
+
+    ambiguous = FakeEntryPoint("ambiguous", "pkg:runner", AmbiguousRunner)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [ambiguous])
+    with pytest.raises(
+            PluginError, match="boolean can_report_runtime_resource_guard"):
+        load_runners(["ambiguous"])

@@ -16,6 +16,7 @@ from hlsgraph import (
     CanonicalGraph,
     DatasetManifest,
     Entity,
+    FEATURE_SCHEMA_VERSION,
     LabelSpec,
     Observation,
     Project,
@@ -245,7 +246,7 @@ def test_ml_export_checks_label_semantics_and_split_leakage(tmp_path: Path) -> N
     second, _ = _snapshot_with_graph(bundle, "void dut() { int x = 1; (void)x; }\n")
 
     mismatch = DatasetManifest(
-        dataset_id="dataset.mismatch", feature_schema_version="0.1.0",
+        dataset_id="dataset.mismatch", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[first], labels=[LabelSpec(
             "latency", first, observation.id,
             "qor.latency_cycles", "post_route", "cycle"
@@ -255,7 +256,7 @@ def test_ml_export_checks_label_semantics_and_split_leakage(tmp_path: Path) -> N
         export_dataset(bundle, first, tmp_path / "mismatch", mismatch)
 
     leakage = DatasetManifest(
-        dataset_id="dataset.leakage", feature_schema_version="0.1.0",
+        dataset_id="dataset.leakage", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[first, second], splits={first: "train", second: "test"},
         kernel_families={first: "family.same", second: "family.same"},
         dedup_groups={first: "dedup.first", second: "dedup.second"},
@@ -265,7 +266,7 @@ def test_ml_export_checks_label_semantics_and_split_leakage(tmp_path: Path) -> N
         export_dataset(bundle, first, tmp_path / "leakage", leakage)
 
     multi = DatasetManifest(
-        dataset_id="dataset.multi", feature_schema_version="0.1.0",
+        dataset_id="dataset.multi", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[first, second],
     )
     manifest = export_dataset(bundle, first, tmp_path / "multi", multi)
@@ -286,6 +287,7 @@ def test_ml_export_has_explicit_stage_and_attribute_firewalls(tmp_path: Path) ->
         authority=AuthorityClass.DECLARED_CONSTRAINT,
         attrs={
             "bitwidth": 32,
+            "dims": [1, 16, 2_147_483_647],
             "plugin_secret_qor": 99,
             "lut_used": 91, "bram": 92, "dsp": 93,
             "fmax_mhz": 94, "throughput": 95,
@@ -313,12 +315,13 @@ def test_ml_export_has_explicit_stage_and_attribute_firewalls(tmp_path: Path) ->
     bundle.store.save_graph(graph)
 
     dataset = DatasetManifest(
-        dataset_id="dataset.firewall", feature_schema_version="0.1.0",
+        dataset_id="dataset.firewall", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id],
     )
     # Even an explicitly top-level-allowlisted plugin container stays excluded
     # until a future feature-schema version defines its child fields.
     dataset.feature_attribute_allowlist.append("plugin_container")
+    dataset.feature_attribute_allowlist.append("dims")
     dataset.feature_attribute_allowlist.extend(
         ["lut_used", "bram", "dsp", "fmax_mhz", "throughput"]
     )
@@ -329,6 +332,7 @@ def test_ml_export_has_explicit_stage_and_attribute_firewalls(tmp_path: Path) ->
     assert [item["node_id"] for item in nodes] == [kernel.id]
     expected_features = {
         "bitwidth": 32,
+        "dims": [1, 16, 2_147_483_647],
         "options": {
             "factor": 4,
             "flags": ["rewind", "off"],
@@ -345,6 +349,13 @@ def test_ml_export_has_explicit_stage_and_attribute_firewalls(tmp_path: Path) ->
     assert nested_schema["unknown_container_policy"] == "exclude"
     assert nested_schema["unknown_container_key_policy"] == "exclude"
     assert nested_schema["containers"]["options"]["additionalProperties"] is False
+    assert nested_schema["containers"]["dims"] == {
+        "type": "positive_integer_list",
+        "min_items": 1,
+        "max_items": 16,
+        "min_value": 1,
+        "max_value": 2_147_483_647,
+    }
     assert "ii" in nested_schema["containers"]["options"]["properties"]
     assert all(name not in nested_schema["containers"]["options"]["properties"]
                for name in ("lut_used", "bram", "dsp", "fmax_mhz", "throughput"))
@@ -356,10 +367,35 @@ def test_ml_export_has_explicit_stage_and_attribute_firewalls(tmp_path: Path) ->
     with pytest.raises(ValueError, match="embedded body"):
         DatasetManifest(
             dataset_id="dataset.private_body",
-            feature_schema_version="0.1.0",
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
             snapshot_ids=[snapshot.id],
             metadata={"source_text": "PRIVATE_DATASET_SENTINEL"},
         )
+
+
+@pytest.mark.parametrize(
+    "invalid_dims",
+    [
+        [],
+        [0],
+        [-1, 2],
+        [True, 2],
+        [1.0, 2],
+        ["1", 2],
+        [None, 2],
+        [2_147_483_648],
+        list(range(1, 18)),
+        (1, 2),
+        {"rows": 1, "cols": 2},
+        "1,2",
+    ],
+)
+def test_dims_feature_schema_rejects_invalid_or_non_list_values(
+    invalid_dims: object,
+) -> None:
+    from hlsgraph.export.ml import _static_features
+
+    assert _static_features({"dims": invalid_dims}, {"dims"}) == {}
 
 
 def test_pyg_uses_the_same_nested_feature_schema(
@@ -432,7 +468,7 @@ def test_ml_export_revalidates_mutated_dataset_and_labels(tmp_path: Path) -> Non
 
     sentinel = "PRIVATE_MUTATED_DATASET_SOURCE_SENTINEL_92d7"
     mutated_metadata = DatasetManifest(
-        dataset_id="dataset.mutated_metadata", feature_schema_version="0.1.0",
+        dataset_id="dataset.mutated_metadata", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id],
     )
     mutated_metadata.metadata["source_text"] = sentinel
@@ -448,7 +484,7 @@ def test_ml_export_revalidates_mutated_dataset_and_labels(tmp_path: Path) -> Non
     )
     mutated_label.observation_id = None
     label_dataset = DatasetManifest(
-        dataset_id="dataset.mutated_label", feature_schema_version="0.1.0",
+        dataset_id="dataset.mutated_label", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[mutated_label],
     )
     label_output = tmp_path / "mutated-label"
@@ -578,7 +614,7 @@ def test_ml_export_closes_redacted_run_constraint_and_toolchain_provenance(
         run=run, artifacts=[report], observations=[observation]
     )
     dataset = DatasetManifest(
-        dataset_id="dataset.provenance", feature_schema_version="0.1.0",
+        dataset_id="dataset.provenance", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[
             LabelSpec(
                 label_id="failed_timing", snapshot_id=snapshot.id,
@@ -753,7 +789,7 @@ def test_ml_export_rejects_run_backed_label_after_report_cas_is_lost(
         run=run, artifacts=[report], observations=[observation],
     )
     dataset = DatasetManifest(
-        dataset_id="dataset.label_report_integrity", feature_schema_version="0.1.0",
+        dataset_id="dataset.label_report_integrity", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="latency", snapshot_id=snapshot.id,
             observation_id=observation.id,
@@ -846,7 +882,7 @@ def test_trusted_label_stage_and_report_must_match_the_producer_stage(
         lambda _self, _snapshot_id, **_kwargs: [disguised_post_route],
     )
     dataset = DatasetManifest(
-        dataset_id="dataset.disguised_post_route", feature_schema_version="0.1.0",
+        dataset_id="dataset.disguised_post_route", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="post_route_wns", snapshot_id=snapshot.id,
             observation_id=disguised_post_route.id,
@@ -951,7 +987,7 @@ def test_known_report_kind_cannot_be_retyped_by_plugin_extension(
             bundle, snapshot.id, tmp_path / "known-kind-unlabelled-observation"
         )
     dataset = DatasetManifest(
-        dataset_id="dataset.known_kind_stage_policy", feature_schema_version="0.1.0",
+        dataset_id="dataset.known_kind_stage_policy", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="post_route_wns", snapshot_id=snapshot.id,
             observation_id=disguised_observation.id,
@@ -1160,7 +1196,7 @@ def test_ml_labels_are_keyed_by_snapshot_and_preserve_masked_truth(
         ),
     ]
     dataset = DatasetManifest(
-        dataset_id="dataset.multi_label", feature_schema_version="0.1.0",
+        dataset_id="dataset.multi_label", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[first, second], labels=labels,
     )
     output = tmp_path / "multi-label"
@@ -1175,7 +1211,7 @@ def test_ml_labels_are_keyed_by_snapshot_and_preserve_masked_truth(
     }
 
     duplicate = DatasetManifest(
-        dataset_id="dataset.duplicate_label", feature_schema_version="0.1.0",
+        dataset_id="dataset.duplicate_label", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[first, second], labels=[labels[0], labels[0]],
     )
     with pytest.raises(ValueError, match="unique by snapshot_id and label_id"):
@@ -1203,7 +1239,7 @@ def test_ml_present_label_rejects_runless_and_synthetic_tool_observations(
     with pytest.raises(ValueError, match="lacks a producer tool run"):
         export_dataset(bundle, snapshot.id, tmp_path / "runless-unlabelled-observation")
     runless_dataset = DatasetManifest(
-        dataset_id="dataset.runless_label", feature_schema_version="0.1.0",
+        dataset_id="dataset.runless_label", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="runless_latency", snapshot_id=snapshot.id,
             observation_id=runless.id, predicate=runless.predicate,
@@ -1252,7 +1288,7 @@ def test_ml_present_label_rejects_runless_and_synthetic_tool_observations(
         run=synthetic_run, artifacts=[report], observations=[synthetic],
     )
     synthetic_dataset = DatasetManifest(
-        dataset_id="dataset.synthetic_label", feature_schema_version="0.1.0",
+        dataset_id="dataset.synthetic_label", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="synthetic_latency", snapshot_id=snapshot.id,
             observation_id=synthetic.id, predicate=synthetic.predicate,
@@ -1289,7 +1325,7 @@ def test_label_spec_rejects_ambiguous_mask_and_malformed_identifiers() -> None:
 def test_release_metadata_and_sbom_are_consistent() -> None:
     root = Path(__file__).parents[1]
     sbom = json.loads((root / "sbom.spdx.json").read_text(encoding="utf-8"))
-    assert sbom["name"] == "hlsgraph-0.1.2"
+    assert sbom["name"] == "hlsgraph-0.2.0"
     packages = {item["name"]: item for item in sbom["packages"]}
     assert {"hlsgraph", "cytoscape", "elkjs", "tomli"}.issubset(packages)
     from tools.audit_release import (
@@ -1408,7 +1444,7 @@ def test_release_audit_accepts_crlf_metadata_and_only_standard_sdist_egg_info() 
     metadata = (
         b"Metadata-Version: 2.4\r\n"
         b"Name: hlsgraph\r\n"
-        b"Version: 0.1.2\r\n"
+        b"Version: 0.2.0\r\n"
         b"Project-URL: Source, https://github.com/liumh05/hlsgraph\r\n\r\n"
     )
     assert _audit_wheel_metadata(metadata) == []

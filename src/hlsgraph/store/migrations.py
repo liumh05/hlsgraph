@@ -7,9 +7,11 @@ opened it.  A breaking schema change must add a deterministic, reviewed step to
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import sqlite3
 from typing import Callable
 
+from ..model import Derivation, json_ready
 from ..version import SCHEMA_VERSION
 
 
@@ -24,10 +26,141 @@ class MigrationStep:
     apply: MigrationApply
 
 
-# v0.1 is the first public schema, so no historical transformation exists yet.
-# Future releases append reviewed steps; they must never mutate observation
-# meaning without preserving the old payload or recording a new observation.
-MIGRATIONS: tuple[MigrationStep, ...] = ()
+_V01 = "0.1.0"
+_V02 = "0.2.0"
+
+
+def _require_columns(
+    connection: sqlite3.Connection, table: str, expected: frozenset[str],
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    actual = {str(row[1]) for row in rows}
+    if not rows or not expected.issubset(actual):
+        raise ValueError(
+            f"ledger table {table!r} is missing required columns: "
+            + ", ".join(sorted(expected - actual))
+        )
+
+
+def _migrate_v01_to_v02(connection: sqlite3.Connection) -> None:
+    """Add v0.2 contracts without changing any v0.1 fact identity."""
+    for table in (
+        "schema_info", "snapshots", "entities", "artifacts", "snapshot_artifacts",
+        "observations", "derivations", "diagnostics", "variants", "graph_views",
+    ):
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+        ).fetchone() is None:
+            raise ValueError(f"v0.1 ledger is missing required table {table!r}")
+
+    statements = (
+        """CREATE TABLE IF NOT EXISTS entity_correspondences (
+          id TEXT PRIMARY KEY,
+          source_snapshot_id TEXT NOT NULL,
+          source_entity_id TEXT NOT NULL,
+          target_snapshot_id TEXT NOT NULL,
+          target_entity_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          FOREIGN KEY(source_snapshot_id, source_entity_id)
+            REFERENCES entities(snapshot_id, id),
+          FOREIGN KEY(target_snapshot_id, target_entity_id)
+            REFERENCES entities(snapshot_id, id)
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_correspondences_source
+          ON entity_correspondences(source_snapshot_id, source_entity_id, kind)""",
+        """CREATE INDEX IF NOT EXISTS idx_correspondences_target
+          ON entity_correspondences(target_snapshot_id, target_entity_id, kind)""",
+        """CREATE TABLE IF NOT EXISTS action_materializations (
+          id TEXT PRIMARY KEY,
+          action_id TEXT NOT NULL REFERENCES variants(id),
+          parent_snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
+          result_snapshot_id TEXT REFERENCES snapshots(id),
+          status TEXT NOT NULL,
+          attempted_at TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_materializations_action
+          ON action_materializations(action_id, attempted_at, id)""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+    _require_columns(connection, "entity_correspondences", frozenset({
+        "id", "source_snapshot_id", "source_entity_id", "target_snapshot_id",
+        "target_entity_id", "kind", "payload_json",
+    }))
+    _require_columns(connection, "action_materializations", frozenset({
+        "id", "action_id", "parent_snapshot_id", "result_snapshot_id", "status",
+        "attempted_at", "payload_json",
+    }))
+
+    # Old derivations contain only input_observation_ids.  Constructing the v0.2
+    # model adds typed observation EvidenceRefs while deliberately preserving the
+    # legacy stable ID algorithm for this exact case.
+    for row in connection.execute(
+        "SELECT id,payload_json FROM derivations ORDER BY id"
+    ).fetchall():
+        try:
+            payload = json.loads(row[1])
+            if not isinstance(payload, dict):
+                raise ValueError("payload is not an object")
+            migrated = Derivation.from_dict(payload)
+            canonical = json_ready(migrated)
+            expected = Derivation.from_dict({**canonical, "id": ""}).id
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid v0.1 derivation {row[0]!r}: {exc}") from exc
+        if migrated.id != row[0] or expected != row[0]:
+            raise ValueError(
+                f"v0.1 derivation {row[0]!r} would change identity during migration"
+            )
+        if any(
+            reference.kind.value != "observation"
+            or reference.snapshot_id != migrated.snapshot_id
+            or connection.execute(
+                "SELECT 1 FROM observations WHERE snapshot_id=? AND id=?",
+                (migrated.snapshot_id, reference.target_id),
+            ).fetchone() is None
+            for reference in migrated.evidence_refs
+        ):
+            raise ValueError(
+                f"v0.1 derivation {row[0]!r} has unresolved observation evidence"
+            )
+        connection.execute(
+            "UPDATE derivations SET payload_json=? WHERE id=?",
+            (json.dumps(canonical, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), allow_nan=False), row[0]),
+        )
+
+    unexpected_views = connection.execute(
+        "SELECT DISTINCT schema_version FROM graph_views "
+        "WHERE schema_version NOT IN (?,?)", (_V01, _V02),
+    ).fetchall()
+    if unexpected_views:
+        raise ValueError(
+            "v0.1 ledger contains graph views with unsupported schema markers: "
+            + ", ".join(sorted(str(row[0]) for row in unexpected_views))
+        )
+    connection.execute(
+        "UPDATE graph_views SET schema_version=? WHERE schema_version=?", (_V02, _V01),
+    )
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise ValueError("v0.1 ledger contains foreign-key violations")
+
+
+# Migration is explicit and append-only.  It supplements legacy derivation
+# payloads but never changes observation meaning, historical manifests, or IDs.
+MIGRATIONS: tuple[MigrationStep, ...] = (
+    MigrationStep(
+        from_version=_V01,
+        to_version=_V02,
+        description=(
+            "add typed feature evidence, entity correspondence, and action "
+            "materialization contracts"
+        ),
+        apply=_migrate_v01_to_v02,
+    ),
+)
 
 
 def migration_path(from_version: str, to_version: str = SCHEMA_VERSION) -> list[MigrationStep]:

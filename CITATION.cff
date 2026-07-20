@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: "Contributors"
     given-names: "HLSGraph"
-version: 0.1.2
+version: 0.2.0
 date-released: 2026-07-18
 license: Apache-2.0
 repository-code: "https://github.com/liumh05/hlsgraph"

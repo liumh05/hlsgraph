@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import json
 import shlex
 import sqlite3
 import subprocess
@@ -23,10 +25,12 @@ from hlsgraph.model import (
 )
 from hlsgraph.runner import (
     CacheMiss,
+    DeclaredOutput,
     FakeOutcome,
     FakeRunner,
     LocalRunner,
     ReplayRunner,
+    RunnerInput,
     RunnerProtocolError,
     SSHRunner,
     StageOrchestrator,
@@ -45,7 +49,7 @@ def _request(stage: str = "csynth", **overrides) -> ToolRunRequest:
         "environment": {"MODE": "test"},
         "environment_hash": "e" * 64,
         "toolchain_id": "amd.vitis.2024_2",
-        "input_artifact_ids": ["artifact_b", "artifact_a"],
+        "input_artifact_ids": [],
         "timeout_s": 10.0,
         "nonzero_failure": FailureClass.DESIGN_COMPILE,
         "metadata": {"fixture": True},
@@ -58,7 +62,7 @@ def test_runner_cache_key_is_deterministic_and_complete():
     request = _request()
     fingerprint = "runner-fingerprint"
     assert request.cache_key(fingerprint) == _request(
-        environment={"MODE": "test"}, input_artifact_ids=["artifact_a", "artifact_b"]
+        environment={"MODE": "test"}, input_artifact_ids=[]
     ).cache_key(fingerprint)
 
     variants = [
@@ -68,7 +72,9 @@ def test_runner_cache_key_is_deterministic_and_complete():
         _request(environment={"MODE": "release"}),
         _request(environment_hash="f" * 64),
         _request(toolchain_id="amd.vitis.2025_1"),
-        _request(input_artifact_ids=["artifact_c"]),
+        _request(input_artifact_ids=["artifact_c"], inputs=[RunnerInput(
+            "artifact_c", "input.cpp", "input.cpp", "a" * 64, 1,
+        )]),
         _request(timeout_s=20),
         _request(nonzero_failure=FailureClass.CORRECTNESS),
         _request(metadata={"fixture": False}),
@@ -92,7 +98,7 @@ def test_local_and_ssh_execution_are_disabled_by_default(tmp_path):
     assert LocalRunner(tmp_path).capabilities()["provides_local_output_bytes"] is True
     assert SSHRunner("fixture-host", "/tmp/fixture").capabilities()[
         "provides_local_output_bytes"
-    ] is False
+    ] is True
 
 
 def test_local_runner_classifies_spawn_failure_as_infrastructure(tmp_path):
@@ -150,76 +156,82 @@ def test_isolated_local_environment_uses_only_windows_system_root():
     assert _local_bootstrap_environment(source, platform="posix") == {}
 
 
-def test_ssh_runner_quotes_one_bash_command_and_verifies_remote_inputs(monkeypatch):
+def test_ssh_runner_uses_explicit_manifest_and_transfer(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_subprocess_run(argv, **_kwargs):
+    def fake_subprocess_run(argv, **kwargs):
         captured["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        captured["payload"] = json.loads(kwargs["input"])
+        response = {
+            "kind": "tool", "exit_code": 0,
+            "stdout": base64.b64encode(b"").decode(),
+            "stderr": base64.b64encode(b"").decode(), "outputs": [],
+        }
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="HLSGRAPH_RUNNER_V2:" + json.dumps(response) + "\n", stderr="",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
     artifact_id = "artifact_remote"
-    digest = "a" * 64
+    source = tmp_path / "inputs" / "file.cpp"
+    source.parent.mkdir()
+    source.write_bytes(b"fixture-data")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
     probe_output = b"fixture-remote-environment"
     environment_hash = hashlib.sha256(probe_output).hexdigest()
     request = _request(
         argv=["fixture-tool", "argument with spaces", "x; touch injected"],
         environment_hash=environment_hash,
         input_artifact_ids=[artifact_id],
+        inputs=[RunnerInput(
+            artifact_id, "inputs/file.cpp", "inputs/file.cpp", digest, 12,
+        )],
         metadata={
-            "input_artifacts": [{
-                "id": artifact_id, "uri": "inputs/file with spaces.cpp",
-                "sha256": digest, "size": 12,
-            }],
             "remote_attestation_argv": [
                 "printf", "%s", probe_output.decode("ascii"),
             ],
         },
     )
-    run = SSHRunner("fixture-host", "/tmp/project root", allow_execution=True,
-                    ssh_options=()).execute(request)
+    run = SSHRunner("fixture-host", "/tmp/project root", project_root=tmp_path,
+                    allow_execution=True, ssh_options=()).execute(request)
     argv = captured["argv"]
-    assert argv[-3:-1] == ["bash", "-lc"]
-    remote = shlex.split(argv[-1])[0]
-    assert "sha256sum" in remote and "wc -c" in remote
-    assert "exit 86" in remote
-    assert "attestation_hash" in remote and "exit 87" in remote
-    assert "fixture-tool 'argument with spaces' 'x; touch injected'" in remote
+    assert argv[:2] == ["ssh", "fixture-host"]
+    assert "python3 -c" in argv[-1]
+    payload = captured["payload"]
+    assert payload["protocol"] == "hlsgraph.runner.v2"
+    assert payload["inputs"][0]["path"] == "inputs/file.cpp"
+    assert base64.b64decode(payload["inputs"][0]["data"]) == b"fixture-data"
+    assert payload["argv"] == ["fixture-tool", "argument with spaces", "x; touch injected"]
     assert run.status == RunStatus.SUCCEEDED
     assert run.metadata["remote_inputs_verified"] is True
     assert run.metadata["remote_environment_verified"] is True
     assert run.metadata["tool_truth"] is True
 
 
-def test_ssh_runner_requires_pinned_environment_and_remote_artifact_manifest():
+def test_ssh_runner_requires_project_binding_and_pinned_environment(tmp_path):
     runner = SSHRunner("fixture-host", "/tmp/project", allow_execution=True)
+    with pytest.raises(RunnerProtocolError, match="local project root"):
+        runner.execute(_request(metadata={"remote_attestation_argv": ["probe"]}))
+    runner.bind_project_root(tmp_path)
     with pytest.raises(RunnerProtocolError, match="environment_hash"):
         runner.execute(_request(environment_hash=None))
     with pytest.raises(RunnerProtocolError, match="remote_attestation_argv"):
         runner.execute(_request(metadata={}))
-    with pytest.raises(RunnerProtocolError, match="input_artifacts"):
-        runner.execute(_request(metadata={
-            "remote_attestation_argv": ["fixture-env-probe"],
-        }))
 
 
-def test_ssh_attestation_mismatch_is_infrastructure_not_tool_truth(monkeypatch):
+def test_ssh_attestation_mismatch_is_infrastructure_not_tool_truth(tmp_path, monkeypatch):
     def attestation_mismatch(argv, **_kwargs):
-        return subprocess.CompletedProcess(argv, 87, stdout="", stderr="attestation mismatch")
+        response = {"kind": "attestation", "message": "attestation mismatch", "exit_code": 1}
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="HLSGRAPH_RUNNER_V2:" + json.dumps(response) + "\n", stderr="",
+        )
 
     monkeypatch.setattr(subprocess, "run", attestation_mismatch)
     request = _request(
-        input_artifact_ids=["artifact_remote"],
-        metadata={
-            "input_artifacts": [{
-                "id": "artifact_remote", "uri": "kernel.cpp",
-                "sha256": "a" * 64, "size": 12,
-            }],
-            "remote_attestation_argv": ["fixture-env-probe"],
-        },
+        metadata={"remote_attestation_argv": ["fixture-env-probe"]},
     )
-    run = SSHRunner("fixture-host", "/tmp/project", allow_execution=True,
-                    ssh_options=()).execute(request)
+    run = SSHRunner("fixture-host", "/tmp/project", project_root=tmp_path,
+                    allow_execution=True, ssh_options=()).execute(request)
     assert run.status == RunStatus.FAILED
     assert run.failure_class == FailureClass.INFRASTRUCTURE
     assert run.metadata["remote_inputs_verified"] is True
@@ -278,14 +290,14 @@ def test_replay_rejects_failed_or_identity_inconsistent_source_runs():
     request = _request()
     source = FakeRunner()
     failed = source.execute(request)
-    failed.status = RunStatus.FAILED
-    failed.failure_class = FailureClass.DESIGN_COMPILE
+    failed.run.status = RunStatus.FAILED
+    failed.run.failure_class = FailureClass.DESIGN_COMPILE
     key = request.cache_key(source.fingerprint)
     with pytest.raises(CacheMiss):
         ReplayRunner({key: failed}, source_runner_fingerprint=source.fingerprint).execute(request)
 
     original = source.execute(request)
-    original.stage = "rtl_cosim"
+    original.run.stage = "rtl_cosim"
     with pytest.raises(CacheMiss):
         ReplayRunner({key: original}, source_runner_fingerprint=source.fingerprint).execute(request)
 

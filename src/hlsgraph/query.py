@@ -7,14 +7,14 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .bundle import GraphBundle
 from .diagnostic_projection import public_diagnostic
 from .graph import CanonicalGraph
 from .model import (
     AuthorityClass, DiagnosticSeverity, Entity, GateKind, GateStatus, hash_artifact_bytes,
-    json_ready, stable_hash,
+    json_ready, reject_embedded_body_fields, stable_hash,
 )
 from .version import SCHEMA_VERSION
 
@@ -60,6 +60,55 @@ _PHYSICAL_GATE_REPORT_KINDS: dict[str, frozenset[str]] = {
 _TOOL_EVIDENCE_AUTHORITIES = frozenset({
     "tool_observation", "verification_evidence", "physical_measurement",
 })
+
+_STATIC_FEATURE_AUTHORITIES = frozenset({
+    "declared_constraint", "static_fact", "compiler_decision", "derived_fact",
+    "synthetic",
+})
+
+_STATIC_FEATURE_STAGES = frozenset({
+    "source", "ast", "mlir", "hls_ir", "llvm", "schedule", "rtl",
+})
+
+_FEATURE_OUTCOME_MARKERS = frozenset({
+    "achieved", "board", "cosim", "csim", "csynth", "dsp", "fmax", "gate",
+    "hardware_runtime", "implementation", "label", "latency", "lut", "measured",
+    "observation", "observed", "place", "power", "prediction", "profile", "qor",
+    "report", "resource", "route", "slack", "synth", "throughput", "timing",
+    "tns", "uram", "utilization", "vivado", "wns",
+})
+
+
+def static_feature_predicate_allowed(predicate: str) -> bool:
+    """Conservatively reject outcome-shaped predicates from feature inputs."""
+    if not isinstance(predicate, str) or not predicate.strip():
+        return False
+    tokens = [item for item in re.split(r"[^A-Za-z0-9]+", predicate.casefold()) if item]
+    return bool(tokens) and not any(
+        token in _FEATURE_OUTCOME_MARKERS
+        or any(token.startswith(marker + "_") for marker in _FEATURE_OUTCOME_MARKERS)
+        for token in tokens
+    )
+
+
+def _static_feature_value_allowed(value: Any) -> bool:
+    """Reject outcome-shaped or embedded-body containers from feature queries."""
+    try:
+        reject_embedded_body_fields(value, "feature evidence value")
+    except ValueError:
+        return False
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if (not isinstance(key, str)
+                    or not static_feature_predicate_allowed(f"feature.{key}")
+                    or not _static_feature_value_allowed(child)):
+                return False
+        return True
+    elif isinstance(value, (list, tuple)):
+        return all(_static_feature_value_allowed(item) for item in value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return value is None or isinstance(value, (str, bool, int))
 
 
 def managed_artifact_integrity(bundle: GraphBundle, artifact: Any) -> tuple[bool, str]:
@@ -408,9 +457,15 @@ class CoreService:
         observation_ids = {item.id for item in observations}
         derivations = [item for item in self.bundle.store.derivations(self.snapshot_id)
                        if item.get("subject_id") == entity_id
-                       or observation_ids.intersection(item.get("input_observation_ids", []))]
+                       or observation_ids.intersection(item.get("input_observation_ids", []))
+                       or any(ref.get("kind") == "entity_anchor"
+                              and ref.get("target_id") == entity_id
+                              for ref in item.get("evidence_refs", []))]
+        derivation_ids = {str(item.get("id")) for item in derivations}
         verifications = [item for item in self.bundle.store.verifications(self.snapshot_id)
-                         if observation_ids.intersection(item.get("evidence_ids", []))]
+                         if (observation_ids | derivation_ids).intersection(
+                             item.get("evidence_ids", [])
+                         )]
         return {
             "schema_version": SCHEMA_VERSION,
             "snapshot_id": self.snapshot_id,
@@ -422,6 +477,289 @@ class CoreService:
             "diagnostics": [public_diagnostic(item)
                             for item in self.bundle.store.active_diagnostics(self.snapshot_id)
                             if item.subject_id == entity_id],
+        }
+
+    def feature_evidence(self, entity_id: str | None = None, *,
+                         predicates: Iterable[str] = (),
+                         stages: Iterable[str] = (),
+                         limit: int = 100) -> dict[str, Any]:
+        """Return deterministic, evidence-backed feature records only.
+
+        This is a provenance query, not an implicit feature generator. Outcome-
+        shaped predicates and tool/physical authorities are excluded even when
+        requested, so a consumer cannot promote QoR or a prediction into an
+        input feature by changing a query string.
+        """
+        graph = self.graph()
+        if entity_id is not None and entity_id not in graph.entities:
+            raise KeyError(entity_id)
+        selected_predicates = tuple(dict.fromkeys(str(item) for item in predicates))
+        selected_stages = tuple(dict.fromkeys(str(item) for item in stages))
+        if any(not item.strip() for item in (*selected_predicates, *selected_stages)):
+            raise ValueError("feature evidence filters must be non-empty strings")
+        disallowed = sorted(
+            item for item in selected_predicates
+            if not static_feature_predicate_allowed(item)
+        )
+        if disallowed:
+            raise ValueError(
+                f"outcome-shaped predicates cannot be feature evidence: {disallowed}"
+            )
+        bounded_limit = max(1, min(int(limit), 1000))
+        observations = {
+            item.id: item for item in self.bundle.store.observations(self.snapshot_id)
+        }
+        derivation_map = {
+            str(item["id"]): item for item in self.bundle.store.derivations(self.snapshot_id)
+        }
+        artifacts = {
+            item.id: item for item in self.bundle.store.artifacts(self.snapshot_id)
+        }
+        runs = {item.id: item for item in self.bundle.store.runs(self.snapshot_id)}
+
+        def eligible_reference(ref: Mapping[str, Any], trail: set[str]) -> bool:
+            if ref.get("snapshot_id") not in {None, self.snapshot_id}:
+                return False
+            kind = str(ref.get("kind", ""))
+            target = str(ref.get("target_id", ""))
+            if kind == "entity_anchor":
+                entity = graph.entities.get(target)
+                return bool(
+                    entity
+                    and str(entity.authority) in _STATIC_FEATURE_AUTHORITIES
+                    and entity.stage in _STATIC_FEATURE_STAGES
+                    and _static_feature_value_allowed(entity.attrs)
+                )
+            if kind == "relation":
+                relation = graph.relations.get(target)
+                return bool(
+                    relation
+                    and str(relation.authority) in _STATIC_FEATURE_AUTHORITIES
+                    and relation.stage in _STATIC_FEATURE_STAGES
+                    and static_feature_predicate_allowed(
+                        f"relation.{relation.kind}"
+                    )
+                    and _static_feature_value_allowed(relation.attrs)
+                )
+            if kind == "artifact":
+                artifact = artifacts.get(target)
+                if artifact is None or not static_feature_predicate_allowed(
+                        f"artifact.{artifact.kind}"):
+                    return False
+                if artifact.producer_run_id is None:
+                    return True
+                producer = runs.get(artifact.producer_run_id)
+                return bool(
+                    producer
+                    and str(producer.status) in {"succeeded", "cached"}
+                    and str(producer.failure_class) == "none"
+                    and producer.stage in _STATIC_FEATURE_STAGES | {"index", "rtl_export"}
+                )
+            if kind == "observation":
+                observation = observations.get(target)
+                if observation is None:
+                    return False
+                if (str(observation.authority) not in _STATIC_FEATURE_AUTHORITIES
+                        or observation.stage not in _STATIC_FEATURE_STAGES
+                        or observation.workload_id is not None
+                        or not static_feature_predicate_allowed(observation.predicate)
+                        or not _static_feature_value_allowed(observation.value)):
+                    return False
+                if observation.run_id is None:
+                    return True
+                producer = runs.get(observation.run_id)
+                return bool(
+                    producer
+                    and str(producer.status) in {"succeeded", "cached"}
+                    and str(producer.failure_class) == "none"
+                    and producer.stage in _STATIC_FEATURE_STAGES | {"index", "rtl_export"}
+                )
+            if kind != "derivation" or target in trail:
+                return False
+            child = derivation_map.get(target)
+            if (child is None
+                    or str(child.get("authority")) not in _STATIC_FEATURE_AUTHORITIES
+                    or child.get("stage") not in _STATIC_FEATURE_STAGES
+                    or not static_feature_predicate_allowed(
+                        str(child.get("predicate", ""))
+                    )
+                    or not _static_feature_value_allowed(child.get("value"))):
+                return False
+            child_refs = child.get("evidence_refs", [])
+            return bool(child_refs) and all(
+                eligible_reference(value, trail | {target}) for value in child_refs
+            )
+
+        rows = []
+        rejected = 0
+        for item in derivation_map.values():
+            if item.get("subject_id") not in graph.entities:
+                continue
+            if entity_id is not None and item.get("subject_id") != entity_id:
+                continue
+            if selected_predicates and item.get("predicate") not in selected_predicates:
+                continue
+            if selected_stages and item.get("stage") not in selected_stages:
+                continue
+            if str(item.get("authority")) not in _STATIC_FEATURE_AUTHORITIES:
+                continue
+            if not static_feature_predicate_allowed(str(item.get("predicate", ""))):
+                continue
+            if not _static_feature_value_allowed(item.get("value")):
+                rejected += 1
+                continue
+            if not item.get("evidence_refs"):
+                continue
+            if item.get("stage") not in _STATIC_FEATURE_STAGES or not all(
+                    eligible_reference(value, {str(item.get("id"))})
+                    for value in item.get("evidence_refs", [])):
+                rejected += 1
+                continue
+            metadata = item.get("metadata", {})
+            rows.append({
+                key: item.get(key) for key in (
+                    "id", "snapshot_id", "subject_id", "predicate", "value",
+                    "unit", "stage", "authority", "completeness", "algorithm",
+                    "algorithm_version", "evidence_refs",
+                )
+            } | {
+                "evidence_ids": sorted({
+                    str(value.get("target_id"))
+                    for value in item.get("evidence_refs", [])
+                }),
+                "metadata_present": bool(metadata),
+                "metadata_sha256": stable_hash(metadata),
+                "mask": (
+                    str(item.get("completeness")) == "complete"
+                    and item.get("value") is not None
+                ),
+            })
+        rows.sort(key=lambda item: str(item.get("id", "")))
+        truncated = len(rows) > bounded_limit
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "snapshot_id": self.snapshot_id,
+            "record_class": "deterministic_feature_evidence",
+            "feature_semantics": "selected_static_evidence_not_label_or_prediction",
+            "entity_id": entity_id,
+            "predicates": list(selected_predicates),
+            "stages": list(selected_stages),
+            "items": rows[:bounded_limit],
+            "truncated": truncated,
+            "rejected_nonstatic_records": rejected,
+        }
+
+    def correspondences(self, entity_id: str | None = None, *,
+                        other_snapshot_id: str | None = None,
+                        kinds: Iterable[str] = (), direction: str = "both",
+                        limit: int = 100) -> dict[str, Any]:
+        """Query only explicitly stored cross-snapshot entity mappings.
+
+        Candidate groups are returned separately from the individual evidence
+        records.  A group with multiple candidates never receives a singular
+        resolution, so consumers cannot accidentally turn an ambiguous mapping
+        into an inferred fact by taking the first row.
+        """
+        if direction not in {"source", "target", "both"}:
+            raise ValueError("direction must be source, target, or both")
+        graph = self.graph()
+        if entity_id is not None and entity_id not in graph.entities:
+            raise KeyError(entity_id)
+        selected_kinds = tuple(dict.fromkeys(str(item) for item in kinds))
+        if any(not item.strip() for item in selected_kinds):
+            raise ValueError("correspondence kinds must be non-empty strings")
+        if other_snapshot_id is not None:
+            # Loading the graph is the public fail-closed existence check; a
+            # failed candidate without a canonical graph is not queryable.
+            self.bundle.store.load_graph(other_snapshot_id)
+        bounded_limit = max(1, min(int(limit), 1000))
+        rows = []
+        candidate_groups: dict[
+            tuple[str, str, str, str, str], set[str]
+        ] = {}
+        for raw_item in self.bundle.store.correspondences():
+            item = json_ready(raw_item)
+            source_here = item.get("source_snapshot_id") == self.snapshot_id
+            target_here = item.get("target_snapshot_id") == self.snapshot_id
+            if selected_kinds and item.get("kind") not in selected_kinds:
+                continue
+            roles: list[dict[str, str]] = []
+            if source_here and direction in {"source", "both"}:
+                roles.append({
+                    "role": "source",
+                    "from_snapshot_id": str(item.get("source_snapshot_id")),
+                    "from_entity_id": str(item.get("source_entity_id")),
+                    "to_snapshot_id": str(item.get("target_snapshot_id")),
+                    "to_entity_id": str(item.get("target_entity_id")),
+                })
+            if target_here and direction in {"target", "both"}:
+                roles.append({
+                    "role": "target",
+                    "from_snapshot_id": str(item.get("target_snapshot_id")),
+                    "from_entity_id": str(item.get("target_entity_id")),
+                    "to_snapshot_id": str(item.get("source_snapshot_id")),
+                    "to_entity_id": str(item.get("source_entity_id")),
+                })
+            roles = [role for role in roles
+                     if (other_snapshot_id is None
+                         or role["to_snapshot_id"] == other_snapshot_id)
+                     and (entity_id is None
+                          or role["from_entity_id"] == entity_id)]
+            if not roles:
+                continue
+            metadata = item.get("metadata", {})
+            rows.append({
+                key: item.get(key) for key in (
+                    "id", "source_snapshot_id", "source_entity_id",
+                    "target_snapshot_id", "target_entity_id", "kind", "producer",
+                    "producer_version", "authority", "completeness", "evidence_refs",
+                )
+            } | {
+                "query_roles": [role["role"] for role in roles],
+                "evidence_ids": sorted({
+                    str(value.get("target_id"))
+                    for value in item.get("evidence_refs", [])
+                }),
+                "metadata_present": bool(metadata),
+                "metadata_sha256": stable_hash(metadata),
+            })
+            for role in roles:
+                key = (
+                    role["role"], role["from_snapshot_id"],
+                    role["from_entity_id"], role["to_snapshot_id"],
+                    str(item.get("kind")),
+                )
+                candidate_groups.setdefault(key, set()).add(role["to_entity_id"])
+        rows.sort(key=lambda item: str(item.get("id", "")))
+        truncated = len(rows) > bounded_limit
+        groups = []
+        for key, values in sorted(candidate_groups.items()):
+            role, from_snapshot, from_entity, to_snapshot, kind = key
+            candidates = sorted(values)
+            groups.append({
+                "role": role,
+                "from_snapshot_id": from_snapshot,
+                "from_entity_id": from_entity,
+                "to_snapshot_id": to_snapshot,
+                "kind": kind,
+                "candidate_entity_ids": candidates,
+                "candidate_count": len(candidates),
+                "resolution_status": "unique" if len(candidates) == 1 else "ambiguous",
+                "resolved_entity_id": candidates[0] if len(candidates) == 1 else None,
+            })
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "snapshot_id": self.snapshot_id,
+            "other_snapshot_id": other_snapshot_id,
+            "entity_id": entity_id,
+            "direction": direction,
+            "kinds": list(selected_kinds),
+            "record_class": "entity_correspondence",
+            "inference_policy": "explicit_records_only",
+            "ambiguity_policy": "multiple_candidates_are_never_auto_resolved",
+            "items": rows[:bounded_limit],
+            "candidate_groups": groups,
+            "truncated": truncated,
         }
 
     def traverse(self, entity_id: str, *, depth: int = 1, direction: str = "both",
@@ -500,9 +838,16 @@ class CoreService:
                 item["id"] for item in predictions
                 if item.get("action_id") == action["id"]
             )
+            materializations = self.bundle.store.materializations(action["id"])
+            recorded_result_ids = {
+                item.result_snapshot_id for item in materializations
+                if str(item.status) == "materialized" and item.result_snapshot_id
+            }
             snapshots = self.bundle.store.result_snapshots(
                 action["id"], parent_snapshot_id=parent_snapshot_id,
             )
+            if materializations:
+                snapshots = [item for item in snapshots if item.id in recorded_result_ids]
             result_rows = [{
                 "snapshot_id": item.id,
                 "parent_snapshot_id": item.parent_snapshot_id,
@@ -513,6 +858,7 @@ class CoreService:
             items.append({
                 **action,
                 "prediction_ids": linked_predictions,
+                "materializations": [json_ready(item) for item in materializations],
                 "result_snapshot_ids": [item["snapshot_id"] for item in result_rows],
                 "result_snapshots": result_rows,
             })
@@ -521,7 +867,9 @@ class CoreService:
             "snapshot_id": self.snapshot_id,
             "parent_snapshot_id": parent_snapshot_id,
             "record_class": "variant_action",
-            "lineage_semantics": "recorded_links_only",
+            "lineage_semantics": (
+                "explicit_materialization_records_with_legacy_snapshot_fallback"
+            ),
             "items": items,
         }
 

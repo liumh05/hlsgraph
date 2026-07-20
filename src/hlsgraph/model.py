@@ -86,6 +86,22 @@ class Completeness(ValueEnum):
     AMBIGUOUS = "ambiguous"
 
 
+class EvidenceKind(ValueEnum):
+    """Closed set of deterministic evidence targets used by public contracts."""
+
+    OBSERVATION = "observation"
+    DERIVATION = "derivation"
+    ARTIFACT = "artifact"
+    ENTITY_ANCHOR = "entity_anchor"
+    RELATION = "relation"
+
+
+class ActionMaterializationStatus(ValueEnum):
+    MATERIALIZED = "materialized"
+    NO_OP = "no_op"
+    FAILED = "failed"
+
+
 class RunStatus(ValueEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -105,6 +121,7 @@ class FailureClass(ValueEnum):
     TIMING = "timing"
     LICENSE = "license"
     INFRASTRUCTURE = "infrastructure"
+    INFRA_RESOURCE_GUARD = "infra_resource_guard"
     SSH = "ssh"
     TIMEOUT = "timeout"
     BENCHMARK = "benchmark"
@@ -326,6 +343,62 @@ class SourceAnchor:
 # Public-contract spelling.  ``SourceAnchor`` remains as a descriptive and
 # backwards-compatible name, while callers may use the vendor-neutral ``Anchor``.
 Anchor = SourceAnchor
+
+
+@dataclass(slots=True)
+class EvidenceRef:
+    """A typed, optionally snapshot-qualified reference to deterministic evidence.
+
+    The reference is deliberately not a generic string.  Its kind determines
+    which ledger namespace must contain ``target_id`` and the store resolves it
+    fail-closed at the boundary that owns the reference.
+    """
+
+    kind: EvidenceKind
+    target_id: str
+    snapshot_id: str | None = None
+    anchor: SourceAnchor | None = None
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        self.kind = enum_value(EvidenceKind, self.kind)  # type: ignore[assignment]
+        require_namespaced(self.target_id, "evidence target_id")
+        if self.snapshot_id is not None:
+            require_namespaced(self.snapshot_id, "evidence snapshot_id")
+        if self.anchor is not None and not isinstance(self.anchor, SourceAnchor):
+            self.anchor = SourceAnchor.from_dict(self.anchor)  # type: ignore[arg-type]
+        if self.kind in {EvidenceKind.OBSERVATION, EvidenceKind.DERIVATION}:
+            if self.anchor is not None:
+                raise ValueError(
+                    f"{self.kind.value} evidence cannot carry an artifact/entity anchor"
+                )
+        elif self.kind == EvidenceKind.ARTIFACT:
+            if self.anchor is not None and self.anchor.artifact_id != self.target_id:
+                raise ValueError(
+                    "artifact evidence anchor must name the target artifact"
+                )
+        elif self.kind not in {
+            EvidenceKind.ENTITY_ANCHOR, EvidenceKind.RELATION,
+        }:  # pragma: no cover - enum is closed
+            raise ValueError(f"unsupported evidence kind: {self.kind!r}")
+        expected_id = stable_id("evidence_ref", {
+            "kind": self.kind.value,
+            "target": self.target_id,
+            "snapshot": self.snapshot_id,
+            "anchor": self.anchor,
+        })
+        if self.id and self.id != expected_id:
+            raise ValueError(
+                f"evidence reference stable id {self.id!r} does not match {expected_id!r}"
+            )
+        self.id = expected_id
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceRef":
+        data = dict(value)
+        if data.get("anchor"):
+            data["anchor"] = SourceAnchor.from_dict(data["anchor"])
+        return cls(**data)
 
 
 @dataclass(slots=True)
@@ -738,6 +811,177 @@ class VariantAction:
 
 
 @dataclass(slots=True)
+class ActionMaterialization:
+    """One immutable attempt to materialize a proposed :class:`VariantAction`.
+
+    Multiple attempts may be recorded for one action.  ``materialized`` means a
+    distinct child snapshot exists, ``no_op`` records an explicitly diagnosed
+    semantic no-op, and ``failed`` retains diagnostics plus an optional failed
+    candidate snapshot.
+    """
+
+    action_id: str
+    parent_snapshot_id: str
+    status: ActionMaterializationStatus
+    id: str = ""
+    result_snapshot_id: str | None = None
+    diagnostic_ids: list[str] = field(default_factory=list)
+    evidence_refs: list[EvidenceRef] = field(default_factory=list)
+    attempted_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.action_id, "materialization action_id")
+        require_namespaced(self.parent_snapshot_id, "materialization parent_snapshot_id")
+        self.status = enum_value(ActionMaterializationStatus, self.status)  # type: ignore[assignment]
+        if self.result_snapshot_id is not None:
+            require_namespaced(
+                self.result_snapshot_id, "materialization result_snapshot_id"
+            )
+            if self.result_snapshot_id == self.parent_snapshot_id:
+                raise ValueError("a materialization result must differ from its parent snapshot")
+        if not isinstance(self.diagnostic_ids, list):
+            raise ValueError("materialization diagnostic_ids must be a list")
+        for diagnostic_id in self.diagnostic_ids:
+            require_namespaced(diagnostic_id, "materialization diagnostic_id")
+        if len(set(self.diagnostic_ids)) != len(self.diagnostic_ids):
+            raise ValueError("materialization diagnostic_ids must be unique")
+        self.diagnostic_ids = sorted(self.diagnostic_ids)
+        if not isinstance(self.evidence_refs, list):
+            raise ValueError("materialization evidence_refs must be a list")
+        self.evidence_refs = sorted(
+            (item if isinstance(item, EvidenceRef) else EvidenceRef.from_dict(item)
+             for item in self.evidence_refs),
+            key=lambda item: item.id,
+        )
+        if len({item.id for item in self.evidence_refs}) != len(self.evidence_refs):
+            raise ValueError("materialization evidence_refs must be unique")
+        if self.status == ActionMaterializationStatus.MATERIALIZED:
+            if self.result_snapshot_id is None:
+                raise ValueError("materialized action requires a result_snapshot_id")
+        elif self.status == ActionMaterializationStatus.NO_OP:
+            if self.result_snapshot_id is not None:
+                raise ValueError("no-op action cannot have a result snapshot")
+            if not self.diagnostic_ids:
+                raise ValueError("no-op action requires at least one diagnostic")
+        elif self.status == ActionMaterializationStatus.FAILED:
+            if not self.diagnostic_ids:
+                raise ValueError("failed action requires at least one diagnostic")
+        if (not isinstance(self.attempted_at, str) or not self.attempted_at
+                or len(self.attempted_at) > 64 or "\x00" in self.attempted_at):
+            raise ValueError("materialization attempted_at must be a bounded timestamp")
+        try:
+            attempted = datetime.fromisoformat(
+                self.attempted_at[:-1] + "+00:00"
+                if self.attempted_at.endswith("Z") else self.attempted_at
+            )
+        except ValueError as exc:
+            raise ValueError("materialization attempted_at must be ISO-8601") from exc
+        if attempted.tzinfo is None:
+            raise ValueError("materialization attempted_at must include a timezone")
+        reject_embedded_body_fields(self.metadata, "materialization metadata")
+        if not self.id:
+            self.id = stable_id("materialization", {
+                "action": self.action_id,
+                "parent": self.parent_snapshot_id,
+                "status": self.status.value,
+                "result": self.result_snapshot_id,
+                "diagnostics": self.diagnostic_ids,
+                "evidence": self.evidence_refs,
+                "attempted_at": self.attempted_at,
+                "metadata": self.metadata,
+            })
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ActionMaterialization":
+        data = dict(value)
+        data["evidence_refs"] = [
+            EvidenceRef.from_dict(item) for item in data.get("evidence_refs", [])
+        ]
+        return cls(**data)
+
+
+@dataclass(slots=True)
+class EntityCorrespondence:
+    """A versioned, evidence-backed mapping between entities in two snapshots."""
+
+    source_snapshot_id: str
+    source_entity_id: str
+    target_snapshot_id: str
+    target_entity_id: str
+    kind: str
+    producer: str
+    producer_version: str
+    evidence_refs: list[EvidenceRef]
+    id: str = ""
+    authority: AuthorityClass = AuthorityClass.DERIVED_FACT
+    completeness: Completeness = Completeness.COMPLETE
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("source_snapshot_id", "source_entity_id", "target_snapshot_id",
+                     "target_entity_id"):
+            require_namespaced(getattr(self, name), f"correspondence {name}")
+        require_namespaced(self.kind, "correspondence kind")
+        require_namespaced(self.producer, "correspondence producer")
+        require_namespaced(self.producer_version, "correspondence producer_version")
+        if (self.source_snapshot_id == self.target_snapshot_id
+                and self.source_entity_id == self.target_entity_id):
+            raise ValueError("a correspondence must connect two distinct entity records")
+        self.authority = enum_value(AuthorityClass, self.authority)  # type: ignore[assignment]
+        require_fact_authority(self.authority, "entity correspondence")
+        self.completeness = enum_value(Completeness, self.completeness)  # type: ignore[assignment]
+        if self.completeness == Completeness.MISSING:
+            raise ValueError("a missing correspondence must be represented by a diagnostic")
+        if not isinstance(self.evidence_refs, list) or not self.evidence_refs:
+            raise ValueError("a correspondence must cite at least one evidence_ref")
+        values: list[EvidenceRef] = []
+        endpoint_snapshots = {self.source_snapshot_id, self.target_snapshot_id}
+        for raw in self.evidence_refs:
+            item = raw if isinstance(raw, EvidenceRef) else EvidenceRef.from_dict(raw)
+            if item.snapshot_id is not None and item.snapshot_id not in endpoint_snapshots:
+                raise ValueError(
+                    "correspondence evidence must belong to a source or target snapshot"
+                )
+            if item.snapshot_id is None and len(endpoint_snapshots) > 1:
+                raise ValueError(
+                    "cross-snapshot correspondence evidence must set snapshot_id explicitly"
+                )
+            if item.snapshot_id is None and len(endpoint_snapshots) == 1:
+                item = EvidenceRef(
+                    kind=item.kind, target_id=item.target_id,
+                    snapshot_id=self.source_snapshot_id, anchor=item.anchor,
+                )
+            values.append(item)
+        self.evidence_refs = sorted(values, key=lambda item: item.id)
+        if len({item.id for item in self.evidence_refs}) != len(self.evidence_refs):
+            raise ValueError("correspondence evidence_refs must be unique")
+        reject_embedded_body_fields(self.metadata, "correspondence metadata")
+        if not self.id:
+            self.id = stable_id("correspondence", {
+                "source_snapshot": self.source_snapshot_id,
+                "source_entity": self.source_entity_id,
+                "target_snapshot": self.target_snapshot_id,
+                "target_entity": self.target_entity_id,
+                "kind": self.kind,
+                "producer": self.producer,
+                "producer_version": self.producer_version,
+                "evidence": self.evidence_refs,
+                "authority": self.authority.value,
+                "completeness": self.completeness.value,
+                "metadata": self.metadata,
+            })
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EntityCorrespondence":
+        data = dict(value)
+        data["evidence_refs"] = [
+            EvidenceRef.from_dict(item) for item in data.get("evidence_refs", [])
+        ]
+        return cls(**data)
+
+
+@dataclass(slots=True)
 class Entity:
     kind: str
     name: str
@@ -861,13 +1105,14 @@ class Derivation:
     value: Any
     algorithm: str
     algorithm_version: str
-    input_observation_ids: list[str]
+    input_observation_ids: list[str] = field(default_factory=list)
     id: str = ""
     unit: str | None = None
     stage: str = Stage.UNKNOWN.value
     authority: AuthorityClass = AuthorityClass.DERIVED_FACT
     completeness: Completeness = Completeness.COMPLETE
     metadata: dict[str, Any] = field(default_factory=dict)
+    evidence_refs: list[EvidenceRef] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         require_namespaced(self.predicate, "derivation predicate")
@@ -876,15 +1121,85 @@ class Derivation:
         require_fact_authority(self.authority, "derivation")
         self.completeness = enum_value(Completeness, self.completeness)  # type: ignore[assignment]
         reject_embedded_body_fields(self.metadata, "derivation metadata")
-        if not self.input_observation_ids:
-            raise ValueError("a derivation must cite at least one input observation")
+        if not isinstance(self.input_observation_ids, list):
+            raise ValueError("derivation input_observation_ids must be a list")
+        for observation_id in self.input_observation_ids:
+            require_namespaced(observation_id, "derivation input observation")
+        if len(set(self.input_observation_ids)) != len(self.input_observation_ids):
+            raise ValueError("derivation input_observation_ids must be unique")
+        legacy_ids = sorted(self.input_observation_ids)
+        if not isinstance(self.evidence_refs, list):
+            raise ValueError("derivation evidence_refs must be a list")
+        values = [
+            item if isinstance(item, EvidenceRef) else EvidenceRef.from_dict(item)
+            for item in self.evidence_refs
+        ]
+        for item in values:
+            if item.snapshot_id not in {None, self.snapshot_id}:
+                raise ValueError("derivation evidence must belong to its snapshot")
+        # A v0.1 payload cites observations only.  Normalize those IDs into the
+        # v0.2 typed contract while retaining the legacy list as a compatibility
+        # projection for readers that have not yet adopted EvidenceRef.
+        normalized: list[EvidenceRef] = []
+        for item in values:
+            normalized.append(item if item.snapshot_id is not None else EvidenceRef(
+                kind=item.kind, target_id=item.target_id,
+                snapshot_id=self.snapshot_id, anchor=item.anchor,
+            ))
+        observation_targets = {
+            item.target_id for item in normalized
+            if item.kind == EvidenceKind.OBSERVATION
+            and item.snapshot_id == self.snapshot_id
+        }
+        normalized.extend(EvidenceRef(
+            kind=EvidenceKind.OBSERVATION,
+            target_id=observation_id,
+            snapshot_id=self.snapshot_id,
+        ) for observation_id in legacy_ids if observation_id not in observation_targets)
+        self.evidence_refs = sorted(normalized, key=lambda item: item.id)
+        if len({item.id for item in self.evidence_refs}) != len(self.evidence_refs):
+            raise ValueError("derivation evidence_refs must be unique")
+        projected_ids = sorted({
+            item.target_id for item in self.evidence_refs
+            if item.kind == EvidenceKind.OBSERVATION
+            and item.snapshot_id == self.snapshot_id and item.anchor is None
+        })
+        if legacy_ids and not set(legacy_ids).issubset(projected_ids):
+            raise ValueError("legacy derivation observations conflict with evidence_refs")
+        self.input_observation_ids = projected_ids
+        if not self.evidence_refs:
+            raise ValueError("a derivation must cite at least one evidence_ref")
         if not self.id:
-            self.id = stable_id("derivation", {"snapshot": self.snapshot_id,
-                                                "subject": self.subject_id,
-                                                "predicate": self.predicate,
-                                                "algorithm": self.algorithm,
-                                                "version": self.algorithm_version,
-                                                "inputs": sorted(self.input_observation_ids)})
+            identity = {"snapshot": self.snapshot_id,
+                        "subject": self.subject_id,
+                        "predicate": self.predicate,
+                        "algorithm": self.algorithm,
+                        "version": self.algorithm_version}
+            legacy_only = (
+                bool(self.input_observation_ids)
+                and len(self.input_observation_ids) == len(self.evidence_refs)
+                and all(
+                    item.kind == EvidenceKind.OBSERVATION
+                    and item.snapshot_id == self.snapshot_id
+                    and item.anchor is None
+                    for item in self.evidence_refs
+                )
+            )
+            if legacy_only:
+                # Preserve v0.1 IDs so migration never cascades into gate and
+                # verification references.
+                identity["inputs"] = sorted(self.input_observation_ids)
+            else:
+                identity["evidence_refs"] = self.evidence_refs
+            self.id = stable_id("derivation", identity)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "Derivation":
+        data = dict(value)
+        data["evidence_refs"] = [
+            EvidenceRef.from_dict(item) for item in data.get("evidence_refs", [])
+        ]
+        return cls(**data)
 
 
 @dataclass(slots=True)
@@ -1086,6 +1401,30 @@ class ToolRun:
             self.metadata["runner_fingerprint"] = fingerprint.lower()
         self.status = enum_value(RunStatus, self.status)  # type: ignore[assignment]
         self.failure_class = enum_value(FailureClass, self.failure_class)  # type: ignore[assignment]
+        if self.failure_class == FailureClass.INFRA_RESOURCE_GUARD:
+            preflight_rejection = (
+                self.metadata.get("resource_guard_configured") is True
+                and self.metadata.get("resource_guard_checked") is True
+                and self.metadata.get("resource_guard_passed") is False
+                and self.metadata.get("fresh_execution") is False
+            )
+            runtime_rejection = (
+                self.metadata.get("runtime_guard_configured") is True
+                and self.metadata.get("runtime_guard_checked") is True
+                and self.metadata.get("runtime_guard_passed") is False
+                and self.metadata.get("runtime_guard_triggered") is True
+                and self.metadata.get("fresh_execution") is True
+            )
+            if (self.status != RunStatus.FAILED
+                    or not (preflight_rejection or runtime_rejection)
+                    or self.metadata.get("fresh_tool_truth") is not False
+                    or self.metadata.get("tool_truth") is not False
+                    or self.metadata.get("authority") != "infrastructure"
+                    or self.output_artifact_ids):
+                raise ValueError(
+                    "infra_resource_guard requires a failed, non-tool, "
+                    "structured resource-guard provenance event"
+                )
         reject_embedded_body_fields(self.metadata, "run metadata")
         if not self.id:
             self.id = stable_id("run", {"snapshot": self.snapshot_id, "stage": self.stage,
@@ -1250,6 +1589,11 @@ class DatasetManifest:
         "options", "origin", "projection", "replication", "signed",
         "trip_count", "type", "width",
     ])
+    # Static derivations and cross-snapshot mappings are opt-in feature inputs.
+    # Empty lists intentionally export zero rows rather than silently widening
+    # an existing feature contract.
+    feature_evidence_predicates: list[str] = field(default_factory=list)
+    entity_correspondence_kinds: list[str] = field(default_factory=list)
     labels: list[LabelSpec] = field(default_factory=list)
     splits: dict[str, str] = field(default_factory=dict)
     kernel_families: dict[str, str] = field(default_factory=dict)
@@ -1259,6 +1603,18 @@ class DatasetManifest:
 
     def __post_init__(self) -> None:
         require_namespaced(self.dataset_id, "dataset_id")
+        for field_name in (
+            "feature_evidence_predicates", "entity_correspondence_kinds",
+        ):
+            values = getattr(self, field_name)
+            if not isinstance(values, list):
+                raise ValueError(f"dataset {field_name} must be a list")
+            for value in values:
+                if not isinstance(value, str):
+                    raise ValueError(f"dataset {field_name} values must be strings")
+                require_namespaced(value, f"dataset {field_name}")
+            if len(set(values)) != len(values):
+                raise ValueError(f"dataset {field_name} values must be unique")
         reject_embedded_body_fields(self.metadata, "dataset metadata")
 
 

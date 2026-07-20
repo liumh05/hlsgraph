@@ -119,12 +119,14 @@ class ExtractionPipeline:
                               "error_type": error_type,
                               "error_fingerprint": error_fingerprint},
                 ))
-        merged.capabilities = sorted(set(merged.capabilities))
         try:
             from .directives import resolve_directives
+            from .static_features import derive_static_features
             resolve_directives(merged)
+            derive_static_features(merged)
         finally:
             context.options.pop("existing_graph", None)
+        merged.capabilities = sorted(set(merged.capabilities))
         merged.graph.metadata["coverage"] = merged.coverage
         merged.graph.metadata["capabilities"] = merged.capabilities
         reject_embedded_body_fields(merged.graph.metadata, "merged extractor graph metadata")

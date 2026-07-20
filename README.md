@@ -10,7 +10,7 @@ questions: which processes can run concurrently, how values move through streams
 and memories, which directive applies to which scope, what limits initiation
 interval, and which result was observed at which tool stage.
 
-HLSGraph is an early **v0.1 developer preview**. Schemas are versioned, but public
+HLSGraph is an early **v0.2 developer preview**. Schemas are versioned, but public
 interfaces may evolve before 1.0.
 
 ## Truth boundaries
@@ -114,11 +114,25 @@ reports remains supported without executing a tool.
 - CLI, read-only REST/OpenAPI, and MCP adapters delegate common query semantics
   to the same service; cross-interface conformance is covered by tests.
 - A local SQLite ledger stores snapshots, artifact metadata, runs, entities,
-  relations, observations, diagnostics, and verification results.
+  relations, observations, deterministic derivations, explicit cross-snapshot
+  correspondences, action materialization attempts, diagnostics, and
+  verification results.
 - JSON/JSONL are the baseline interchange formats. Parquet and PyG are
   optional adapters; the core package does not depend on Torch.
 
-The supported v0.1 unit is one HLS kernel. Component/system entities, host code,
+Static feature evidence and entity correspondences are opt-in ML tables. They
+default to empty, preserve evidence references, reject outcome-shaped feature
+inputs, and never resolve ambiguous mappings by name or row order.
+
+Indexing automatically materializes evidence-backed scope features for IR
+operation/index histograms, exact loop bounds/trip counts, explicit integer
+bitwidths, memory accesses, and software-call targets. Unknown values remain
+`null`/masked rather than becoming zero; dependence-distance rows receive a
+non-null value only when explicitly proven. These derivations cite entity,
+relation, and artifact evidence and never turn software calls or LLVM CFG into
+hardware topology.
+
+The supported v0.2 unit is one HLS kernel. Component/system entities, host code,
 multiple compute units, memory-bank connectivity, and accelerator runtime
 traces have reserved schema space but are not yet complete collectors.
 

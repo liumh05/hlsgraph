@@ -32,6 +32,9 @@ _BOOLEAN_FIELDS = frozenset({
     "execution_enabled", "fresh_execution", "fresh_tool_truth",
     "input_validation_failed", "output_embedded", "partial_graph_persisted",
     "remote_environment_verified", "remote_inputs_verified", "snapshot_stale",
+    "resource_guard_checked", "resource_guard_configured", "resource_guard_passed",
+    "runtime_guard_checked", "runtime_guard_configured", "runtime_guard_passed",
+    "runtime_guard_triggered",
     "tool_truth",
 })
 _BYTE_COUNT_FIELDS = frozenset({"stderr_bytes", "stdout_bytes"})
@@ -115,7 +118,13 @@ def sanitize_run_metadata(value: Any) -> dict[str, Any]:
         result["input_mismatch_ids"] = mismatch_ids
     # A future backend may report a failure subtype, but it is public only when
     # it uses the already versioned FailureClass vocabulary.
-    failure_type = public_enum(value.get("failure_type"), PUBLIC_FAILURE_CLASSES)
+    # ``infra_resource_guard`` is privileged structured runner provenance and
+    # is public only as ToolRun.failure_class.  Extensible metadata must never
+    # synthesize that classification.
+    metadata_failure_classes = PUBLIC_FAILURE_CLASSES - {
+        FailureClass.INFRA_RESOURCE_GUARD.value,
+    }
+    failure_type = public_enum(value.get("failure_type"), metadata_failure_classes)
     if failure_type is not None:
         result["failure_type"] = failure_type
     return result

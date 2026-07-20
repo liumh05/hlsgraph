@@ -391,6 +391,21 @@ class RestApplication:
                 "lineage_semantics": lineage["lineage_semantics"],
             })
             return self._ok(response)
+        if route == "/feature-evidence":
+            return self._ok(service.feature_evidence(
+                _one(params, "entity_id"),
+                predicates=_csv(params, "predicates"),
+                stages=_csv(params, "stages"),
+                limit=_integer(params, "limit", 100, 1, 1000),
+            ))
+        if route == "/correspondences":
+            return self._ok(service.correspondences(
+                _one(params, "entity_id"),
+                other_snapshot_id=_one(params, "other_snapshot_id"),
+                kinds=_csv(params, "kinds"),
+                direction=_one(params, "direction", "both") or "both",
+                limit=_integer(params, "limit", 100, 1, 1000),
+            ))
         if route == "/knowledge":
             from ..knowledge import filter_rules
             applicability = {key: value for key, value in {
@@ -463,6 +478,12 @@ def openapi_document() -> dict[str, Any]:
         "/api/v1/verifications": ("verifications", "Independent correctness verification evidence"),
         "/api/v1/predictions": ("predictions", "Prediction envelopes kept outside fact tables"),
         "/api/v1/variants": ("variants", "Recorded candidate actions without applying edits"),
+        "/api/v1/feature-evidence": (
+            "featureEvidence", "Opt-in deterministic feature evidence without outcome data",
+        ),
+        "/api/v1/correspondences": (
+            "correspondences", "Explicit entity mappings with fail-closed ambiguity",
+        ),
         "/api/v1/knowledge": ("knowledge", "Versioned guidance rules, not design facts"),
         "/api/v1/evidence": ("evidence", "Evidence and artifact metadata for one entity"),
         "/api/v1/compare": ("compare", "Compare two immutable snapshots"),
@@ -499,6 +520,19 @@ def openapi_document() -> dict[str, Any]:
         "/api/v1/variants": [
             ("parent_snapshot_id", False, "string", "parent snapshot; defaults to selected"),
             ("action_id", False, "string", "exact recorded variant action ID"),
+        ],
+        "/api/v1/feature-evidence": [
+            ("entity_id", False, "string", "exact feature subject entity ID"),
+            ("predicates", False, "string", "comma-separated selected feature predicates"),
+            ("stages", False, "string", "comma-separated static stages"),
+            ("limit", False, "integer", "maximum records, 1..1000"),
+        ],
+        "/api/v1/correspondences": [
+            ("entity_id", False, "string", "entity at the selected snapshot endpoint"),
+            ("other_snapshot_id", False, "string", "exact opposite snapshot ID"),
+            ("kinds", False, "string", "comma-separated correspondence kinds"),
+            ("direction", False, "string", "source, target, or both"),
+            ("limit", False, "integer", "maximum records, 1..1000"),
         ],
         "/api/v1/knowledge": [
             ("q", False, "string", "rule title/summary/section search"),
@@ -572,7 +606,7 @@ def openapi_document() -> dict[str, Any]:
 
 def make_handler(application: RestApplication) -> type[BaseHTTPRequestHandler]:
     class HLSGraphRequestHandler(BaseHTTPRequestHandler):
-        server_version = "HLSGraph/0.1"
+        server_version = f"HLSGraph/{__version__}"
         protocol_version = "HTTP/1.1"
 
         def _respond(self) -> None:

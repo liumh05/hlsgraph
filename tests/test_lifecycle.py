@@ -192,7 +192,7 @@ def test_project_run_ingests_declared_report_with_run_provenance(tmp_path):
     assert verifications[0]["workload_id"] == "tb.default"
 
 
-def test_project_run_rejects_preexisting_declared_output(tmp_path):
+def test_project_run_ignores_preexisting_project_output_and_uses_staging(tmp_path):
     root = tmp_path / "preexisting-output"
     root.mkdir()
     (root / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
@@ -208,9 +208,11 @@ def test_project_run_rejects_preexisting_declared_output(tmp_path):
     project = Project(GraphBundle.create(root, manifest))
     assert project.index(degraded=True).success
     runner = FakeRunner()
-    with pytest.raises(BundleError, match="run-isolated"):
-        project.run(runner, ["csim"])
-    assert runner.calls == []
+    result = project.run(runner, ["csim"])
+    assert result.runs[0].status == RunStatus.FAILED
+    assert result.runs[0].failure_class == FailureClass.INPUT
+    assert (root / "report.json").read_text(encoding="utf-8") == "{}\n"
+    assert len(runner.calls) == 1
 
 
 def test_project_run_empty_and_duplicate_stage_selection_fail_closed(tmp_path):
@@ -342,23 +344,32 @@ def test_declared_output_dependencies_are_ordered_and_enter_consumer_identity(tm
         project.run(FakeRunner(), ["post_route"])
     with pytest.raises(ValueError, match="dependency order"):
         project.run(FakeRunner(), ["post_route", "csynth"])
-    with pytest.raises(BundleError, match="runner.ssh declared-output"):
-        project.run(SSHRunner("example.invalid", "/tmp/project"), ["csynth"])
+    skipped = project.run(SSHRunner("example.invalid", "/tmp/project"), ["csynth"])
+    assert skipped.runs[0].status == RunStatus.SKIPPED
 
-    with pytest.raises(BundleError, match="runner.fake declared-output"):
-        project.run(FakeRunner(), ["csynth"])
+    missing = project.run(FakeRunner(), ["csynth"])
+    assert missing.runs[0].status == RunStatus.FAILED
+    assert missing.runs[0].failure_class == FailureClass.INPUT
 
-    class ProducingRunner(FakeRunner):
-        provides_local_output_bytes = True
-
-        def execute(self, request):
-            if request.stage == "csynth":
-                output = root / "run" / "intermediate.bin"
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_bytes(b"deterministic intermediate")
-            return super().execute(request)
-
-    result = project.run(ProducingRunner(), ["csynth", "post_route"])
+    produce = (
+        "from pathlib import Path; p=Path('run/intermediate.bin'); "
+        "p.parent.mkdir(parents=True,exist_ok=True); "
+        "p.write_bytes(b'deterministic intermediate')"
+    )
+    consume = (
+        "from pathlib import Path; "
+        "assert Path('run/intermediate.bin').read_bytes()==b'deterministic intermediate'"
+    )
+    manifest.stage_commands = {
+        "csynth": [sys.executable, "-c", produce],
+        "post_route": [sys.executable, "-c", consume],
+    }
+    project.bundle.store.save_project(manifest)
+    # The active snapshot stores its own manifest; re-index after changing the
+    # command identity so execution cannot silently use mutable live config.
+    project.bundle.manifest = manifest
+    assert project.index(degraded=True).success
+    result = project.run(LocalRunner(root, allow_execution=True), ["csynth", "post_route"])
     produced_id = result.runs[0].output_artifact_ids[0]
     assert produced_id in result.runs[1].input_artifact_ids
 

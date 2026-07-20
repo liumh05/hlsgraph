@@ -10,6 +10,7 @@ from hlsgraph import Project
 from hlsgraph.bundle import GraphBundle
 from hlsgraph.cli import build_parser, main
 from hlsgraph.manifest import load_manifest
+from hlsgraph.runner import FakeRunner
 
 
 def _invoke(capsys, *argv: str) -> tuple[int, dict]:
@@ -229,6 +230,35 @@ def test_run_requires_explicit_backend_and_execution_acknowledgement(
     assert code == 0
     assert result["backend"] == "fake"
     assert result["tool_truth"] is False
+
+
+def test_run_loads_only_explicit_runner_v2_plugin(tmp_path: Path, capsys, monkeypatch) -> None:
+    root = _indexed_project(tmp_path, capsys)
+    selected = {}
+
+    def load(names, configs):
+        selected["names"] = names
+        selected["configs"] = configs
+        return [FakeRunner()]
+
+    monkeypatch.setattr(cli_module, "load_runners", load)
+    code, result = _invoke(
+        capsys, "run", "--project", str(root), "--backend", "plugin",
+        "--runner-plugin", "fixture", "--runner-config", '{"mode":"test"}',
+    )
+    assert code == 1
+    assert "--allow-execution" in result["error"]
+
+    code, result = _invoke(
+        capsys, "run", "--project", str(root), "--backend", "plugin",
+        "--runner-plugin", "fixture", "--runner-config", '{"mode":"test"}',
+        "--allow-execution",
+    )
+    assert code == 0
+    assert result["backend"] == "plugin"
+    assert selected == {
+        "names": ["fixture"], "configs": {"fixture": {"mode": "test"}},
+    }
 
 
 def test_doctor_and_knowledge_are_read_only_json_commands(tmp_path: Path, capsys) -> None:

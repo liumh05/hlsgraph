@@ -30,6 +30,7 @@ from .model import (
     safe_relative_path,
     stable_hash,
 )
+from .version import SCHEMA_VERSION
 
 
 class ManifestError(ValueError):
@@ -113,7 +114,7 @@ def manifest_template(project_id: str, name: str, top: str, source: str) -> str:
     name_toml = _toml_basic_string(name, "name")
     top_toml = _toml_basic_string(top, "top")
     source_toml = _toml_basic_string(source, "source")
-    return f'''schema_version = "0.1.0"
+    return f'''schema_version = "{SCHEMA_VERSION}"
 project_id = {project_id_toml}
 name = {name_toml}
 stage_toolchains = {{}}

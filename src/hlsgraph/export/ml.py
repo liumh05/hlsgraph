@@ -19,7 +19,8 @@ from ..evidence_policy import (
     tool_run_manifest_identity_error,
 )
 from ..model import (
-    DatasetManifest, LabelSpec, Stage, hash_artifact_bytes, json_ready, stable_hash,
+    DatasetManifest, LabelSpec, Stage, hash_artifact_bytes, json_ready,
+    reject_embedded_body_fields, stable_hash,
 )
 from ..run_projection import (
     PUBLIC_FAILURE_CLASSES, PUBLIC_GATE_KINDS, PUBLIC_GATE_STATUSES,
@@ -27,7 +28,7 @@ from ..run_projection import (
     public_identifier_list, public_sha256, public_timestamp,
     sanitize_run_metadata,
 )
-from ..query import managed_artifact_integrity
+from ..query import managed_artifact_integrity, static_feature_predicate_allowed
 from ..version import FEATURE_SCHEMA_VERSION, SCHEMA_VERSION
 
 
@@ -42,10 +43,16 @@ _TOOL_EVIDENCE_AUTHORITIES = frozenset({
     "tool_observation", "verification_evidence", "physical_measurement",
 })
 
+_STATIC_FEATURE_EVIDENCE_AUTHORITIES = frozenset({
+    "declared_constraint", "static_fact", "compiler_decision", "derived_fact",
+    "synthetic",
+})
+
 # A container in graph attrs is never a feature merely because its top-level
 # name was allowlisted.  Each container needs a positive, versioned schema.
-# v0.1 intentionally supports only the directive ``options`` container.  The
-# option names below are requested directive parameters, not achieved results.
+# The directive ``options`` and shape ``dims`` containers are the only reviewed
+# container contracts.  The option names below are requested directive
+# parameters, not achieved results.
 _DIRECTIVE_SCALAR_OPTION_NAMES = (
     "avg", "bundle", "class", "compact", "core", "cycle", "depth",
     "dependent", "dim", "direct_io", "direction",
@@ -77,6 +84,13 @@ _DIRECTIVE_OPTION_PROPERTIES["flags"] = {
 # feature_spec.json/PyG metadata.  There is deliberately no wildcard or
 # ``additionalProperties`` escape hatch for plugin-provided containers.
 NESTED_STATIC_FEATURE_SCHEMA: dict[str, dict[str, Any]] = {
+    "dims": {
+        "type": "positive_integer_list",
+        "min_items": 1,
+        "max_items": 16,
+        "min_value": 1,
+        "max_value": 2_147_483_647,
+    },
     "options": {
         "type": "object",
         "applicability": {
@@ -99,9 +113,54 @@ def _safe_scalar(value: Any) -> bool:
     return isinstance(value, float) and math.isfinite(value)
 
 
+def _static_evidence_value(value: Any, path: str = "value") -> Any:
+    """Validate a selected derivation value without lossy field dropping."""
+    reject_embedded_body_fields(value, f"feature evidence {path}")
+    if _safe_scalar(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [
+            _static_evidence_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) or not key.strip() for key in value):
+            raise ValueError(f"feature evidence {path} requires non-empty string keys")
+        result: dict[str, Any] = {}
+        for key in sorted(value):
+            if not static_feature_predicate_allowed(f"feature.{key}"):
+                raise ValueError(
+                    f"feature evidence {path} contains an outcome-shaped key {key!r}"
+                )
+            result[key] = _static_evidence_value(value[key], f"{path}.{key}")
+        return result
+    raise ValueError(
+        f"feature evidence {path} contains unsupported {type(value).__name__} data"
+    )
+
+
 def _apply_feature_schema(value: Any, schema: dict[str, Any]) -> Any:
     """Project a value through a positive schema, returning ``_OMIT`` on mismatch."""
     kind = schema.get("type")
+    if kind == "positive_integer_list":
+        # This is deliberately stricter than the generic array projection:
+        # tuples and partially-valid lists are not silently normalized.  A
+        # malformed dimension vector is unknown, not a shorter valid shape.
+        if not isinstance(value, list):
+            return _OMIT
+        min_items = schema.get("min_items")
+        max_items = schema.get("max_items")
+        min_value = schema.get("min_value")
+        max_value = schema.get("max_value")
+        limits = (min_items, max_items, min_value, max_value)
+        if any(type(item) is not int for item in limits):
+            return _OMIT
+        if not min_items <= len(value) <= max_items:
+            return _OMIT
+        if any(type(item) is not int or not min_value <= item <= max_value
+               for item in value):
+            return _OMIT
+        return list(value)
     if kind == "scalar":
         return value if _safe_scalar(value) else _OMIT
     if kind == "string":
@@ -505,6 +564,279 @@ def _tool_observation_evidence_error(
     return None
 
 
+def _validate_static_evidence_ref(
+    ref: Mapping[str, Any], owner_snapshot_id: str, *,
+    feature_stages: set[str], graphs: Mapping[str, Any],
+    exported_node_ids: Mapping[str, set[str]],
+    observations: Mapping[str, Mapping[str, Any]],
+    derivations: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    artifacts: Mapping[str, Mapping[str, Any]],
+    runs: Mapping[str, Mapping[str, Any]],
+    visiting: set[tuple[str, str]] | None = None,
+) -> None:
+    """Validate that one evidence reference cannot smuggle outcome data."""
+    kind = str(ref.get("kind", ""))
+    target_id = str(ref.get("target_id", ""))
+    snapshot_id = str(ref.get("snapshot_id") or owner_snapshot_id)
+    if snapshot_id not in graphs:
+        raise ValueError(
+            f"feature evidence reference targets undeclared snapshot {snapshot_id!r}"
+        )
+    if kind == "observation":
+        item = observations.get(snapshot_id, {}).get(target_id)
+        if item is None:
+            raise ValueError(f"feature evidence references missing observation {target_id!r}")
+        if (str(item.authority) not in _STATIC_FEATURE_EVIDENCE_AUTHORITIES
+                or item.stage not in feature_stages
+                or item.workload_id is not None
+                or not static_feature_predicate_allowed(item.predicate)):
+            raise ValueError(
+                f"observation {target_id!r} is not eligible static feature evidence"
+            )
+        _static_evidence_value(item.value, f"observation[{target_id}].value")
+        if item.run_id is not None:
+            producer = runs.get(snapshot_id, {}).get(item.run_id)
+            if (producer is None
+                    or str(producer.status) not in {"succeeded", "cached"}
+                    or str(producer.failure_class) != "none"
+                    or producer.stage not in feature_stages | {"index"}):
+                raise ValueError(
+                    f"observation {target_id!r} lacks eligible compiler provenance"
+                )
+        return
+    if kind == "artifact":
+        item = artifacts.get(snapshot_id, {}).get(target_id)
+        if item is None:
+            raise ValueError(f"feature evidence references missing artifact {target_id!r}")
+        if not static_feature_predicate_allowed(f"artifact.{item.kind}"):
+            raise ValueError(f"artifact {target_id!r} is outcome-shaped evidence")
+        if item.producer_run_id is not None:
+            producer = runs.get(snapshot_id, {}).get(item.producer_run_id)
+            if (producer is None
+                    or str(producer.status) not in {"succeeded", "cached"}
+                    or str(producer.failure_class) != "none"
+                    or producer.stage not in feature_stages | {"index"}):
+                raise ValueError(
+                    f"artifact {target_id!r} lacks eligible compiler provenance"
+                )
+        return
+    if kind == "entity_anchor":
+        entity = graphs[snapshot_id].entities.get(target_id)
+        if entity is None:
+            raise ValueError(f"feature evidence references missing entity {target_id!r}")
+        if target_id not in exported_node_ids.get(snapshot_id, set()):
+            raise ValueError(
+                f"feature evidence entity {target_id!r} is outside selected feature stages"
+            )
+        if (str(entity.authority) not in _STATIC_FEATURE_EVIDENCE_AUTHORITIES
+                or entity.stage not in feature_stages
+                or not static_feature_predicate_allowed(f"entity.{entity.kind}")):
+            raise ValueError(
+                f"entity {target_id!r} is not eligible static feature evidence"
+            )
+        _static_evidence_value(entity.attrs, f"entity[{target_id}].attrs")
+        return
+    if kind == "relation":
+        relation = graphs[snapshot_id].relations.get(target_id)
+        if relation is None:
+            raise ValueError(f"feature evidence references missing relation {target_id!r}")
+        exported = exported_node_ids.get(snapshot_id, set())
+        if relation.src not in exported or relation.dst not in exported:
+            raise ValueError(
+                f"feature evidence relation {target_id!r} has an excluded endpoint"
+            )
+        if (str(relation.authority) not in _STATIC_FEATURE_EVIDENCE_AUTHORITIES
+                or relation.stage not in feature_stages
+                or not static_feature_predicate_allowed(
+                    f"relation.{relation.kind}"
+                )):
+            raise ValueError(
+                f"relation {target_id!r} is not eligible static feature evidence"
+            )
+        _static_evidence_value(relation.attrs, f"relation[{target_id}].attrs")
+        return
+    if kind != "derivation":
+        raise ValueError(f"unsupported feature evidence reference kind {kind!r}")
+    item = derivations.get(snapshot_id, {}).get(target_id)
+    if item is None:
+        raise ValueError(f"feature evidence references missing derivation {target_id!r}")
+    if (str(item.get("authority")) not in _STATIC_FEATURE_EVIDENCE_AUTHORITIES
+            or item.get("stage") not in feature_stages
+            or not static_feature_predicate_allowed(str(item.get("predicate", "")))):
+        raise ValueError(f"derivation {target_id!r} is not eligible static feature evidence")
+    _static_evidence_value(item.get("value"), f"derivation[{target_id}].value")
+    trail = set(visiting or set())
+    key = (snapshot_id, target_id)
+    if key in trail:
+        raise ValueError(f"feature evidence derivation cycle includes {target_id!r}")
+    trail.add(key)
+    for child in item.get("evidence_refs", []):
+        _validate_static_evidence_ref(
+            child, snapshot_id, feature_stages=feature_stages, graphs=graphs,
+            exported_node_ids=exported_node_ids, observations=observations,
+            derivations=derivations, artifacts=artifacts, runs=runs,
+            visiting=trail,
+        )
+
+
+def _feature_evidence_rows(
+    dataset: DatasetManifest, *, feature_stages: set[str],
+    graphs: Mapping[str, Any], exported_node_ids: Mapping[str, set[str]],
+    observations: Mapping[str, Mapping[str, Any]],
+    derivations: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    artifacts: Mapping[str, Mapping[str, Any]],
+    runs: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    selected_predicates = set(dataset.feature_evidence_predicates)
+    if not selected_predicates:
+        return []
+    disallowed = sorted(
+        item for item in selected_predicates
+        if not static_feature_predicate_allowed(item)
+    )
+    if disallowed:
+        raise ValueError(
+            f"outcome-shaped predicates cannot be feature evidence: {disallowed}"
+        )
+    selected_keys: set[tuple[str, str]] = set()
+    included_keys: set[tuple[str, str]] = set()
+
+    def include(snapshot_id: str, derivation_id: str, *, selected: bool) -> None:
+        key = (snapshot_id, derivation_id)
+        if selected:
+            selected_keys.add(key)
+        if key in included_keys:
+            return
+        item = derivations.get(snapshot_id, {}).get(derivation_id)
+        if item is None:
+            raise ValueError(f"selected feature evidence {derivation_id!r} is unavailable")
+        _validate_static_evidence_ref(
+            {"kind": "derivation", "target_id": derivation_id,
+             "snapshot_id": snapshot_id},
+            snapshot_id, feature_stages=feature_stages, graphs=graphs,
+            exported_node_ids=exported_node_ids, observations=observations,
+            derivations=derivations, artifacts=artifacts, runs=runs,
+        )
+        included_keys.add(key)
+        for ref in item.get("evidence_refs", []):
+            if str(ref.get("kind")) == "derivation":
+                include(
+                    str(ref.get("snapshot_id") or snapshot_id),
+                    str(ref.get("target_id")), selected=False,
+                )
+
+    for snapshot_id in sorted(graphs):
+        for item in derivations.get(snapshot_id, {}).values():
+            if item.get("predicate") not in selected_predicates:
+                continue
+            if item.get("subject_id") not in exported_node_ids.get(snapshot_id, set()):
+                continue
+            include(snapshot_id, str(item["id"]), selected=True)
+
+    rows = []
+    for snapshot_id, derivation_id in sorted(included_keys):
+        item = derivations[snapshot_id][derivation_id]
+        refs = [dict(value) for value in item.get("evidence_refs", [])]
+        completeness = str(item.get("completeness"))
+        rows.append({
+            "snapshot_id": snapshot_id,
+            "subject_id": item.get("subject_id"),
+            "predicate": item.get("predicate"),
+            "value": _static_evidence_value(item.get("value")),
+            "unit": item.get("unit"),
+            "stage": item.get("stage"),
+            "authority": str(item.get("authority")),
+            "completeness": completeness,
+            "mask": completeness == "complete" and item.get("value") is not None,
+            "derivation_id": derivation_id,
+            "algorithm": item.get("algorithm"),
+            "algorithm_version": item.get("algorithm_version"),
+            "selected_as_feature": (snapshot_id, derivation_id) in selected_keys,
+            "evidence_ids": sorted({str(value.get("target_id")) for value in refs}),
+            "evidence_refs": refs,
+        })
+    return rows
+
+
+def _correspondence_rows(
+    bundle: GraphBundle, dataset: DatasetManifest, *,
+    feature_stages: set[str], graphs: Mapping[str, Any],
+    exported_node_ids: Mapping[str, set[str]],
+    observations: Mapping[str, Mapping[str, Any]],
+    derivations: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    artifacts: Mapping[str, Mapping[str, Any]],
+    runs: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    selected_kinds = set(dataset.entity_correspondence_kinds)
+    if not selected_kinds:
+        return []
+    values = []
+    for raw_item in bundle.store.correspondences():
+        item = json_ready(raw_item)
+        if item.get("kind") not in selected_kinds:
+            continue
+        source_snapshot = str(item.get("source_snapshot_id"))
+        target_snapshot = str(item.get("target_snapshot_id"))
+        if source_snapshot not in graphs or target_snapshot not in graphs:
+            continue
+        if (item.get("source_entity_id") not in exported_node_ids[source_snapshot]
+                or item.get("target_entity_id") not in exported_node_ids[target_snapshot]):
+            continue
+        if str(item.get("authority")) not in _STATIC_FEATURE_EVIDENCE_AUTHORITIES:
+            raise ValueError(
+                f"correspondence {item.get('id')!r} has non-static authority"
+            )
+        for ref in item.get("evidence_refs", []):
+            _validate_static_evidence_ref(
+                ref, source_snapshot, feature_stages=feature_stages, graphs=graphs,
+                exported_node_ids=exported_node_ids, observations=observations,
+                derivations=derivations, artifacts=artifacts, runs=runs,
+            )
+        values.append(dict(item))
+    candidate_groups: dict[tuple[str, str, str, str], list[str]] = {}
+    for item in values:
+        key = (
+            str(item.get("source_snapshot_id")), str(item.get("source_entity_id")),
+            str(item.get("target_snapshot_id")), str(item.get("kind")),
+        )
+        candidate_groups.setdefault(key, []).append(str(item.get("target_entity_id")))
+    rows = []
+    for item in values:
+        source_snapshot = str(item.get("source_snapshot_id"))
+        target_snapshot = str(item.get("target_snapshot_id"))
+        target = bundle.store.snapshot(target_snapshot)
+        is_parent_child = target.parent_snapshot_id == source_snapshot
+        refs = [dict(value) for value in item.get("evidence_refs", [])]
+        key = (
+            source_snapshot, str(item.get("source_entity_id")),
+            target_snapshot, str(item.get("kind")),
+        )
+        candidates = sorted(set(candidate_groups[key]))
+        rows.append({
+            "correspondence_id": item.get("id"),
+            "source_snapshot_id": source_snapshot,
+            "source_entity_id": item.get("source_entity_id"),
+            "target_snapshot_id": target_snapshot,
+            "target_entity_id": item.get("target_entity_id"),
+            "parent_snapshot_id": source_snapshot if is_parent_child else None,
+            "result_snapshot_id": target_snapshot if is_parent_child else None,
+            "kind": item.get("kind"),
+            "producer": item.get("producer"),
+            "producer_version": item.get("producer_version"),
+            "authority": str(item.get("authority")),
+            "completeness": str(item.get("completeness")),
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "resolution_status": "unique" if len(candidates) == 1 else "ambiguous",
+            "resolved_target_entity_id": (
+                candidates[0] if len(candidates) == 1 else None
+            ),
+            "evidence_ids": sorted({str(value.get("target_id")) for value in refs}),
+            "evidence_refs": refs,
+        })
+    return sorted(rows, key=lambda item: str(item.get("correspondence_id", "")))
+
+
 def export_graph_json(bundle: GraphBundle, snapshot_id: str, output: str | Path) -> Path:
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -516,7 +848,7 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
                    dataset: DatasetManifest | None = None, *, format: str = "jsonl",
                    include_source: bool = False) -> dict[str, Any]:
     if include_source:
-        raise PermissionError("v0.1 exports never embed source text; use authorized snippet APIs instead")
+        raise PermissionError("dataset exports never embed source text; use authorized snippet APIs instead")
     if format not in {"jsonl", "parquet"}:
         raise ValueError("format must be jsonl or parquet")
     if format == "parquet":
@@ -560,6 +892,14 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     if any(not isinstance(item, str) or not item.strip()
            for item in dataset.feature_attribute_allowlist):
         raise ValueError("feature attribute names must be non-empty strings")
+    for name, values in (
+        ("feature_evidence_predicates", dataset.feature_evidence_predicates),
+        ("entity_correspondence_kinds", dataset.entity_correspondence_kinds),
+    ):
+        if len(set(values)) != len(values):
+            raise ValueError(f"dataset {name} must be unique")
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            raise ValueError(f"dataset {name} must contain non-empty strings")
     feature_stages = set(dataset.feature_stages)
     feature_attributes = set(dataset.feature_attribute_allowlist)
     declared_snapshots = set(dataset.snapshot_ids)
@@ -575,6 +915,9 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     }
     observations_by_snapshot = {
         key: bundle.store.observations(key) for key in sorted(declared_snapshots)
+    }
+    derivations_by_snapshot = {
+        key: bundle.store.derivations(key) for key in sorted(declared_snapshots)
     }
     artifacts_by_snapshot = {
         key: bundle.store.artifacts(key) for key in sorted(declared_snapshots)
@@ -643,6 +986,14 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     artifact_maps = {
         key: {item.id: item for item in values}
         for key, values in artifacts_by_snapshot.items()
+    }
+    observation_maps = {
+        key: {item.id: item for item in values}
+        for key, values in observations_by_snapshot.items()
+    }
+    derivation_maps = {
+        key: {str(item["id"]): item for item in values}
+        for key, values in derivations_by_snapshot.items()
     }
     run_maps = {
         key: {item.id: item for item in values}
@@ -787,6 +1138,22 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     observation_rows = [json_ready(item) for key in sorted(observations_by_snapshot)
                         for item in sorted(observations_by_snapshot[key], key=lambda item: item.id)
                         if item.id not in nontruth_observation_ids]
+    exported_node_ids_by_snapshot = {
+        key: {item["node_id"] for item in node_rows if item["snapshot_id"] == key}
+        for key in sorted(declared_snapshots)
+    }
+    feature_evidence_rows = _feature_evidence_rows(
+        dataset, feature_stages=feature_stages, graphs=graphs,
+        exported_node_ids=exported_node_ids_by_snapshot,
+        observations=observation_maps, derivations=derivation_maps,
+        artifacts=artifact_maps, runs=run_maps,
+    )
+    correspondence_rows = _correspondence_rows(
+        bundle, dataset, feature_stages=feature_stages, graphs=graphs,
+        exported_node_ids=exported_node_ids_by_snapshot,
+        observations=observation_maps, derivations=derivation_maps,
+        artifacts=artifact_maps, runs=run_maps,
+    )
     label_rows = [json_ready(item) for item in sorted(
         dataset.labels, key=lambda item: (item.snapshot_id, item.label_id)
     )]
@@ -806,11 +1173,8 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     prediction_rows = [item for key in sorted(predictions_by_snapshot)
                        for item in predictions_by_snapshot[key]]
     exported_prediction_ids = {item["id"] for item in prediction_rows}
-    exported_node_ids_by_snapshot = {
-        key: {item["node_id"] for item in node_rows if item["snapshot_id"] == key}
-        for key in sorted(declared_snapshots)
-    }
     variant_rows = []
+    materialization_rows = []
     for action in sorted(variants_by_id.values(), key=lambda item: item["id"]):
         parent_id = action["parent_snapshot_id"]
         parent_exported = parent_id in declared_snapshots
@@ -819,12 +1183,42 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
             if item.get("action_id") == action["id"]
             and item["id"] in exported_prediction_ids
         )
+        materializations = bundle.store.materializations(
+            action["id"], parent_snapshot_id=parent_id,
+        )
+        materialized_result_ids = {
+            item.result_snapshot_id for item in materializations
+            if str(item.status) == "materialized" and item.result_snapshot_id
+        }
         result_snapshots = bundle.store.result_snapshots(
             action["id"], parent_snapshot_id=parent_id,
         )
+        if materializations:
+            result_snapshots = [
+                item for item in result_snapshots
+                if item.id in materialized_result_ids
+            ]
         result_ids = [
             item.id for item in result_snapshots if item.id in declared_snapshots
         ]
+        for attempt_index, attempt in enumerate(materializations, start=1):
+            declared_result = (
+                attempt.result_snapshot_id
+                if (str(attempt.status) == "materialized"
+                    and attempt.result_snapshot_id in declared_snapshots)
+                else None
+            )
+            materialization_rows.append({
+                "materialization_id": attempt.id,
+                "action_id": attempt.action_id,
+                "attempt_index": attempt_index,
+                "parent_snapshot_id": attempt.parent_snapshot_id,
+                "status": str(attempt.status),
+                "result_snapshot_id": declared_result,
+                "result_snapshot_declared": declared_result is not None,
+                "diagnostic_count": len(attempt.diagnostic_ids),
+                "evidence_count": len(attempt.evidence_refs),
+            })
         public_action = {
             "id": action["id"],
             "parent_snapshot_id": parent_id,
@@ -872,6 +1266,12 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     rows_by_name = {
         "nodes": _write_jsonl(output_dir / "nodes.jsonl", node_rows),
         "edges": _write_jsonl(output_dir / "edges.jsonl", edge_rows),
+        "feature_evidence": _write_jsonl(
+            output_dir / "feature_evidence.jsonl", feature_evidence_rows,
+        ),
+        "entity_correspondence": _write_jsonl(
+            output_dir / "entity_correspondence.jsonl", correspondence_rows,
+        ),
         "observations": _write_jsonl(output_dir / "observations.jsonl", observation_rows),
         "nontruth_observations": _write_jsonl(
             output_dir / "nontruth_observations.jsonl",
@@ -889,6 +1289,12 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         # Proposed actions and snapshot lineage are separate from both static
         # input features and real-tool truth tables.
         "variants": _write_jsonl(output_dir / "variants.jsonl", variant_rows),
+        "action_materializations": _write_jsonl(
+            output_dir / "action_materializations.jsonl",
+            sorted(materialization_rows, key=lambda item: (
+                item["action_id"], item["attempt_index"], item["materialization_id"],
+            )),
+        ),
         "snapshot_lineage": _write_jsonl(
             output_dir / "snapshot_lineage.jsonl", snapshot_lineage_rows,
         ),
@@ -897,6 +1303,22 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         "schema_version": SCHEMA_VERSION,
         "feature_schema_version": dataset.feature_schema_version,
         "static_features_table": "nodes",
+        "input_feature_tables": [
+            "nodes", "edges", "feature_evidence", "entity_correspondence",
+        ],
+        "feature_evidence_table": "feature_evidence",
+        "entity_correspondence_table": "entity_correspondence",
+        "feature_evidence_predicates": list(dataset.feature_evidence_predicates),
+        "entity_correspondence_kinds": list(dataset.entity_correspondence_kinds),
+        "feature_evidence_policy": (
+            "default empty opt-in; selected root derivations carry selected_as_feature=true; "
+            "supporting derivations are provenance only; tool, workload, prediction, label, "
+            "and outcome-shaped evidence is rejected"
+        ),
+        "entity_correspondence_policy": (
+            "default empty opt-in; only explicit evidence-backed records whose endpoints "
+            "and snapshots are exported are retained; no name-based mapping is inferred"
+        ),
         "truth_tables": ["observations", "labels"],
         "nontruth_tables": ["nontruth_observations"],
         "nontruth_observation_policy": (
@@ -907,11 +1329,13 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         "provenance_tables_are_input_features": False,
         "prediction_table": "predictions",
         "variant_table": "variants",
+        "action_materialization_table": "action_materializations",
         "snapshot_lineage_table": "snapshot_lineage",
         "action_lineage_contract": (
-            "variant and prediction links use stored action_id values; only declared result "
-            "snapshots and exported prediction rows are linked; result snapshots are listed "
-            "only when their immutable payload records the same action and parent"
+            "variant and prediction links use stored action_id values; explicit materialization "
+            "attempts distinguish materialized, no-op, and failed outcomes; only declared "
+            "materialized result snapshots and exported prediction rows are linked; legacy "
+            "snapshot-only lineage is used only when no materialization records exist"
         ),
         "variant_public_projection": {
             "mode": "minimal_positive_allowlist",
@@ -972,7 +1396,7 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         "dataset": dataset_payload,
         "snapshot_id": snapshot_id,
         "graph_hash": graphs[snapshot_id].graph_hash,
-        # Singular fields remain for one-snapshot v0.1 consumers; the snapshots
+        # Singular fields remain for one-snapshot consumers; the snapshots
         # map is authoritative for multi-snapshot datasets.
         "target_profile": _public_target(
             snapshot_manifests[snapshot_id].target, artifacts_by_snapshot[snapshot_id]

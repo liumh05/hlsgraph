@@ -17,12 +17,16 @@ from ..evidence_policy import (
 )
 from ..graph import CanonicalGraph
 from ..model import (
+    ActionMaterialization,
     ArtifactRef,
     AuthorityClass,
     Derivation,
     DesignSnapshot,
     Diagnostic,
     Entity,
+    EntityCorrespondence,
+    EvidenceKind,
+    EvidenceRef,
     KnowledgeRule,
     Observation,
     PredictionEnvelope,
@@ -164,6 +168,23 @@ CREATE TABLE IF NOT EXISTS relations (
   FOREIGN KEY(snapshot_id, dst) REFERENCES entities(snapshot_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_relations_endpoints ON relations(snapshot_id, src, dst);
+CREATE TABLE IF NOT EXISTS entity_correspondences (
+  id TEXT PRIMARY KEY,
+  source_snapshot_id TEXT NOT NULL,
+  source_entity_id TEXT NOT NULL,
+  target_snapshot_id TEXT NOT NULL,
+  target_entity_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  FOREIGN KEY(source_snapshot_id, source_entity_id)
+    REFERENCES entities(snapshot_id, id),
+  FOREIGN KEY(target_snapshot_id, target_entity_id)
+    REFERENCES entities(snapshot_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_correspondences_source
+  ON entity_correspondences(source_snapshot_id, source_entity_id, kind);
+CREATE INDEX IF NOT EXISTS idx_correspondences_target
+  ON entity_correspondences(target_snapshot_id, target_entity_id, kind);
 CREATE TABLE IF NOT EXISTS observations (
   id TEXT PRIMARY KEY,
   snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
@@ -213,6 +234,17 @@ CREATE TABLE IF NOT EXISTS variants (
   kind TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS action_materializations (
+  id TEXT PRIMARY KEY,
+  action_id TEXT NOT NULL REFERENCES variants(id),
+  parent_snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
+  result_snapshot_id TEXT REFERENCES snapshots(id),
+  status TEXT NOT NULL,
+  attempted_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_materializations_action
+  ON action_materializations(action_id, attempted_at, id);
 CREATE TABLE IF NOT EXISTS knowledge_rules (
   id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL,
@@ -279,7 +311,7 @@ class LedgerStore:
                 raise StoreError("ledger schema marker is missing")
             try:
                 steps = migration_path(str(row[0]), to_version)
-            except ValueError as exc:
+            except (ValueError, sqlite3.DatabaseError) as exc:
                 raise StoreError(str(exc)) from exc
             return [{"from_version": step.from_version, "to_version": step.to_version,
                      "description": step.description} for step in steps]
@@ -289,6 +321,7 @@ class LedgerStore:
         if not self.path.is_file():
             raise StoreError(f"ledger does not exist: {self.path}")
         with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
             row = connection.execute(
                 "SELECT value FROM schema_info WHERE key='schema_version'"
             ).fetchone()
@@ -296,7 +329,7 @@ class LedgerStore:
                 raise StoreError("ledger schema marker is missing")
             try:
                 steps = apply_migrations(connection, str(row[0]), to_version)
-            except ValueError as exc:
+            except (ValueError, sqlite3.DatabaseError) as exc:
                 raise StoreError(str(exc)) from exc
             connection.commit()
             return [{"from_version": step.from_version, "to_version": step.to_version,
@@ -376,7 +409,8 @@ class LedgerStore:
         """Return True when an identical row exists; reject semantic replacement."""
         allowed = {
             "observations", "derivations", "runs", "diagnostics", "verifications",
-            "variants", "predictions", "knowledge_rules",
+            "variants", "predictions", "knowledge_rules", "entity_correspondences",
+            "action_materializations",
         }
         if table not in allowed:
             raise StoreError(f"unsupported immutable table: {table}")
@@ -528,6 +562,101 @@ class LedgerStore:
         return None
 
     @classmethod
+    def _resolve_evidence_ref(
+        cls,
+        connection: sqlite3.Connection,
+        reference: EvidenceRef,
+        *,
+        allowed_snapshot_ids: frozenset[str],
+        label: str,
+    ) -> str:
+        """Resolve one typed reference in exactly one permitted snapshot.
+
+        An omitted snapshot qualifier is convenience, not permission to guess:
+        the target must resolve in exactly one allowed snapshot.  The kind is
+        checked against its own namespace, so a coincidentally equal ID in a
+        different ledger table cannot satisfy the reference.
+        """
+        if not allowed_snapshot_ids:
+            raise StoreError("evidence resolution requires at least one allowed snapshot")
+        if (reference.snapshot_id is not None
+                and reference.snapshot_id not in allowed_snapshot_ids):
+            raise StoreError(
+                f"{label} evidence belongs to disallowed snapshot "
+                f"{reference.snapshot_id!r}"
+            )
+        candidates = (
+            [reference.snapshot_id] if reference.snapshot_id is not None
+            else sorted(allowed_snapshot_ids)
+        )
+        resolved: list[str] = []
+        for snapshot_id in candidates:
+            if snapshot_id is None:  # only for static type narrowing
+                continue
+            if reference.kind == EvidenceKind.OBSERVATION:
+                exists = connection.execute(
+                    "SELECT 1 FROM observations WHERE snapshot_id=? AND id=?",
+                    (snapshot_id, reference.target_id),
+                ).fetchone() is not None
+            elif reference.kind == EvidenceKind.DERIVATION:
+                exists = connection.execute(
+                    "SELECT 1 FROM derivations WHERE snapshot_id=? AND id=?",
+                    (snapshot_id, reference.target_id),
+                ).fetchone() is not None
+            elif reference.kind == EvidenceKind.ARTIFACT:
+                exists = connection.execute(
+                    "SELECT 1 FROM snapshot_artifacts WHERE snapshot_id=? AND artifact_id=?",
+                    (snapshot_id, reference.target_id),
+                ).fetchone() is not None
+            elif reference.kind == EvidenceKind.ENTITY_ANCHOR:
+                row = connection.execute(
+                    "SELECT payload_json FROM entities WHERE snapshot_id=? AND id=?",
+                    (snapshot_id, reference.target_id),
+                ).fetchone()
+                exists = row is not None
+                if exists and reference.anchor is not None:
+                    entity = Entity.from_dict(json.loads(row[0]))
+                    exists = any(
+                        cls._payload(anchor) == cls._payload(reference.anchor)
+                        for anchor in entity.anchors
+                    )
+                    if exists:
+                        cls._require_artifact(
+                            connection, snapshot_id, reference.anchor.artifact_id,
+                        )
+            elif reference.kind == EvidenceKind.RELATION:
+                row = connection.execute(
+                    "SELECT payload_json FROM relations WHERE snapshot_id=? AND id=?",
+                    (snapshot_id, reference.target_id),
+                ).fetchone()
+                exists = row is not None
+                if exists and reference.anchor is not None:
+                    relation = Relation.from_dict(json.loads(row[0]))
+                    exists = any(
+                        cls._payload(anchor) == cls._payload(reference.anchor)
+                        for anchor in relation.anchors
+                    )
+                    if exists:
+                        cls._require_artifact(
+                            connection, snapshot_id, reference.anchor.artifact_id,
+                        )
+            else:  # pragma: no cover - EvidenceKind is closed
+                exists = False
+            if exists:
+                resolved.append(snapshot_id)
+        if not resolved:
+            raise StoreError(
+                f"{label} {reference.kind.value} evidence "
+                f"{reference.target_id!r} does not exist in an allowed snapshot"
+            )
+        if len(resolved) != 1:
+            raise StoreError(
+                f"{label} evidence {reference.target_id!r} is ambiguous across snapshots; "
+                "set EvidenceRef.snapshot_id explicitly"
+            )
+        return resolved[0]
+
+    @classmethod
     def _evidence_producer_runs(
         cls, connection: sqlite3.Connection, snapshot_id: str, evidence_id: str,
         stack: frozenset[str] = frozenset(),
@@ -555,12 +684,21 @@ class LedgerStore:
             (snapshot_id, evidence_id),
         ).fetchone()
         if row:
-            value = json.loads(row[0])
+            value = Derivation.from_dict(json.loads(row[0]))
             producers: set[str] = set()
-            for observation_id in value.get("input_observation_ids", []):
-                producers.update(cls._evidence_producer_runs(
-                    connection, snapshot_id, str(observation_id), nested,
-                ))
+            for reference in value.evidence_refs:
+                if reference.kind in {
+                    EvidenceKind.OBSERVATION,
+                    EvidenceKind.DERIVATION,
+                    EvidenceKind.ARTIFACT,
+                }:
+                    producers.update(cls._evidence_producer_runs(
+                        connection, snapshot_id, reference.target_id, nested,
+                    ))
+                elif reference.anchor is not None:
+                    producers.update(cls._evidence_producer_runs(
+                        connection, snapshot_id, reference.anchor.artifact_id, nested,
+                    ))
             return producers
         row = connection.execute(
             "SELECT payload_json FROM verifications WHERE snapshot_id=? AND id=?",
@@ -605,10 +743,20 @@ class LedgerStore:
         ).fetchone()
         if row:
             values: set[str] = set()
-            for observation_id in json.loads(row[0]).get("input_observation_ids", []):
-                values.update(cls._evidence_workloads(
-                    connection, snapshot_id, str(observation_id), nested,
-                ))
+            item = Derivation.from_dict(json.loads(row[0]))
+            for reference in item.evidence_refs:
+                if reference.kind in {
+                    EvidenceKind.OBSERVATION,
+                    EvidenceKind.DERIVATION,
+                    EvidenceKind.ARTIFACT,
+                }:
+                    values.update(cls._evidence_workloads(
+                        connection, snapshot_id, reference.target_id, nested,
+                    ))
+                elif reference.anchor is not None:
+                    values.update(cls._evidence_workloads(
+                        connection, snapshot_id, reference.anchor.artifact_id, nested,
+                    ))
             return values
         row = connection.execute(
             "SELECT payload_json FROM verifications WHERE snapshot_id=? AND id=?",
@@ -672,10 +820,14 @@ class LedgerStore:
         ).fetchone()
         if row:
             result: list[Observation] = []
-            for observation_id in json.loads(row[0]).get("input_observation_ids", []):
-                result.extend(cls._evidence_observation_leaves(
-                    connection, snapshot_id, str(observation_id), nested,
-                ))
+            item = Derivation.from_dict(json.loads(row[0]))
+            for reference in item.evidence_refs:
+                if reference.kind in {
+                    EvidenceKind.OBSERVATION, EvidenceKind.DERIVATION,
+                }:
+                    result.extend(cls._evidence_observation_leaves(
+                        connection, snapshot_id, reference.target_id, nested,
+                    ))
             return result
         return []
 
@@ -1445,6 +1597,100 @@ class LedgerStore:
         with self.write() as connection:
             self._add_artifact(connection, snapshot_id, artifact)
 
+    def _add_correspondences(
+        self,
+        connection: sqlite3.Connection,
+        values: list[EntityCorrespondence],
+    ) -> None:
+        for item in values:
+            item = self._revalidate_model(
+                item, EntityCorrespondence, "entity correspondence",
+            )
+            snapshots = connection.execute(
+                "SELECT id,project_id FROM snapshots WHERE id IN (?,?)",
+                (item.source_snapshot_id, item.target_snapshot_id),
+            ).fetchall()
+            found = {str(row[0]): str(row[1]) for row in snapshots}
+            missing = {
+                item.source_snapshot_id, item.target_snapshot_id,
+            } - set(found)
+            if missing:
+                raise StoreError(
+                    "correspondence snapshots do not exist: "
+                    + ", ".join(sorted(missing))
+                )
+            if len(set(found.values())) != 1:
+                raise StoreError("correspondence endpoints must belong to one project")
+            for snapshot_id, entity_id, endpoint in (
+                (item.source_snapshot_id, item.source_entity_id, "source"),
+                (item.target_snapshot_id, item.target_entity_id, "target"),
+            ):
+                if not connection.execute(
+                    "SELECT 1 FROM entities WHERE snapshot_id=? AND id=?",
+                    (snapshot_id, entity_id),
+                ).fetchone():
+                    raise StoreError(
+                        f"correspondence {endpoint} entity {entity_id!r} does not "
+                        f"exist in snapshot {snapshot_id}"
+                    )
+            allowed = frozenset({item.source_snapshot_id, item.target_snapshot_id})
+            for reference in item.evidence_refs:
+                self._resolve_evidence_ref(
+                    connection, reference, allowed_snapshot_ids=allowed,
+                    label=f"correspondence {item.id}",
+                )
+            payload = self._payload(item)
+            if self._immutable_payload(
+                connection, "entity_correspondences", item.id, payload,
+            ):
+                continue
+            connection.execute(
+                "INSERT INTO entity_correspondences("
+                "id,source_snapshot_id,source_entity_id,target_snapshot_id,"
+                "target_entity_id,kind,payload_json) VALUES(?,?,?,?,?,?,?)",
+                (item.id, item.source_snapshot_id, item.source_entity_id,
+                 item.target_snapshot_id, item.target_entity_id, item.kind, payload),
+            )
+
+    def add_correspondence(self, value: EntityCorrespondence) -> None:
+        self.add_correspondences([value])
+
+    def add_correspondences(self, values: list[EntityCorrespondence]) -> None:
+        with self.write() as connection:
+            self._add_correspondences(connection, values)
+
+    def correspondences(
+        self,
+        snapshot_id: str | None = None,
+        *,
+        source_snapshot_id: str | None = None,
+        target_snapshot_id: str | None = None,
+        kind: str | None = None,
+    ) -> list[EntityCorrespondence]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if snapshot_id is not None:
+            clauses.append("(source_snapshot_id=? OR target_snapshot_id=?)")
+            params.extend([snapshot_id, snapshot_id])
+        if source_snapshot_id is not None:
+            clauses.append("source_snapshot_id=?")
+            params.append(source_snapshot_id)
+        if target_snapshot_id is not None:
+            clauses.append("target_snapshot_id=?")
+            params.append(target_snapshot_id)
+        if kind is not None:
+            clauses.append("kind=?")
+            params.append(kind)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM entity_correspondences"
+                f"{where} ORDER BY id", params,
+            ).fetchall()
+            return [
+                EntityCorrespondence.from_dict(json.loads(row[0])) for row in rows
+            ]
+
     def _add_observations(
         self,
         connection: sqlite3.Connection,
@@ -1753,14 +1999,24 @@ class LedgerStore:
             item = self._revalidate_model(item, Derivation, "derivation")
             self._require_fact_authority(item.authority, f"derivation {item.id}")
             self._require_subject(connection, item.snapshot_id, item.subject_id)
-            for observation_id in item.input_observation_ids:
-                if observation_id in future_observation_ids:
+            for reference in item.evidence_refs:
+                if (reference.kind == EvidenceKind.OBSERVATION
+                        and reference.target_id in future_observation_ids):
                     continue
-                self._require_evidence(
-                    connection, item.snapshot_id, observation_id,
-                    tables=("observations",), label="observation",
+                if (reference.kind == EvidenceKind.DERIVATION
+                        and reference.target_id == item.id):
+                    raise StoreError(f"derivation {item.id} cannot cite itself")
+                self._resolve_evidence_ref(
+                    connection, reference,
+                    allowed_snapshot_ids=frozenset({item.snapshot_id}),
+                    label=f"derivation {item.id}",
                 )
             if item.predicate in _PHYSICAL_GATE_REPORT_KINDS:
+                if any(reference.kind != EvidenceKind.OBSERVATION
+                       for reference in item.evidence_refs):
+                    raise StoreError(
+                        f"physical gate {item.id} accepts observation evidence only"
+                    )
                 producer_ids: set[str] = set()
                 for observation_id in item.input_observation_ids:
                     producer_ids.update(self._evidence_producer_runs(
@@ -1984,6 +2240,7 @@ class LedgerStore:
         derivations: list[Derivation],
         verifications: list[VerificationResult],
         diagnostics: list[Diagnostic],
+        materialization: ActionMaterialization | None = None,
     ) -> None:
         """Atomically publish one successful canonical index result.
 
@@ -1992,10 +2249,23 @@ class LedgerStore:
         back graph projection, run, evidence, diagnostics, FTS rows, and activation.
         """
         snapshot_id = graph.snapshot_id
+        graph_snapshot = self.snapshot(snapshot_id)
         if run.snapshot_id != snapshot_id:
             raise StoreError("index run belongs to another snapshot")
         if run.stage != "index" or str(run.status) not in {"succeeded", "cached"}:
             raise StoreError("successful index commit requires a succeeded/cached index run")
+        if materialization is not None:
+            if str(materialization.status) != "materialized":
+                raise StoreError(
+                    "successful index materialization must use materialized status"
+                )
+            if (materialization.result_snapshot_id != snapshot_id
+                    or materialization.action_id != graph_snapshot.action_id
+                    or materialization.parent_snapshot_id
+                    != graph_snapshot.parent_snapshot_id):
+                raise StoreError(
+                    "successful index materialization does not match graph snapshot lineage"
+                )
         self._require_batch_snapshot(snapshot_id, observations, "observations")
         self._require_batch_snapshot(snapshot_id, derivations, "derivations")
         self._require_batch_snapshot(snapshot_id, verifications, "verifications")
@@ -2023,13 +2293,30 @@ class LedgerStore:
                 future_evidence_ids=verification_ids | diagnostic_ids,
             )
             self._add_diagnostics(connection, diagnostics)
+            if materialization is not None:
+                self._add_materializations(connection, [materialization])
             self._add_run(connection, run)
             self._set_active_snapshot(connection, project_id, snapshot_id)
 
-    def commit_index_failure(self, *, run: ToolRun, diagnostics: list[Diagnostic]) -> None:
+    def commit_index_failure(
+        self, *, run: ToolRun, diagnostics: list[Diagnostic],
+        materialization: ActionMaterialization | None = None,
+    ) -> None:
         """Atomically retain a failed index event without publishing a graph view."""
         if run.stage != "index" or str(run.status) in {"succeeded", "cached"}:
             raise StoreError("failed index commit requires a non-successful index run")
+        if materialization is not None:
+            if str(materialization.status) not in {"no_op", "failed"}:
+                raise StoreError(
+                    "failed index materialization must use no_op or failed status"
+                )
+            candidate = self.snapshot(run.snapshot_id)
+            if (candidate.action_id != materialization.action_id
+                    or candidate.parent_snapshot_id
+                    != materialization.parent_snapshot_id):
+                raise StoreError(
+                    "failed index materialization does not match candidate snapshot lineage"
+                )
         self._require_batch_snapshot(run.snapshot_id, diagnostics, "diagnostics")
         diagnostic_ids = frozenset(item.id for item in diagnostics)
         with self.write() as connection:
@@ -2037,6 +2324,8 @@ class LedgerStore:
                 connection, run, future_diagnostic_ids=diagnostic_ids,
             )
             self._add_diagnostics(connection, diagnostics)
+            if materialization is not None:
+                self._add_materializations(connection, [materialization])
             self._add_run(connection, run)
 
     def add_variant(self, value: VariantAction) -> None:
@@ -2093,6 +2382,144 @@ class LedgerStore:
     def variant(self, action_id: str) -> dict[str, Any] | None:
         values = self.variants(action_id=action_id)
         return values[0] if values else None
+
+    def _add_materializations(
+        self,
+        connection: sqlite3.Connection,
+        values: list[ActionMaterialization],
+        *,
+        future_diagnostics: dict[str, str] | None = None,
+    ) -> None:
+        future_diagnostics = dict(future_diagnostics or {})
+        for item in values:
+            item = self._revalidate_model(
+                item, ActionMaterialization, "action materialization",
+            )
+            action = connection.execute(
+                "SELECT parent_snapshot_id FROM variants WHERE id=?",
+                (item.action_id,),
+            ).fetchone()
+            if action is None:
+                raise StoreError(
+                    f"materialization action does not exist: {item.action_id}"
+                )
+            if str(action[0]) != item.parent_snapshot_id:
+                raise StoreError(
+                    "materialization parent_snapshot_id does not match its action"
+                )
+            parent = connection.execute(
+                "SELECT project_id FROM snapshots WHERE id=?",
+                (item.parent_snapshot_id,),
+            ).fetchone()
+            if parent is None:
+                raise StoreError(
+                    f"materialization parent snapshot does not exist: "
+                    f"{item.parent_snapshot_id}"
+                )
+            project_id = str(parent[0])
+            allowed_snapshots = {item.parent_snapshot_id}
+            # Candidate snapshots naming the action are legitimate locations
+            # for failed/no-op attempt diagnostics even when no result is
+            # published by the materialization record.
+            for row in connection.execute(
+                "SELECT payload_json FROM snapshots WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                snapshot = DesignSnapshot.from_dict(json.loads(row[0]))
+                if (snapshot.action_id == item.action_id
+                        and snapshot.parent_snapshot_id == item.parent_snapshot_id):
+                    allowed_snapshots.add(snapshot.id)
+            if item.result_snapshot_id is not None:
+                try:
+                    result = next(
+                        snapshot for snapshot in (
+                            DesignSnapshot.from_dict(json.loads(row[0]))
+                            for row in connection.execute(
+                                "SELECT payload_json FROM snapshots WHERE id=?",
+                                (item.result_snapshot_id,),
+                            ).fetchall()
+                        )
+                    )
+                except StopIteration as exc:
+                    raise StoreError(
+                        f"materialization result snapshot does not exist: "
+                        f"{item.result_snapshot_id}"
+                    ) from exc
+                if (result.project_id != project_id
+                        or result.action_id != item.action_id
+                        or result.parent_snapshot_id != item.parent_snapshot_id):
+                    raise StoreError(
+                        "materialization result snapshot has inconsistent action lineage"
+                    )
+                allowed_snapshots.add(result.id)
+            for diagnostic_id in item.diagnostic_ids:
+                row = connection.execute(
+                    "SELECT snapshot_id FROM diagnostics WHERE id=?",
+                    (diagnostic_id,),
+                ).fetchone()
+                diagnostic_snapshot = (
+                    str(row[0]) if row is not None
+                    else future_diagnostics.get(diagnostic_id)
+                )
+                if (diagnostic_snapshot is None
+                        or diagnostic_snapshot not in allowed_snapshots):
+                    raise StoreError(
+                        f"materialization diagnostic {diagnostic_id!r} is missing or "
+                        "does not belong to this action attempt"
+                    )
+            for reference in item.evidence_refs:
+                self._resolve_evidence_ref(
+                    connection, reference,
+                    allowed_snapshot_ids=frozenset(allowed_snapshots),
+                    label=f"materialization {item.id}",
+                )
+            payload = self._payload(item)
+            if self._immutable_payload(
+                connection, "action_materializations", item.id, payload,
+            ):
+                continue
+            connection.execute(
+                "INSERT INTO action_materializations("
+                "id,action_id,parent_snapshot_id,result_snapshot_id,status,"
+                "attempted_at,payload_json) VALUES(?,?,?,?,?,?,?)",
+                (item.id, item.action_id, item.parent_snapshot_id,
+                 item.result_snapshot_id, str(item.status), item.attempted_at, payload),
+            )
+
+    def add_materialization(self, value: ActionMaterialization) -> None:
+        self.add_materializations([value])
+
+    def add_materializations(self, values: list[ActionMaterialization]) -> None:
+        with self.write() as connection:
+            self._add_materializations(connection, values)
+
+    def materializations(
+        self,
+        action_id: str | None = None,
+        *,
+        parent_snapshot_id: str | None = None,
+        status: str | None = None,
+    ) -> list[ActionMaterialization]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if action_id is not None:
+            clauses.append("action_id=?")
+            params.append(action_id)
+        if parent_snapshot_id is not None:
+            clauses.append("parent_snapshot_id=?")
+            params.append(parent_snapshot_id)
+        if status is not None:
+            clauses.append("status=?")
+            params.append(status)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM action_materializations"
+                f"{where} ORDER BY attempted_at,id", params,
+            ).fetchall()
+            return [
+                ActionMaterialization.from_dict(json.loads(row[0])) for row in rows
+            ]
 
     def result_snapshots(self, action_id: str, *,
                          parent_snapshot_id: str | None = None) -> list[DesignSnapshot]:

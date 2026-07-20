@@ -7,9 +7,9 @@ silently reinterpret an older observation.
 
 HLSGraph tracks several versions independently:
 
-| Layer | Current v0.1 contract |
+| Layer | Current v0.2 contract |
 | --- | --- |
-| Python package | Semantic version such as `0.1.0`. |
+| Python package | Semantic version `0.2.0`. |
 | Canonical schema | `schema_version` on manifests, ledgers, graphs, and wire responses. |
 | Bundle format | `bundle_version` in `.hlsgraph/bundle.json`. |
 | Extraction profile | Hash of extractor names/versions, degraded selection, plugins, and options. |
@@ -46,6 +46,12 @@ A `DesignSnapshot` is immutable and content-derived. Its ID includes hashes of:
 - toolchain contexts and the explicit stage-to-toolchain mapping;
 - extraction profile, including explicit degraded mode and plugins; and
 - an optional `VariantAction` identity when the candidate represents a proposed delta.
+
+An action proposal alone is not result lineage. Every application attempt is an
+immutable `ActionMaterialization`. An unchanged candidate records `no_op`, a
+failed extraction records `failed`, and only `materialized` names a distinct
+result snapshot. Retrying the same action appends an attempt rather than
+rewriting history.
 
 `parent_snapshot_id` is immutable lineage metadata but is deliberately not an
 identity input. Re-observing identical design/tool/extraction inputs therefore
@@ -97,7 +103,7 @@ read paths reject unsupported versions; they do not update the marker on open.
 Inspect a migration path without changing data:
 
 ```bash
-hlsgraph migrate --project /path/to/project --to-version 0.1.0
+hlsgraph migrate --project /path/to/project --to-version 0.2.0
 ```
 
 Apply only a registered path:
@@ -107,9 +113,13 @@ hlsgraph migrate --project /path/to/project --to-version X.Y.Z --apply
 ```
 
 The output states `implicit_migration: false` and lists every registered step.
-v0.1 is the first public schema, so there are no historical transformation steps
-yet. A future breaking release must add deterministic reviewed steps and tests.
-If no path exists, HLSGraph fails closed.
+The registered `0.1.0 -> 0.2.0` path adds entity-correspondence and
+action-materialization tables, normalizes legacy derivation observation inputs
+to generic evidence references while preserving their stable IDs, updates graph
+view markers, and then updates bundle/current-manifest markers atomically. It
+does not rewrite historical snapshot manifests. The operation is lock-protected
+and resumable after a partially completed ledger or bundle step. If no path
+exists, HLSGraph fails closed; opening a legacy bundle never migrates it.
 
 Migration rules:
 

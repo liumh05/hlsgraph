@@ -110,7 +110,7 @@ REQUIRED_SDIST = {
     "sbom.spdx.json", "docs/references.md",
     "docs/privacy-and-security.md",
 }
-RELEASE_VERSION = "0.1.2"
+RELEASE_VERSION = "0.2.0"
 ELK_SOURCE_REVISIONS = frozenset({
     "a8304cf79fde75bc2ab1a89d28320f53f8637436",
     "62d5909f96fad541bc101ad52dabaece6b7eab7e",

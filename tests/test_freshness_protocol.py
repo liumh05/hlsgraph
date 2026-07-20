@@ -25,9 +25,14 @@ from hlsgraph.runner import (
     LocalRunner,
     ReplayRunner,
     Runner,
+    RunnerExecution,
     RunnerProtocolError,
+    StagedOutput,
     StageOrchestrator,
     ToolRunRequest,
+)
+from hlsgraph.runner.staging import (
+    create_run_directory, read_verified_file, write_new_file,
 )
 from hlsgraph.sdk import Project
 
@@ -41,7 +46,7 @@ def _request(**overrides: object) -> ToolRunRequest:
         "environment": {"MODE": "test"},
         "environment_hash": "a" * 64,
         "toolchain_id": "test.toolchain",
-        "input_artifact_ids": ["artifact_fixture"],
+        "input_artifact_ids": [],
         "timeout_s": 10,
         "metadata": {"fixture": "expected"},
     }
@@ -83,18 +88,50 @@ class _CallbackRunner(Runner):
     # using a made-up backend must not grant a run real-tool truth authority.
     name = "runner.local"
     provides_local_output_bytes = True
+    run_scoped_staging = True
+    can_produce_tool_truth = True
 
-    def __init__(self, callback: Callable[[ToolRunRequest], ToolRun]):
+    def __init__(
+        self, callback: Callable[[ToolRunRequest], ToolRun], *,
+        outputs: dict[str, dict[str, bytes]] | None = None,
+    ):
         self.callback = callback
+        self.outputs = outputs or {}
         self.calls: list[ToolRunRequest] = []
+        self.project_root: Path | None = None
+
+    def bind_project_root(self, project_root: str | Path) -> None:
+        self.project_root = Path(project_root).resolve()
 
     @property
     def fingerprint(self) -> str:
         return stable_hash({"runner": self.name, "version": 1})
 
-    def execute(self, request: ToolRunRequest) -> ToolRun:
+    def execute(self, request: ToolRunRequest) -> RunnerExecution:
         self.calls.append(request)
-        return self.callback(request)
+        run = self.callback(request)
+        values = self.outputs.get(request.stage, {})
+        if not values:
+            return RunnerExecution(run)
+        assert self.project_root is not None
+        staging, parent = create_run_directory(self.project_root)
+        staged: list[StagedOutput] = []
+        declarations = {item.path: item for item in request.declared_outputs}
+        for path, data in values.items():
+            declaration = declarations[path]
+            write_new_file(staging, path, data)
+            _bytes, size, digest, local = read_verified_file(
+                staging, path, max_bytes=declaration.max_bytes,
+            )
+            staged.append(StagedOutput(path, local, size, digest))
+        run.metadata["staging_isolated"] = True
+        run.metadata["staged_output_manifest"] = [
+            {"path": item.path, "size": item.size, "sha256": item.sha256}
+            for item in staged
+        ]
+        run.id = ""
+        run.__post_init__()
+        return RunnerExecution(run, staged, staging, parent)
 
 
 @pytest.mark.parametrize(
@@ -308,38 +345,28 @@ def _chained_project(root: Path, project_id: str) -> Project:
     )
 
 
-@pytest.mark.parametrize("location", ["artifact", "declared_output"])
-def test_run_detects_chained_output_drift_before_consumer(
-    tmp_path, monkeypatch, location,
-):
+def test_run_detects_chained_cas_drift_before_consumer(tmp_path, monkeypatch):
     project = _chained_project(
-        tmp_path / f"chain-pre-{location}", f"test.chain_pre_{location}",
+        tmp_path / "chain-pre-artifact", "test.chain_pre_artifact",
     )
     assert project.index(degraded=True).success
-    report = project.bundle.project_root / "reports" / "chained.bin"
     runner: _CallbackRunner
 
     def produce(request: ToolRunRequest) -> ToolRun:
-        if request.stage == "csynth":
-            report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_bytes(b"original-chain")
         return _successful_run(request, runner)
 
-    runner = _CallbackRunner(produce)
+    runner = _CallbackRunner(produce, outputs={
+        "csynth": {"reports/chained.bin": b"original-chain"},
+    })
     original_commit = project._commit_declared_run_outputs
 
-    def commit_then_corrupt(snapshot, manifest, run, output_specs):
-        extraction = original_commit(snapshot, manifest, run, output_specs)
+    def commit_then_corrupt(snapshot, manifest, run, output_specs, execution):
+        extraction = original_commit(snapshot, manifest, run, output_specs, execution)
         artifact = next(
             item for item in project.bundle.store.artifacts(snapshot.id)
             if item.id in run.output_artifact_ids
         )
-        relative = (
-            artifact.uri
-            if location == "artifact"
-            else artifact.metadata["declared_output_path"]
-        )
-        (project.bundle.project_root / relative).write_bytes(b"corrupt-chain!")
+        (project.bundle.project_root / artifact.uri).write_bytes(b"corrupt-chain!")
         return extraction
 
     monkeypatch.setattr(project, "_commit_declared_run_outputs", commit_then_corrupt)
@@ -349,8 +376,41 @@ def test_run_detects_chained_output_drift_before_consumer(
     assert result.stopped_after_stage == "post_route"
     assert len(result.runs) == 2
     _assert_input_failure(result.runs[-1], "post_route")
-    assert any(location in item for item in
+    assert any(":artifact" in item for item in
                result.runs[-1].metadata["input_mismatch_ids"])
+
+
+def test_project_declared_path_is_not_a_post_commit_truth_copy(tmp_path, monkeypatch):
+    project = _chained_project(
+        tmp_path / "chain-declared-path", "test.chain_declared_path",
+    )
+    assert project.index(degraded=True).success
+    runner: _CallbackRunner
+    runner = _CallbackRunner(
+        lambda request: _successful_run(request, runner),
+        outputs={"csynth": {"reports/chained.bin": b"original-chain"}},
+    )
+    original_commit = project._commit_declared_run_outputs
+
+    def commit_then_create_untrusted_copy(
+        snapshot, manifest, run, output_specs, execution,
+    ):
+        extraction = original_commit(
+            snapshot, manifest, run, output_specs, execution,
+        )
+        path = project.bundle.project_root / "reports" / "chained.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"untrusted-project-copy")
+        return extraction
+
+    monkeypatch.setattr(
+        project, "_commit_declared_run_outputs", commit_then_create_untrusted_copy,
+    )
+    result = project.run(runner, ["csynth", "post_route", "hardware_runtime"])
+    assert [item.stage for item in runner.calls] == [
+        "csynth", "post_route", "hardware_runtime",
+    ]
+    assert result.stopped_after_stage is None
 
 
 def test_run_detects_chained_cas_drift_after_consumer_and_stops(tmp_path):
@@ -358,14 +418,10 @@ def test_run_detects_chained_cas_drift_after_consumer_and_stops(tmp_path):
         tmp_path / "chain-post", "test.chain_post",
     )
     assert project.index(degraded=True).success
-    report = project.bundle.project_root / "reports" / "chained.bin"
     runner: _CallbackRunner
 
     def produce_then_consume(request: ToolRunRequest) -> ToolRun:
-        if request.stage == "csynth":
-            report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_bytes(b"original-chain")
-        elif request.stage == "post_route":
+        if request.stage == "post_route":
             chained = next(
                 item for item in request.metadata["input_artifacts"]
                 if item["id"] not in {
@@ -377,7 +433,9 @@ def test_run_detects_chained_cas_drift_after_consumer_and_stops(tmp_path):
             (project.bundle.project_root / chained["uri"]).write_bytes(b"corrupt-chain!")
         return _successful_run(request, runner)
 
-    runner = _CallbackRunner(produce_then_consume)
+    runner = _CallbackRunner(produce_then_consume, outputs={
+        "csynth": {"reports/chained.bin": b"original-chain"},
+    })
     result = project.run(runner, ["csynth", "post_route", "hardware_runtime"])
 
     assert [item.stage for item in runner.calls] == ["csynth", "post_route"]

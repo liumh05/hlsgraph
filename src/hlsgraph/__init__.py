@@ -2,6 +2,8 @@
 from .graph import CanonicalGraph
 from .model import (
     AccessPolicy,
+    ActionMaterialization,
+    ActionMaterializationStatus,
     Anchor,
     ArtifactRef,
     AuthorityClass,
@@ -14,6 +16,9 @@ from .model import (
     DesignSnapshot,
     Diagnostic,
     Entity,
+    EntityCorrespondence,
+    EvidenceKind,
+    EvidenceRef,
     FailureClass,
     GateKind,
     GateResult,
@@ -40,9 +45,11 @@ from .version import __version__, BUNDLE_VERSION, FEATURE_SCHEMA_VERSION, SCHEMA
 from .sdk import Project
 
 __all__ = [
-    "CanonicalGraph", "AccessPolicy", "Anchor", "ArtifactRef", "AuthorityClass", "BuildContext",
+    "CanonicalGraph", "AccessPolicy", "ActionMaterialization",
+    "ActionMaterializationStatus", "Anchor", "ArtifactRef", "AuthorityClass", "BuildContext",
     "ClockConstraint", "Completeness", "ConstraintSet", "DatasetManifest", "Derivation",
-    "DesignSnapshot", "Diagnostic", "Entity", "FailureClass", "GateKind", "GateResult",
+    "DesignSnapshot", "Diagnostic", "Entity", "EntityCorrespondence", "EvidenceKind",
+    "EvidenceRef", "FailureClass", "GateKind", "GateResult",
     "GateStatus", "KnowledgeRule", "LabelSpec", "Observation", "PredictionEnvelope",
     "ProjectManifest", "Relation", "RetentionPolicy", "RunStatus", "SourceAnchor", "Stage",
     "TargetProfile", "ToolOutputSpec", "ToolRun", "ToolchainContext", "TranslationUnit", "VariantAction",

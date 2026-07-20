@@ -6,7 +6,13 @@ from typing import Any
 from ..bundle import GraphBundle
 from ..model import DatasetManifest, Stage
 from ..version import FEATURE_SCHEMA_VERSION
-from .ml import _feature_schema_document, _static_features, _validated_dataset_manifest
+from .ml import (
+    _correspondence_rows,
+    _feature_evidence_rows,
+    _feature_schema_document,
+    _static_features,
+    _validated_dataset_manifest,
+)
 
 
 def _feature_graph(bundle: GraphBundle, snapshot_id: str,
@@ -118,15 +124,67 @@ def to_pyg_data(bundle: GraphBundle, snapshot_id: str,
     data.edge_features = [
         _static_features(item.attrs, feature_attributes) for item in edges
     ]
+    graphs = {
+        key: bundle.store.load_graph(key) for key in sorted(dataset.snapshot_ids)
+    }
+    selected_stages = set(dataset.feature_stages)
+    exported_node_ids = {
+        key: {
+            item.id for item in graph.entities.values()
+            if item.stage in selected_stages
+        }
+        for key, graph in graphs.items()
+    }
+    observation_maps = {
+        key: {item.id: item for item in bundle.store.observations(key)}
+        for key in sorted(graphs)
+    }
+    derivation_maps = {
+        key: {str(item["id"]): item for item in bundle.store.derivations(key)}
+        for key in sorted(graphs)
+    }
+    artifact_maps = {
+        key: {item.id: item for item in bundle.store.artifacts(key)}
+        for key in sorted(graphs)
+    }
+    run_maps = {
+        key: {item.id: item for item in bundle.store.runs(key)}
+        for key in sorted(graphs)
+    }
+    feature_evidence = _feature_evidence_rows(
+        dataset, feature_stages=selected_stages, graphs=graphs,
+        exported_node_ids=exported_node_ids, observations=observation_maps,
+        derivations=derivation_maps, artifacts=artifact_maps, runs=run_maps,
+    )
+    correspondences = _correspondence_rows(
+        bundle, dataset, feature_stages=selected_stages, graphs=graphs,
+        exported_node_ids=exported_node_ids, observations=observation_maps,
+        derivations=derivation_maps, artifacts=artifact_maps, runs=run_maps,
+    )
+    # Variable-shape evidence remains audited metadata.  A model adapter must
+    # explicitly encode rows marked selected_as_feature; they are never mixed
+    # into the default kind/stage tensor.
+    data.feature_evidence = [
+        item for item in feature_evidence if item.get("snapshot_id") == snapshot_id
+    ]
+    data.entity_correspondence = [
+        item for item in correspondences
+        if snapshot_id in {
+            item.get("source_snapshot_id"), item.get("target_snapshot_id"),
+        }
+    ]
     data.snapshot_id = snapshot_id
     data.feature_schema_version = dataset.feature_schema_version
     data.feature_stages = list(dataset.feature_stages)
     data.feature_attribute_allowlist = list(dataset.feature_attribute_allowlist)
+    data.feature_evidence_predicates = list(dataset.feature_evidence_predicates)
+    data.entity_correspondence_kinds = list(dataset.entity_correspondence_kinds)
     data.static_feature_schema = _feature_schema_document(feature_attributes)
     data.feature_contract = (
         "node kind/stage indices and edge kind/stage indices; "
         "static attribute metadata uses the positive nested feature schema; "
         "DatasetManifest stage and attribute firewalls applied; "
-        "observations, labels, and predictions excluded"
+        "selected deterministic feature evidence and explicit correspondences remain "
+        "audited metadata; observations, labels, and predictions excluded"
     )
     return data

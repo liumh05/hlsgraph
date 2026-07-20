@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from hlsgraph import FEATURE_SCHEMA_VERSION
 from hlsgraph.bundle import GraphBundle
 from hlsgraph.export import export_dataset
 from hlsgraph.graph import CanonicalGraph
@@ -212,7 +213,7 @@ def test_ml_export_separates_features_truth_labels_predictions_and_private_sourc
     )
     bundle.store.add_prediction(prediction)
     dataset = DatasetManifest(
-        dataset_id="test.dataset", feature_schema_version="0.1.0",
+        dataset_id="test.dataset", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id],
         feature_attribute_allowlist=["safe_feature", "safe_edge_feature"],
         labels=[LabelSpec(
@@ -295,7 +296,7 @@ def test_label_contract_rejects_unavailable_truth_observation(tmp_path):
     graph.add_entity(Entity("hls.kernel", "dut", snapshot.id))
     bundle.store.save_graph(graph)
     dataset = DatasetManifest(
-        dataset_id="test.bad", feature_schema_version="0.1.0",
+        dataset_id="test.bad", feature_schema_version=FEATURE_SCHEMA_VERSION,
         snapshot_ids=[snapshot.id],
         labels=[LabelSpec(
             label_id="missing", snapshot_id=snapshot.id,

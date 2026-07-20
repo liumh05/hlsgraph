@@ -107,6 +107,7 @@ an achieved csynth value is not silently replaced by a post-route value.
 | `ArtifactRef` | Kind, URI, SHA-256, size, license, producer, retention, access, and metadata; no required body. |
 | `DesignSnapshot` | Immutable identity over manifest, artifacts, build, target, constraints, toolchain, and extraction profile. |
 | `VariantAction` | A proposed delta from a parent snapshot; it is not proof that the delta was applied or succeeded. Result lineage requires an explicit matching action/parent pair in a new snapshot. |
+| `ActionMaterialization` | One immutable attempt to apply a recorded action. `materialized`, `no_op`, and `failed` remain distinct; only `materialized` may name a result snapshot. |
 
 Snapshot IDs are stable hashes of identity fields, not creation timestamps.
 `created_at` records the ledger event but does not change the ID. Entity and
@@ -128,7 +129,9 @@ both manifest and toolchain snapshot hashes.
 | `Relation` | Explicit typed edge with endpoints, stage, authority, anchors, mapping kind, and completeness. |
 | `Anchor` (`SourceAnchor`) | Artifact and source/IR location plus mapping kind and ambiguity. |
 | `Observation` | Atomic subject/predicate/value statement with unit, stage, authority, run, artifact, workload, and completeness. |
-| `Derivation` | Recomputable deterministic output with algorithm/version and input observation IDs. |
+| `EvidenceRef` | Typed reference to an observation, derivation, artifact, entity anchor, or explicit relation, with an explicit snapshot and optional anchor. |
+| `Derivation` | Recomputable deterministic output with algorithm/version and generic `EvidenceRef` inputs. Legacy observation-ID inputs normalize to evidence references without changing legacy stable IDs. |
+| `EntityCorrespondence` | Explicit evidence-backed entity mapping across snapshots, with mapping kind, producer/version, authority, and completeness. It never arises from name matching. |
 | `Diagnostic` | Structured extraction/tool health event with stage, severity, subject/artifact, and guidance. |
 | `VerificationResult` | Independent correctness evidence for a specific method and optional workload. |
 | `ToolRun` | Immutable stage request/result with backend, command, status, failure class, artifacts, and gates. |
@@ -137,9 +140,11 @@ both manifest and toolchain snapshot hashes.
 | `LabelSpec` | Snapshot-scoped ML label reference to a real observation, including stage, unit, mask, and missing/censoring state. |
 
 When a prediction carries `action_id`, that action must belong to the
-prediction's input snapshot. Any result snapshot linked to the action must
-record the same action and parent. These are stored links, not evidence that a
-candidate was applied correctly or improved QoR.
+prediction's input snapshot. `Project.index_variant(action_id)` refuses an
+unchanged candidate as an explicit `no_op`; a successful changed candidate
+records a `materialized` attempt and a distinct result snapshot. Failed and
+no-op attempts retain diagnostics but never become result lineage. These are
+stored links, not evidence that a candidate improved QoR.
 
 Entity, relation, artifact, predicate, action, backend, and plugin identifiers
 are namespaced strings (for example `amd.vitis.csynth_xml` or
@@ -158,10 +163,43 @@ emit an explicit human-readable redacted external location itself.
 `complete`, `partial`, `missing`, and `ambiguous` are explicit states. A missing
 AST-to-IR or IR-to-schedule mapping is not repaired by name matching. Cross-layer
 relations may be many-to-many and retain mapping kind, anchors, and ambiguity.
+Cross-snapshot mappings use `EntityCorrespondence`. Query and ML surfaces group
+multiple explicit candidates and leave the singular resolved entity unset; they
+never select the first candidate.
 
 The default architecture projection excludes software-call and LLVM-CFG edges
 from impact semantics. Those edges remain queryable evidence but are not
 hardware topology.
+
+## Deterministic static feature derivations
+
+Indexing derives versioned scope-level ML evidence directly from canonical
+entities and relations. The built-in predicates are
+`feature.operation_histogram`, `feature.index_histogram`,
+`feature.trip_count`, `feature.loop_bounds`, `feature.bitwidth`,
+`feature.memory_access`, and `feature.software_call_targets`.
+`feature.dependence_distance` has the same stable per-scope row contract, but
+its value remains `null` unless an entity or relation explicitly records a
+proven distance.
+
+Every row records its algorithm/version, stage, authority, completeness, and
+typed evidence references. Unknown values are `null` with `missing` or
+`partial` completeness, and public query/ML projections set `mask=false`.
+Zero is never substituted for missing evidence. An empty histogram/map/list is
+valid only when a complete evidence plane proves the scope empty. The current
+text LLVM adapter can prove its directly contained operation plane complete
+unless it reports truncation. An untruncated MLIR artifact whose dialects all
+have registered adapters explicitly marks its static-feature domain complete;
+unsupported dialects and truncation keep that domain partial. Degraded source
+scanning never upgrades operation, bitwidth, memory, call, or loop facts to
+complete.
+
+Cross-plane evidence is followed only through `hls.contains`, `ir.contains`,
+and explicit `cross.maps_to`/`cross.projects_to` relations. No name matching is
+performed by the feature pass. `feature.software_call_targets` is a deduplicated,
+stable-sorted list of target entity IDs with unit `entity_ids`; it consumes only
+explicit `software.calls` evidence marked `ml_input_evidence=true` and is not
+canonical hardware topology.
 
 ## Stage-specific observations
 
@@ -204,8 +242,12 @@ passes.
 ## ML truth separation
 
 `DatasetManifest` records snapshot IDs, feature schema, family/dedup-aware
-splits, and licenses. Static node features exclude QoR-, label-, and
-prediction-prefixed attributes. Labels are keyed by `(snapshot_id, label_id)`
+splits, licenses, opt-in `feature_evidence_predicates`, and opt-in
+`entity_correspondence_kinds`. Both opt-in lists default to empty. Selected
+feature evidence must have a recursively static evidence closure; outcome-,
+workload-, prediction-, and label-shaped records are rejected. Static node
+features exclude QoR-, label-, and prediction-prefixed attributes. Labels are
+keyed by `(snapshot_id, label_id)`
 and reference observations rather than duplicating truth values. A present label
 must resolve to a complete, same-snapshot observation produced by a successful,
 fresh, non-synthetic tool run and a retained managed report whose bytes still
