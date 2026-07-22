@@ -20,6 +20,15 @@ Every result preserves four independent planes:
 Knowledge rules never become observations. Software calls and LLVM CFG edges
 remain evidence and receive zero architecture-propagation weight.
 
+`RetrievalSpec.planes` is the final channel allow-list. Predictions have an
+additional capability gate: `include_predictions=True` explicitly appends the
+isolated `predictions` plane. Naming `predictions` in `planes` without that
+flag is rejected instead of silently returning or hiding data. Results from
+local adapters pass through the same final allow-list; an adapter cannot add a
+plane that the request did not enable. The two private-content booleans require
+actual boolean values so Python, CLI, REST, and MCP cannot disagree over
+string truthiness.
+
 Knowledge applicability is target-instance scoped and fail-closed. Before a
 binding is even considered, retrieval revalidates that it belongs to one
 installed pack whose immutable coverage and inventory both agree that the pack

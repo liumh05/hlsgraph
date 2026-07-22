@@ -220,6 +220,10 @@ def audit_frozen_assets() -> dict[str, Any]:
             errors.append(f"{corpus['id']}: external corpus must remain source-only")
     if manifest["arms"][1]["revision"] != "286e9ccc2dad45336d4fd67052930322054d64b5":
         errors.append("CodeGraph revision drift")
+    codegraph = manifest["arms"][1]
+    build = codegraph.get("build_identity", {})
+    if build.get("runtime_tree_algorithm") != "hlsgraph.runtime_tree.v1":
+        errors.append("CodeGraph runtime-tree algorithm drift")
     return {
         "schema_version": "hlsgraph.agent_eval.asset_audit.v1",
         "asset_sha256": asset_digest(),
@@ -227,6 +231,9 @@ def audit_frozen_assets() -> dict[str, Any]:
         "static_cases": len(static_cases),
         "corpora": len(lock["corpora"]),
         "arms": len(manifest["arms"]),
+        "codegraph_entrypoint_sha256": codegraph["entrypoint_sha256"],
+        "codegraph_dist_tree_sha256": build.get("dist_tree_sha256"),
+        "codegraph_dependency_tree_sha256": build.get("dependency_tree_sha256"),
         "errors": errors,
         "passed": not errors,
     }

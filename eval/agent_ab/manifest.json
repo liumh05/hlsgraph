@@ -39,7 +39,30 @@
       "kind": "mcp",
       "repository": "https://github.com/colbymchenry/codegraph",
       "revision": "286e9ccc2dad45336d4fd67052930322054d64b5",
-      "entrypoint_sha256": "9909193d596dc12f0fa70fb4349f9a9d3447f69fee78821fc9330475eef087c7",
+      "entrypoint_sha256": "03e4c791cc0dd91ed264278461bf9a56c0278aa0670d5942fc4732311c66de03",
+      "build_identity": {
+        "schema_version": "hlsgraph.agent_eval.codegraph_build.v1",
+        "runtime_tree_algorithm": "hlsgraph.runtime_tree.v1",
+        "repository_tree": "a3536fb69a45c715e2d245e3c9aea80dee187720",
+        "package_lock_sha256": "c50188fcf83f951bf1197aa166279f5f6e2d39d1a12410231f116df0e3b3b5e8",
+        "node": {
+          "version": "v22.17.0",
+          "sha256": "8071ae0fca095a272ad698a90c7061801a86fb6392ddb81e922b68a91a4374b9"
+        },
+        "npm": {
+          "version": "10.9.2",
+          "cli_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
+        },
+        "reproduction_contract": {
+          "umask": "0022",
+          "commands": [
+            ["npm", "ci"],
+            ["npm", "run", "build"]
+          ]
+        },
+        "dist_tree_sha256": "cc0cefe48514fa34a8c3b488efb4377bec2f62ad84e32c57f495e2cd2cb2e61b",
+        "dependency_tree_sha256": "20088cced4df7332c2787bf7d281e301a67d8fd831dad53a564a8d50d723a284"
+      },
       "license": "MIT",
       "mcp_tool": "codegraph_explore"
     },

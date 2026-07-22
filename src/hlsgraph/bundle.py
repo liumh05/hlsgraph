@@ -337,7 +337,7 @@ class GraphBundle:
             except (KeyError, TypeError, ValueError) as exc:
                 raise BundleError(f"migrated internal manifest is invalid: {exc}") from exc
             # The projects row is the mutable current manifest. Historical
-            # snapshot_manifests remain byte-for-byte 0.1 evidence.
+            # snapshot_manifests remain byte-for-byte pre-0.3 evidence.
             store.save_project(manifest)
 
             metadata_value = dict(state["metadata"])

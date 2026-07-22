@@ -584,7 +584,11 @@ def test_local_runtime_monitor_trigger_has_no_tool_truth_or_outputs(tmp_path) ->
     )
     runner = LocalRunner(
         tmp_path, allow_execution=True,
-        runtime_resource_monitor=_runtime_monitor(19),
+        # This case validates the monitor's non-zero exit mapping, not its
+        # timeout path.  A fresh Python probe can take over one second to
+        # start on a loaded Windows CI host; the timeout path has a separate
+        # explicit test below.
+        runtime_resource_monitor=_runtime_monitor(19, timeout_s=5.0),
     )
     result = StageOrchestrator(runner).execute([request])
     execution = result.executions[0]

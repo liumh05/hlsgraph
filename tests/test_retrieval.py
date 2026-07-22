@@ -23,7 +23,9 @@ from hlsgraph.model import (
     SourceAnchor, ToolchainContext, ToolRun, stable_hash,
 )
 from hlsgraph.query import CoreService
-from hlsgraph.retrieval import HybridRetriever, RetrievalItem, RetrievalSpec, normalize_terms
+from hlsgraph.retrieval import (
+    DEFAULT_PLANES, HybridRetriever, RetrievalItem, RetrievalSpec, normalize_terms,
+)
 from hlsgraph.sdk import Project
 from tests.reviewed_knowledge_support import install_reviewed_builtin_packs
 
@@ -166,6 +168,15 @@ def test_bilingual_identifier_normalization_is_stable() -> None:
         RetrievalSpec(query="pipeline\x00ii")
     with pytest.raises(ValueError, match="unsupported retrieval profile"):
         RetrievalSpec(query="pipeline II", profile="unregistered.weights.v9")
+    with pytest.raises(ValueError, match="include_private_snippets must be a boolean"):
+        RetrievalSpec(query="pipeline II", include_private_snippets="true")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="include_predictions must be a boolean"):
+        RetrievalSpec(query="pipeline II", include_predictions=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="requires include_predictions=True"):
+        RetrievalSpec(query="pipeline II", planes=("predictions",))
+
+    prediction_spec = RetrievalSpec(query="pipeline II", include_predictions=True)
+    assert prediction_spec.planes == (*DEFAULT_PLANES, "predictions")
 
 
 def test_hybrid_retrieval_separates_truth_planes_and_hides_query_and_source(
@@ -1505,10 +1516,15 @@ def test_knowledge_and_predictions_are_opt_in_or_separate(
     assert all(item.authority_class == "knowledge_rule" for item in knowledge.guidance)
     assert not knowledge.predictions
 
-    without_predictions = core.retrieve(RetrievalSpec(query="prediction latency cycles"))
-    predicted = core.retrieve(RetrievalSpec(
-        query="prediction latency cycles", include_predictions=True,
+    without_predictions = core.retrieve(RetrievalSpec(
+        query="prediction latency cycles", planes=("facts", "evidence"),
     ))
+    predicted_spec = RetrievalSpec(
+        query="prediction latency cycles", planes=("facts", "evidence"),
+        include_predictions=True,
+    )
+    assert predicted_spec.planes == ("facts", "evidence", "predictions")
+    predicted = core.retrieve(predicted_spec)
     assert retrieval_project["prediction"] in {item.record_id for item in predicted.predictions}
     assert all(item.plane == "predictions" for item in predicted.predictions)
     assert all(item.record_id != retrieval_project["prediction"] for item in predicted.facts)
@@ -1518,6 +1534,16 @@ def test_knowledge_and_predictions_are_opt_in_or_separate(
     assert [(item.record_id, item.score) for item in predicted.guidance] == [
         (item.record_id, item.score) for item in without_predictions.guidance
     ]
+
+    prediction_only = core.retrieve(RetrievalSpec(
+        query="prediction latency cycles", planes=("predictions",),
+        include_predictions=True,
+    ))
+    assert prediction_only.facts == []
+    assert prediction_only.guidance == []
+    assert {item.record_id for item in prediction_only.predictions} == {
+        retrieval_project["prediction"],
+    }
 
 
 def test_fake_gate_stays_synthetic_and_free_form_reason_is_redacted(
@@ -1575,6 +1601,25 @@ def test_sdk_cli_rest_and_mcp_share_retrieval_semantics(
     assert mcp["trace"]["query_sha256"] == sdk.trace.query_sha256
     assert cli["trace"]["query_sha256"] == sdk.trace.query_sha256
 
+    def semantic_projection(payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "facts": [item["record_id"] for item in payload["facts"]],
+            "guidance": [item["record_id"] for item in payload["guidance"]],
+            "predictions": [item["record_id"] for item in payload["predictions"]],
+            "flow": payload["flow"],
+            "citations": payload["citations"],
+            "ambiguities": payload["ambiguities"],
+            "confidence": payload["confidence"],
+            "incomplete": payload["incomplete"],
+            "stale": payload["stale"],
+            "warnings": payload["warnings"],
+        }
+
+    expected_semantics = semantic_projection(sdk.to_dict())
+    assert semantic_projection(rest.body) == expected_semantics
+    assert semantic_projection(mcp) == expected_semantics
+    assert semantic_projection(cli) == expected_semantics
+
 
 def test_rest_never_honors_private_snippet_requests(
     retrieval_project: dict[str, object],
@@ -1595,6 +1640,46 @@ def test_rest_never_honors_private_snippet_requests(
     encoded = json.dumps(bounded.to_dict(), ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"))
     assert len(encoded) <= 1_000
+
+
+def test_sdk_cli_rest_and_mcp_share_prediction_opt_in(
+    retrieval_project: dict[str, object], capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = retrieval_project["root"]
+    snapshot = retrieval_project["snapshot"]
+    query = "prediction latency cycles"
+    project = Project.open(root)
+    sdk = project.retrieve(RetrievalSpec(
+        query=query, snapshot_id=snapshot, include_predictions=True,
+    )).to_dict()
+    rest = RestApplication(CoreService(
+        retrieval_project["bundle"], snapshot,
+    )).dispatch(
+        "GET", f"/api/v1/retrieve?q={quote(query)}&include_predictions=true",
+    )
+    assert rest.status == 200
+    mcp = ReadOnlyMcpService(CoreService(
+        retrieval_project["bundle"], snapshot,
+    )).explore(query, include_predictions=True)
+    code = cli_main([
+        "retrieve", "--project", str(root), "--snapshot-id", str(snapshot),
+        "--include-predictions", query,
+    ])
+    cli = json.loads(capsys.readouterr().out)
+    assert code == 0
+
+    expected_prediction_ids = [item["record_id"] for item in sdk["predictions"]]
+    assert expected_prediction_ids == [retrieval_project["prediction"]]
+    for payload in (rest.body, mcp, cli):
+        for section in ("facts", "guidance", "predictions"):
+            assert [item["record_id"] for item in payload[section]] == [
+                item["record_id"] for item in sdk[section]
+            ]
+        for field in (
+            "flow", "citations", "ambiguities", "confidence", "incomplete",
+            "stale", "warnings",
+        ):
+            assert payload[field] == sdk[field]
 
 
 def test_private_adapter_excerpt_requires_request_and_project_authorization(
@@ -1629,6 +1714,13 @@ def test_private_adapter_excerpt_requires_request_and_project_authorization(
     ), adapters=[FixtureAdapter()])
     assert visible.guidance[0].data["private_excerpt"] == "one private, bounded line"
     assert visible.trace.private_snippets_returned is True
+
+    local_plane_filtered = core.retrieve(RetrievalSpec(
+        query="local section", planes=("facts",),
+        include_private_snippets=True,
+    ), adapters=[FixtureAdapter()])
+    assert local_plane_filtered.guidance == []
+    assert local_plane_filtered.trace.private_snippets_returned is False
 
 
 def test_local_adapter_cannot_label_unreviewed_excerpt_as_public_rule(

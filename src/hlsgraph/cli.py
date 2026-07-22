@@ -1002,7 +1002,8 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--include-private-snippets", action="store_true",
                           help="request snippets from an explicitly authorized local adapter")
     retrieve.add_argument("--include-predictions", action="store_true",
-                          help="return predictions in their separate hypothesis plane")
+                          help=("authorize and add the separate prediction-hypothesis "
+                                "plane"))
     retrieve.set_defaults(func=_cmd_retrieve)
 
     run = sub.add_parser("run", help="execute manifest stages through an explicit runner")

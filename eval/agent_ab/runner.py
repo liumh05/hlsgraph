@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .common import (
-    ARM_IDS, CODEGRAPH_OFFLINE_ENV, HERE, asset_digest, canonical_json, harness_digest,
+    ARM_IDS, CODEGRAPH_OFFLINE_ENV, HERE, asset_digest,
+    capture_codegraph_build_identity, canonical_json, harness_digest,
     load_corpus_lock, load_environment_lock, load_manifest, load_questions,
     resolve_command_argv,
     official_process_environment, require_official_linux_wsl2,
@@ -951,6 +952,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
 def _runtime_identity_preflight(
     record: dict[str, Any], environment: dict[str, Any], *,
     v02_python: str, v03_python: str, codegraph_command: str,
+    full_codegraph: bool = False,
 ) -> None:
     if environment.get("suite_asset_sha256") != asset_digest():
         raise RuntimeError("environment lock belongs to different frozen suite assets")
@@ -965,23 +967,48 @@ def _runtime_identity_preflight(
         expected = environment.get("codegraph_entrypoint")
         expected_runtime_entrypoint = runtime.get("codegraph_entrypoint")
         expected_node = runtime.get("node")
+        expected_build = runtime.get("codegraph_build")
         frozen_sha256 = manifest["arms"][1]["entrypoint_sha256"]
         parts = _codegraph_parts(codegraph_command)
         if (not isinstance(expected, dict) or expected != expected_runtime_entrypoint
-                or not isinstance(expected_node, dict) or len(parts) != 2
+                or not isinstance(expected_node, dict)
+                or not isinstance(expected_build, dict)
+                or environment.get("codegraph_build") != expected_build
+                or len(parts) != 2
                 or Path(parts[0]).name.casefold() not in {"node", "node.exe"}):
             raise RuntimeError("CodeGraph runtime identity is incomplete")
         node = Path(parts[0])
         entrypoint = Path(parts[1])
+        package_lock = Path(str(expected_build.get("package_lock", {}).get("path", "")))
+        npm_cli = Path(str(expected_build.get("npm", {}).get("path", "")))
         if (expected.get("sha256") != frozen_sha256
                 or node.as_posix() != expected_node.get("path")
-                or not node.is_file()
+                or not node.is_absolute() or not node.is_file() or node.is_symlink()
                 or sha256_file(node) != expected_node.get("sha256")
                 or not entrypoint.is_absolute() or not entrypoint.is_file()
+                or entrypoint.is_symlink()
                 or entrypoint.as_posix() != expected.get("path")
                 or entrypoint.name != expected.get("filename")
-                or sha256_file(entrypoint) != frozen_sha256):
-            raise RuntimeError("CodeGraph runtime differs from the prepared entrypoint")
+                or sha256_file(entrypoint) != frozen_sha256
+                or not package_lock.is_absolute() or not package_lock.is_file()
+                or package_lock.is_symlink()
+                or sha256_file(package_lock)
+                != expected_build.get("package_lock", {}).get("sha256")
+                or not npm_cli.is_absolute() or not npm_cli.is_file()
+                or npm_cli.is_symlink()
+                or sha256_file(npm_cli) != expected_build.get("npm", {}).get("sha256")):
+            raise RuntimeError("CodeGraph lightweight closure differs from preparation")
+        if full_codegraph:
+            try:
+                current_build = capture_codegraph_build_identity(
+                    repository=Path(expected_build["repository"]["path"]),
+                    runtime_root=Path(runtime["sandbox_boundary"]["runtime_root"]),
+                    node=node, npm_cli=npm_cli, entrypoint=entrypoint, full=True,
+                )
+            except (KeyError, ValueError, OSError) as exc:
+                raise RuntimeError("CodeGraph full runtime closure cannot be verified") from exc
+            if current_build != expected_build:
+                raise RuntimeError("CodeGraph full runtime closure differs from preparation")
         return
     if not arm.startswith("hlsgraph-"):
         return
@@ -1030,7 +1057,7 @@ def _runtime_identity_preflight(
 
 def _verify_all_arm_runtime_payloads(
     environment: dict[str, Any], *, v02_python: str, v03_python: str,
-    codegraph_command: str,
+    codegraph_command: str, full_codegraph: bool = False,
 ) -> None:
     """Re-hash every treatment runtime before the first and after the last cell."""
 
@@ -1038,6 +1065,7 @@ def _verify_all_arm_runtime_payloads(
         _runtime_identity_preflight(
             {"arm": arm}, environment, v02_python=v02_python,
             v03_python=v03_python, codegraph_command=codegraph_command,
+            full_codegraph=full_codegraph,
         )
 
 
@@ -1233,7 +1261,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _verify_all_arm_runtime_payloads(
         environment, v02_python=args.v02_python, v03_python=args.v03_python,
-        codegraph_command=args.codegraph_command,
+        codegraph_command=args.codegraph_command, full_codegraph=True,
     )
     verify_evaluation_checkout(environment)
     args.runs_root = _require_isolated_runs_root(
@@ -1269,7 +1297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     _verify_all_arm_runtime_payloads(
         environment, v02_python=args.v02_python, v03_python=args.v03_python,
-        codegraph_command=args.codegraph_command,
+        codegraph_command=args.codegraph_command, full_codegraph=True,
     )
     verify_official_runtime_identity(
         environment, public_repository=PUBLIC_REPOSITORY,

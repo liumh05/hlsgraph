@@ -386,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codegraph-command", default="codegraph")
     parser.add_argument("--codegraph-repo", type=Path)
     parser.add_argument(
+        "--runtime-root", type=Path,
+        help="ext4 root containing Node, npm, CodeGraph, Codex, and both venvs",
+    )
+    parser.add_argument(
+        "--npm-cli", type=Path,
+        help="direct npm-cli.js path from the frozen Node distribution",
+    )
+    parser.add_argument(
         "--v02-repo", type=Path,
         help="clean checkout of the exact frozen v0.2 source revision",
     )
@@ -410,6 +418,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         require_official_linux_wsl2()
         if args.codegraph_repo is None:
             raise SystemExit("--codegraph-repo is required with --execute")
+        if args.runtime_root is None:
+            raise SystemExit("--runtime-root is required with --execute")
+        if args.npm_cli is None:
+            raise SystemExit("--npm-cli is required with --execute")
         if args.v02_repo is None:
             raise SystemExit("--v02-repo is required with --execute")
         for wheel in (args.v02_wheel, args.v03_wheel):
@@ -419,6 +431,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             public_repository=HERE.parents[1], work_root=args.work_root,
             codex_command=args.codex_command,
             codegraph_command=args.codegraph_command,
+            codegraph_repository=args.codegraph_repo,
+            runtime_root=args.runtime_root, npm_cli=args.npm_cli,
             v02_python=args.v02_python, v03_python=args.v03_python,
         )
     plan = build_plan(
@@ -451,6 +465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             public_repository=HERE.parents[1], work_root=args.work_root,
             codex_command=args.codex_command,
             codegraph_command=args.codegraph_command,
+            codegraph_repository=args.codegraph_repo,
+            runtime_root=args.runtime_root, npm_cli=args.npm_cli,
             v02_python=args.v02_python, v03_python=args.v03_python,
         )
         if current_runtime_identity != runtime_identity:
@@ -490,6 +506,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "codegraph_revision": load_manifest()["arms"][1]["revision"],
             "codegraph_entrypoint": {
                 **runtime_identity["codegraph_entrypoint"],
+            },
+            "codegraph_build": {
+                **runtime_identity["codegraph_build"],
             },
             "source_backend": "regex_degraded" if args.degraded else "libclang",
             "official_profile": not args.degraded,

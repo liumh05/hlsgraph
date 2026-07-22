@@ -29,9 +29,11 @@ CORPUS_SCHEMA_VERSION = "hlsgraph.agent_eval.corpus_lock.v1"
 QUESTION_SCHEMA_VERSION = "hlsgraph.agent_eval.question.v1"
 STATIC_CASE_SCHEMA_VERSION = "hlsgraph.agent_eval.static_case.v1"
 ARM_IDS = ("native", "codegraph", "hlsgraph-v02", "hlsgraph-v03")
-ENVIRONMENT_SCHEMA_VERSION = "hlsgraph.agent_eval.environment.v2"
-RUNTIME_IDENTITY_SCHEMA_VERSION = "hlsgraph.agent_eval.runtime_identity.v1"
+ENVIRONMENT_SCHEMA_VERSION = "hlsgraph.agent_eval.environment.v3"
+RUNTIME_IDENTITY_SCHEMA_VERSION = "hlsgraph.agent_eval.runtime_identity.v2"
 SANDBOX_BOUNDARY_SCHEMA_VERSION = "hlsgraph.agent_eval.sandbox_boundary.v1"
+CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION = "hlsgraph.agent_eval.codegraph_build.v1"
+RUNTIME_TREE_ALGORITHM = "hlsgraph.runtime_tree.v1"
 OFFICIAL_CODEX_VERSION = "codex-cli 0.144.0"
 CODEGRAPH_OFFLINE_ENV = {
     "CODEGRAPH_NO_DAEMON": "1",
@@ -64,6 +66,146 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def runtime_tree_identity(root: Path) -> str:
+    """Hash one executable tree without following links.
+
+    ``hlsgraph.runtime_tree.v1`` is deliberately independent of tar, platform
+    archive metadata, directory mtimes, and enumeration order.  Directory
+    records bind relative path, type, and POSIX mode.  Regular-file records bind
+    relative path, type, POSIX mode, and the SHA-256 of stable file bytes.
+    Symlink records bind relative path, type, and the link text.  A link is
+    accepted only when its complete, non-dangling chain resolves inside the
+    tree to a regular file or directory.  Absolute, escaping, dangling, cyclic,
+    and special-file links fail closed.  Special filesystem entries fail too.
+    """
+
+    lexical_root = Path(os.path.abspath(os.fspath(root)))
+    _assert_unlinked_within(Path(lexical_root.anchor), lexical_root)
+    if _linked(lexical_root) or not lexical_root.is_dir():
+        raise EvalManifestError(f"runtime tree root is missing or linked: {lexical_root}")
+    resolved_root = lexical_root.resolve(strict=True)
+    records: list[tuple[str, bytes]] = []
+    pending = [lexical_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            _assert_unlinked_within(lexical_root, directory)
+            before_directory = directory.lstat()
+            if not stat.S_ISDIR(before_directory.st_mode) or _linked(directory):
+                raise EvalManifestError(
+                    f"runtime-tree directory became linked or non-directory: {directory}"
+                )
+            directory.resolve(strict=True).relative_to(resolved_root)
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+            _assert_unlinked_within(lexical_root, directory)
+            after_directory = directory.lstat()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise EvalManifestError(f"cannot enumerate runtime tree: {directory}: {exc}") from exc
+        directory_identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns,
+        )
+        if directory_identity(before_directory) != directory_identity(after_directory):
+            raise EvalManifestError(
+                f"runtime-tree directory changed while enumerated: {directory}"
+            )
+        directory_relative = (
+            "." if directory == lexical_root
+            else directory.relative_to(lexical_root).as_posix()
+        )
+        records.append((
+            directory_relative,
+            b"D\0" + directory_relative.encode("utf-8", errors="strict") + b"\0"
+            + f"{stat.S_IMODE(before_directory.st_mode):04o}".encode("ascii") + b"\0",
+        ))
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                _assert_unlinked_within(lexical_root, path.parent)
+                relative = path.relative_to(lexical_root).as_posix()
+                relative_bytes = relative.encode("utf-8", errors="strict")
+                before = path.lstat()
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise EvalManifestError(f"invalid runtime-tree entry: {path}: {exc}") from exc
+            mode = before.st_mode
+            if stat.S_ISDIR(mode):
+                pending.append(path)
+                continue
+            if stat.S_ISREG(mode):
+                data = _stable_file_bytes(path)
+                _assert_unlinked_within(lexical_root, path.parent)
+                after = path.lstat()
+                identity = lambda info: (
+                    info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                    info.st_mtime_ns,
+                )
+                if identity(before) != identity(after):
+                    raise EvalManifestError(f"runtime-tree file changed while hashed: {relative}")
+                record = (
+                    b"F\0" + relative_bytes + b"\0"
+                    + f"{stat.S_IMODE(mode):04o}".encode("ascii") + b"\0"
+                    + hashlib.sha256(data).digest() + b"\0"
+                )
+                records.append((relative, record))
+                continue
+            if stat.S_ISLNK(mode):
+                try:
+                    target = os.readlink(path)
+                    target_bytes = target.encode("utf-8", errors="strict")
+                except (OSError, UnicodeError) as exc:
+                    raise EvalManifestError(
+                        f"cannot read runtime-tree symlink: {relative}: {exc}"
+                    ) from exc
+                if Path(target).is_absolute():
+                    raise EvalManifestError(
+                        f"runtime-tree symlink is absolute: {relative} -> {target}"
+                    )
+                try:
+                    lexical_target = Path(os.path.normpath(os.fspath(path.parent / target)))
+                    lexical_target.relative_to(lexical_root)
+                    resolved_target = (path.parent / target).resolve(strict=True)
+                    resolved_target.relative_to(resolved_root)
+                    target_info = resolved_target.stat()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise EvalManifestError(
+                        f"runtime-tree symlink is dangling or escapes: {relative} -> {target}"
+                    ) from exc
+                if not (stat.S_ISREG(target_info.st_mode) or stat.S_ISDIR(target_info.st_mode)):
+                    raise EvalManifestError(
+                        f"runtime-tree symlink targets a special file: {relative}"
+                    )
+                after = path.lstat()
+                _assert_unlinked_within(lexical_root, path.parent)
+                link_identity = lambda info: (
+                    info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                    info.st_mtime_ns,
+                )
+                if link_identity(before) != link_identity(after) or os.readlink(path) != target:
+                    raise EvalManifestError(
+                        f"runtime-tree symlink changed while hashed: {relative}"
+                    )
+                records.append((relative, b"L\0" + relative_bytes + b"\0" + target_bytes + b"\0"))
+                continue
+            raise EvalManifestError(f"runtime tree contains a special file: {relative}")
+        try:
+            _assert_unlinked_within(lexical_root, directory)
+            final_directory = directory.lstat()
+        except (OSError, ValueError) as exc:
+            raise EvalManifestError(
+                f"runtime-tree directory changed while hashed: {directory}: {exc}"
+            ) from exc
+        if directory_identity(before_directory) != directory_identity(final_directory):
+            raise EvalManifestError(
+                f"runtime-tree directory changed while hashed: {directory}"
+            )
+
+    digest = hashlib.sha256()
+    digest.update(RUNTIME_TREE_ALGORITHM.encode("ascii") + b"\0")
+    for _relative, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
     return digest.hexdigest()
 
 
@@ -384,9 +526,222 @@ def _python_identity(value: str, label: str) -> dict[str, str]:
     }
 
 
+def _git_output(repository: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *args], capture_output=True,
+        text=True, check=False, timeout=30,
+        env={
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+        },
+    )
+    if completed.returncode != 0:
+        raise EvalManifestError(
+            f"CodeGraph git identity failed: {' '.join(args)}: {completed.stderr.strip()}"
+        )
+    return completed.stdout.strip()
+
+
+def _assert_codegraph_build_matches_manifest(value: dict[str, Any]) -> None:
+    expected_arm = load_manifest()["arms"][1]
+    expected = expected_arm["build_identity"]
+    comparisons = {
+        "revision": value["repository"].get("revision"),
+        "repository_tree": value["repository"].get("tree"),
+        "package_lock_sha256": value["package_lock"].get("sha256"),
+        "node_version": value["node"].get("version"),
+        "node_sha256": value["node"].get("sha256"),
+        "npm_version": value["npm"].get("version"),
+        "npm_cli_sha256": value["npm"].get("sha256"),
+        "entrypoint_sha256": value["entrypoint"].get("sha256"),
+        "runtime_tree_algorithm": value.get("runtime_tree_algorithm"),
+        "dist_tree_sha256": value["dist"].get("tree_sha256"),
+        "dependency_tree_sha256": value["dependencies"].get("tree_sha256"),
+        "reproduction_contract": value.get("reproduction_contract"),
+    }
+    required = {
+        "revision": expected_arm["revision"],
+        "repository_tree": expected["repository_tree"],
+        "package_lock_sha256": expected["package_lock_sha256"],
+        "node_version": expected["node"]["version"],
+        "node_sha256": expected["node"]["sha256"],
+        "npm_version": expected["npm"]["version"],
+        "npm_cli_sha256": expected["npm"]["cli_sha256"],
+        "entrypoint_sha256": expected_arm["entrypoint_sha256"],
+        "runtime_tree_algorithm": expected["runtime_tree_algorithm"],
+        "dist_tree_sha256": expected["dist_tree_sha256"],
+        "dependency_tree_sha256": expected["dependency_tree_sha256"],
+        "reproduction_contract": expected["reproduction_contract"],
+    }
+    if comparisons != required:
+        changed = sorted(key for key in required if comparisons.get(key) != required[key])
+        raise EvalManifestError(
+            "CodeGraph build closure differs from the frozen manifest: "
+            + ", ".join(changed)
+        )
+
+
+def _validate_codegraph_build_identity(value: Any) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION):
+        raise EvalManifestError("environment lock lacks the CodeGraph build closure")
+    unhashed = {key: item for key, item in value.items() if key != "identity_sha256"}
+    if value.get("identity_sha256") != sha256_bytes(canonical_json(unhashed)):
+        raise EvalManifestError("CodeGraph build closure hash is invalid")
+    if value.get("runtime_tree_algorithm") != RUNTIME_TREE_ALGORITHM:
+        raise EvalManifestError("CodeGraph runtime-tree algorithm is not frozen")
+    if value.get("reproduction_contract") != {
+        "umask": "0022",
+        "commands": [["npm", "ci"], ["npm", "run", "build"]],
+    }:
+        raise EvalManifestError("CodeGraph declared reproduction contract is invalid")
+    repository = value.get("repository")
+    if (not isinstance(repository, dict)
+            or not isinstance(repository.get("path"), str)
+            or not Path(repository["path"]).is_absolute()
+            or re.fullmatch(r"[0-9a-f]{40}", str(repository.get("revision", ""))) is None
+            or re.fullmatch(r"[0-9a-f]{40}", str(repository.get("tree", ""))) is None):
+        raise EvalManifestError("CodeGraph repository identity is invalid")
+    for key in ("package_lock", "entrypoint"):
+        item = value.get(key)
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+                or not Path(item["path"]).is_absolute()
+                or item.get("filename") != Path(item["path"]).name
+                or _SHA256_RE.fullmatch(str(item.get("sha256", ""))) is None):
+            raise EvalManifestError(f"CodeGraph {key} identity is invalid")
+    for key in ("node", "npm"):
+        item = value.get(key)
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+                or not Path(item["path"]).is_absolute()
+                or item.get("filename") != Path(item["path"]).name
+                or not isinstance(item.get("version"), str) or not item["version"]
+                or _SHA256_RE.fullmatch(str(item.get("sha256", ""))) is None):
+            raise EvalManifestError(f"CodeGraph {key} identity is invalid")
+    for key in ("dist", "dependencies"):
+        item = value.get(key)
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("path"), str)
+                or not Path(item["path"]).is_absolute()
+                or item.get("algorithm") != RUNTIME_TREE_ALGORITHM
+                or _SHA256_RE.fullmatch(str(item.get("tree_sha256", ""))) is None):
+            raise EvalManifestError(f"CodeGraph {key} tree identity is invalid")
+    repository_path = Path(repository["path"])
+    required_paths = {
+        "package_lock": repository_path / "package-lock.json",
+        "entrypoint": repository_path / "dist" / "bin" / "codegraph.js",
+        "dist": repository_path / "dist",
+        "dependencies": repository_path / "node_modules",
+    }
+    if any(
+        Path(value[key]["path"]) != expected
+        for key, expected in required_paths.items()
+    ):
+        raise EvalManifestError("CodeGraph build closure paths do not match the repository")
+    _assert_codegraph_build_matches_manifest(value)
+    return value
+
+
+def capture_codegraph_build_identity(
+    *, repository: Path, runtime_root: Path, node: Path, npm_cli: Path,
+    entrypoint: Path, full: bool = True,
+) -> dict[str, Any]:
+    """Capture the frozen CodeGraph source, build tools, and executable closure."""
+
+    repository = _require_regular_ext4_path(
+        repository, "CodeGraph repository", directory=True, reject_links=True,
+    )
+    runtime_root = _require_regular_ext4_path(
+        runtime_root, "evaluation runtime root", directory=True, reject_links=True,
+    )
+    node = _require_regular_ext4_path(node, "Node executable", reject_links=True)
+    npm_cli = _require_regular_ext4_path(npm_cli, "npm CLI", reject_links=True)
+    entrypoint = _require_regular_ext4_path(
+        entrypoint, "CodeGraph entrypoint", reject_links=True,
+    )
+    _assert_unlinked_within(Path(runtime_root.anchor), runtime_root)
+    for path, label in (
+        (repository, "CodeGraph repository"), (node, "Node executable"),
+        (npm_cli, "npm CLI"), (entrypoint, "CodeGraph entrypoint"),
+    ):
+        if not _path_is_within(path, runtime_root):
+            raise EvalManifestError(f"official {label} must be inside the runtime root")
+        _assert_unlinked_within(runtime_root, path)
+    expected_entrypoint = repository / "dist" / "bin" / "codegraph.js"
+    if entrypoint != expected_entrypoint:
+        raise EvalManifestError("CodeGraph entrypoint is not the frozen dist/bin path")
+    package_lock = _require_regular_ext4_path(
+        repository / "package-lock.json", "CodeGraph package lock", reject_links=True,
+    )
+    _assert_unlinked_within(runtime_root, package_lock)
+    dist = _require_regular_ext4_path(
+        repository / "dist", "CodeGraph dist tree", directory=True,
+    )
+    dependencies = _require_regular_ext4_path(
+        repository / "node_modules", "CodeGraph dependency tree", directory=True,
+    )
+    revision = _git_output(repository, "rev-parse", "HEAD")
+    tree = _git_output(repository, "rev-parse", "HEAD^{tree}")
+    if _git_output(
+        repository, "status", "--porcelain=v1", "--untracked-files=all",
+    ):
+        raise EvalManifestError("CodeGraph source checkout is dirty or has untracked files")
+    ignored = _git_output(
+        repository, "ls-files", "--others", "--ignored", "--exclude-standard",
+    )
+    for raw_relative in ignored.splitlines():
+        relative = safe_relative_path(raw_relative)
+        if relative.parts[0] not in {"dist", "node_modules"}:
+            raise EvalManifestError(
+                f"CodeGraph ignored file is outside the hashed build closure: {relative}"
+            )
+    node_version = _version_output([str(node), "--version"])
+    npm_version = _version_output([str(node), str(npm_cli), "--version"])
+    manifest_build = load_manifest()["arms"][1]["build_identity"]
+    value: dict[str, Any] = {
+        "schema_version": CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION,
+        "runtime_tree_algorithm": RUNTIME_TREE_ALGORITHM,
+        "repository": {
+            "path": repository.as_posix(), "revision": revision, "tree": tree,
+        },
+        "package_lock": {
+            "path": package_lock.as_posix(), "filename": package_lock.name,
+            "sha256": sha256_file(package_lock),
+        },
+        "node": _binary_identity(node, node_version),
+        "npm": _binary_identity(npm_cli, npm_version),
+        "entrypoint": {
+            "path": entrypoint.as_posix(), "filename": entrypoint.name,
+            "sha256": sha256_file(entrypoint),
+        },
+        "dist": {
+            "path": dist.as_posix(), "algorithm": RUNTIME_TREE_ALGORITHM,
+            "tree_sha256": (
+                runtime_tree_identity(dist) if full
+                else manifest_build["dist_tree_sha256"]
+            ),
+        },
+        "dependencies": {
+            "path": dependencies.as_posix(), "algorithm": RUNTIME_TREE_ALGORITHM,
+            "tree_sha256": (
+                runtime_tree_identity(dependencies) if full
+                else manifest_build["dependency_tree_sha256"]
+            ),
+        },
+        # This is a declared reproduction recipe.  The observed facts above
+        # are the resulting source/tool/tree byte identities.
+        "reproduction_contract": manifest_build["reproduction_contract"],
+    }
+    value["identity_sha256"] = sha256_bytes(canonical_json(value))
+    return _validate_codegraph_build_identity(value)
+
+
 def capture_official_runtime_identity(
     *, public_repository: Path, work_root: Path, codex_command: str,
-    codegraph_command: str, v02_python: str, v03_python: str,
+    codegraph_command: str, codegraph_repository: Path, runtime_root: Path,
+    npm_cli: Path, v02_python: str, v03_python: str,
 ) -> dict[str, Any]:
     """Capture the executable and isolation boundary used by an official run."""
 
@@ -408,8 +763,25 @@ def capture_official_runtime_identity(
     work_root = _require_regular_ext4_path(
         work_root, "work root", directory=True, reject_links=True,
     )
+    runtime_root = _require_regular_ext4_path(
+        runtime_root, "evaluation runtime root", directory=True, reject_links=True,
+    )
     if _path_is_within(codex_home, work_root) or _path_is_within(work_root, codex_home):
         raise EvalManifestError("CODEX_HOME and work root must be disjoint")
+    isolated_roots = {
+        "public repository": public_repository,
+        "work root": work_root,
+        "runtime root": runtime_root,
+        "CODEX_HOME": codex_home,
+    }
+    for left_name, left in isolated_roots.items():
+        for right_name, right in isolated_roots.items():
+            if left_name < right_name and (
+                _path_is_within(left, right) or _path_is_within(right, left)
+            ):
+                raise EvalManifestError(
+                    f"official {left_name} and {right_name} must be disjoint"
+                )
 
     codex = _resolve_executable(codex_command, "Codex CLI")
     with codex.open("rb") as codex_handle:
@@ -437,6 +809,10 @@ def capture_official_runtime_identity(
     if not entrypoint.is_absolute():
         entrypoint = Path.cwd() / entrypoint
     entrypoint = _require_regular_ext4_path(entrypoint, "CodeGraph entrypoint")
+    codegraph_build = capture_codegraph_build_identity(
+        repository=codegraph_repository, runtime_root=runtime_root,
+        node=node, npm_cli=npm_cli, entrypoint=entrypoint, full=True,
+    )
 
     helper_path = shutil.which("codex-linux-sandbox")
     bwrap_path = shutil.which("bwrap")
@@ -459,7 +835,7 @@ def capture_official_runtime_identity(
             f"official external canary root must not pre-exist: {external_canary_root}"
         )
     deny_roots = {
-        public_repository, work_root, codex_home, external_canary_root,
+        public_repository, work_root, runtime_root, codex_home, external_canary_root,
         *drvfs_roots, *home_roots,
     }
     corpus_ids = [item["id"] for item in load_corpus_lock()["corpora"]]
@@ -480,6 +856,7 @@ def capture_official_runtime_identity(
         "schema_version": SANDBOX_BOUNDARY_SCHEMA_VERSION,
         "public_repository": public_repository.as_posix(),
         "work_root": work_root.as_posix(),
+        "runtime_root": runtime_root.as_posix(),
         "work_root_policy": "explicit_sibling_directory_deny_v1",
         "work_root_deny_catalog": deny_catalog,
         "work_root_deny_catalog_sha256": sha256_bytes(canonical_json(deny_catalog)),
@@ -506,6 +883,7 @@ def capture_official_runtime_identity(
             "filename": entrypoint.name,
             "sha256": sha256_file(entrypoint),
         },
+        "codegraph_build": codegraph_build,
         "python": {
             "harness": _python_identity(sys.executable, "harness Python"),
             "hlsgraph_v02": _python_identity(v02_python, "v0.2 Python"),
@@ -538,11 +916,22 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
     if boundary.get("identity_sha256") != sha256_bytes(canonical_json(boundary_unhashed)):
         raise EvalManifestError("environment sandbox boundary hash is invalid")
     for key in (
-        "public_repository", "work_root", "codex_home", "home_canary_root",
+        "public_repository", "work_root", "runtime_root", "codex_home", "home_canary_root",
         "external_canary_root",
     ):
         if not isinstance(boundary.get(key), str) or not Path(boundary[key]).is_absolute():
             raise EvalManifestError(f"environment sandbox boundary lacks {key}")
+    isolated_boundary_roots = [
+        Path(boundary[key]) for key in (
+            "public_repository", "work_root", "runtime_root", "codex_home",
+        )
+    ]
+    if any(
+        _path_is_within(left, right) or _path_is_within(right, left)
+        for index, left in enumerate(isolated_boundary_roots)
+        for right in isolated_boundary_roots[index + 1:]
+    ):
+        raise EvalManifestError("environment runtime, work, checkout, and auth roots overlap")
     if boundary.get("work_root_policy") != "explicit_sibling_directory_deny_v1":
         raise EvalManifestError("environment sandbox boundary has the wrong work-root policy")
     catalog = boundary.get("work_root_deny_catalog")
@@ -575,7 +964,8 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
                 or len(paths) != len(set(paths))):
             raise EvalManifestError(f"environment sandbox boundary has invalid {key}")
     required_denies = {
-        boundary["public_repository"], boundary["work_root"], boundary["codex_home"],
+        boundary["public_repository"], boundary["work_root"], boundary["runtime_root"],
+        boundary["codex_home"],
         boundary["external_canary_root"],
         *boundary["drvfs_roots"], *boundary["home_roots"],
     }
@@ -619,6 +1009,21 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
             or entrypoint.get("filename") != Path(entrypoint["path"]).name
             or _SHA256_RE.fullmatch(str(entrypoint.get("sha256", ""))) is None):
         raise EvalManifestError("environment lock has invalid CodeGraph entrypoint identity")
+    codegraph_build = _validate_codegraph_build_identity(value.get("codegraph_build"))
+    runtime_root = Path(boundary["runtime_root"])
+    build_paths = (
+        codegraph_build["repository"]["path"],
+        codegraph_build["package_lock"]["path"],
+        codegraph_build["node"]["path"],
+        codegraph_build["npm"]["path"],
+        codegraph_build["entrypoint"]["path"],
+        codegraph_build["dist"]["path"],
+        codegraph_build["dependencies"]["path"],
+    )
+    if (codegraph_build["node"] != value["node"]
+            or codegraph_build["entrypoint"] != entrypoint
+            or any(not _path_is_within(Path(path), runtime_root) for path in build_paths)):
+        raise EvalManifestError("CodeGraph build closure is inconsistent with runtime identity")
     return value
 
 
@@ -627,9 +1032,13 @@ def verify_official_runtime_identity(
     codex_command: str, codegraph_command: str, v02_python: str, v03_python: str,
 ) -> dict[str, Any]:
     expected = _validate_runtime_identity(environment.get("runtime_identity"))
+    expected_build = expected["codegraph_build"]
     current = capture_official_runtime_identity(
         public_repository=public_repository, work_root=work_root,
         codex_command=codex_command, codegraph_command=codegraph_command,
+        codegraph_repository=Path(expected_build["repository"]["path"]),
+        runtime_root=Path(expected["sandbox_boundary"]["runtime_root"]),
+        npm_cli=Path(expected_build["npm"]["path"]),
         v02_python=v02_python, v03_python=v03_python,
     )
     if current != expected:
@@ -670,6 +1079,30 @@ def load_manifest(path: Path = SUITE_PATH) -> dict[str, Any]:
     if (not isinstance(entrypoint_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", entrypoint_sha256) is None):
         raise EvalManifestError("CodeGraph comparison entrypoint hash is not frozen")
+    expected_build = {
+        "schema_version": CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION,
+        "runtime_tree_algorithm": RUNTIME_TREE_ALGORITHM,
+        "repository_tree": "a3536fb69a45c715e2d245e3c9aea80dee187720",
+        "package_lock_sha256": "c50188fcf83f951bf1197aa166279f5f6e2d39d1a12410231f116df0e3b3b5e8",
+        "node": {
+            "version": "v22.17.0",
+            "sha256": "8071ae0fca095a272ad698a90c7061801a86fb6392ddb81e922b68a91a4374b9",
+        },
+        "npm": {
+            "version": "10.9.2",
+            "cli_sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+        },
+        "reproduction_contract": {
+            "umask": "0022",
+            "commands": [["npm", "ci"], ["npm", "run", "build"]],
+        },
+        "dist_tree_sha256": "cc0cefe48514fa34a8c3b488efb4377bec2f62ad84e32c57f495e2cd2cb2e61b",
+        "dependency_tree_sha256": "20088cced4df7332c2787bf7d281e301a67d8fd831dad53a564a8d50d723a284",
+    }
+    if codegraph.get("build_identity") != expected_build:
+        raise EvalManifestError("CodeGraph comparison build closure is not frozen")
+    if entrypoint_sha256 != "03e4c791cc0dd91ed264278461bf9a56c0278aa0670d5942fc4732311c66de03":
+        raise EvalManifestError("CodeGraph comparison entrypoint bytes drifted")
     if arms[2].get("revision") != "7b26bfb07aa7c4d1a4705d3076cac684c3561e6f":
         raise EvalManifestError("HLSGraph v0.2 comparison revision is not frozen")
     contracts = manifest.get("claim_contracts")
@@ -1149,11 +1582,14 @@ def load_environment_lock(path: Path) -> dict[str, Any]:
         raise EvalManifestError("official evaluation environment must use libclang")
     runtime_identity = _validate_runtime_identity(environment.get("runtime_identity"))
     codegraph = environment.get("codegraph_entrypoint")
+    codegraph_build = environment.get("codegraph_build")
     expected_codegraph = manifest["arms"][1]
     if (environment.get("codegraph_revision") != expected_codegraph["revision"]
             or not isinstance(codegraph, dict)
             or codegraph != runtime_identity["codegraph_entrypoint"]
-            or codegraph.get("sha256") != expected_codegraph["entrypoint_sha256"]):
+            or codegraph.get("sha256") != expected_codegraph["entrypoint_sha256"]
+            or not isinstance(codegraph_build, dict)
+            or codegraph_build != runtime_identity["codegraph_build"]):
         raise EvalManifestError("environment lock has the wrong CodeGraph identity")
 
     checks = environment.get("identity_checks")
@@ -1445,15 +1881,17 @@ def safe_relative_path(value: str) -> Path:
 
 
 __all__ = [
-    "ANSWER_SCHEMA_PATH", "ARM_IDS", "CODEGRAPH_OFFLINE_ENV", "CORPUS_LOCK_PATH", "EvalManifestError",
+    "ANSWER_SCHEMA_PATH", "ARM_IDS", "CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION",
+    "CODEGRAPH_OFFLINE_ENV", "CORPUS_LOCK_PATH", "EvalManifestError",
     "ENVIRONMENT_SCHEMA_VERSION", "HERE", "QUESTIONS_PATH", "STATIC_CASES_PATH",
-    "SUITE_PATH", "asset_digest", "canonical_json", "cold_start_input_identity",
+    "RUNTIME_TREE_ALGORITHM", "SUITE_PATH", "asset_digest", "canonical_json",
+    "capture_codegraph_build_identity", "cold_start_input_identity",
     "load_corpus_lock",
     "capture_official_runtime_identity", "harness_digest", "load_environment_lock",
     "load_manifest", "load_questions", "official_process_environment",
     "load_static_cases", "prepared_hlsgraph_identity", "resolve_command_argv",
     "require_official_ext4_directory", "resolve_local_executable",
-    "safe_relative_path", "sha256_bytes", "sha256_file",
+    "runtime_tree_identity", "safe_relative_path", "sha256_bytes", "sha256_file",
     "require_official_linux_wsl2", "verify_evaluation_checkout",
     "verify_official_runtime_identity", "verify_prepared_workspace", "workspace_identity",
 ]

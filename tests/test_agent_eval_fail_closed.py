@@ -12,11 +12,12 @@ import pytest
 
 from eval.agent_ab import runner as eval_runner
 from eval.agent_ab import prepare as eval_prepare
+from eval.agent_ab import common as eval_common
 from eval.agent_ab.bootstrap import simultaneous_quality_noninferiority
 from eval.agent_ab.common import (
     ARM_IDS, EvalManifestError, load_corpus_lock, load_manifest,
     load_questions, official_process_environment, require_official_ext4_directory,
-    resolve_local_executable, sha256_file,
+    resolve_local_executable, runtime_tree_identity, sha256_file,
 )
 from eval.agent_ab.parse_trace import normalize_trace, validate_trace_policy
 from eval.agent_ab.runner import (
@@ -658,16 +659,201 @@ def test_runs_root_requires_ext4_and_disjoint_boundary(
     ) == outside.absolute()
 
 
+def test_runtime_tree_identity_binds_regular_bytes_and_tree_membership(
+    tmp_path: Path,
+) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    for root in (left, right):
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "payload.bin").write_bytes(b"same bytes")
+    baseline = runtime_tree_identity(left)
+    assert runtime_tree_identity(right) == baseline
+    (right / "sub" / "payload.bin").write_bytes(b"changed bytes")
+    assert runtime_tree_identity(right) != baseline
+    (right / "sub" / "payload.bin").write_bytes(b"same bytes")
+    (right / "extra.bin").write_bytes(b"extra")
+    assert runtime_tree_identity(right) != baseline
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode identity contract")
+def test_runtime_tree_identity_binds_file_and_directory_modes(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    subdirectory = root / "sub"
+    subdirectory.mkdir(parents=True)
+    payload = subdirectory / "payload.bin"
+    payload.write_bytes(b"fixture")
+    root.chmod(0o755)
+    subdirectory.chmod(0o755)
+    payload.chmod(0o644)
+    baseline = runtime_tree_identity(root)
+    payload.chmod(0o664)
+    assert runtime_tree_identity(root) != baseline
+    payload.chmod(0o644)
+    subdirectory.chmod(0o775)
+    assert runtime_tree_identity(root) != baseline
+    subdirectory.chmod(0o755)
+    root.chmod(0o775)
+    assert runtime_tree_identity(root) != baseline
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink identity contract")
+def test_runtime_tree_identity_rejects_unsafe_symlink_chains(tmp_path: Path) -> None:
+    container = tmp_path / "container"
+    nested_real = container / "real" / "nested"
+    nested_real.mkdir(parents=True)
+    (nested_real / "payload").write_bytes(b"fixture")
+    (container / "linked-parent").symlink_to("real", target_is_directory=True)
+    with pytest.raises(EvalManifestError, match="contains a link"):
+        runtime_tree_identity(container / "linked-parent" / "nested")
+
+    root = tmp_path / "tree"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    payload = root / "payload.bin"
+    payload.write_bytes(b"fixture")
+    (root / "internal-link").symlink_to("payload.bin")
+    assert len(runtime_tree_identity(root)) == 64
+
+    absolute = root / "absolute-link"
+    absolute.symlink_to(payload)
+    with pytest.raises(EvalManifestError, match="absolute"):
+        runtime_tree_identity(root)
+    absolute.unlink()
+
+    dangling = root / "dangling-link"
+    dangling.symlink_to("missing.bin")
+    with pytest.raises(EvalManifestError, match="dangling or escapes"):
+        runtime_tree_identity(root)
+    dangling.unlink()
+
+    (outside / "link-back").symlink_to(root, target_is_directory=True)
+    lexical_escape = root / "lexical-escape"
+    lexical_escape.symlink_to("../outside/link-back/payload.bin")
+    with pytest.raises(EvalManifestError, match="dangling or escapes"):
+        runtime_tree_identity(root)
+    lexical_escape.unlink()
+
+    gateway = root / "gateway"
+    gateway.symlink_to("../outside/link-back", target_is_directory=True)
+    (root / "via-gateway").symlink_to("gateway/payload.bin")
+    with pytest.raises(EvalManifestError, match="dangling or escapes"):
+        runtime_tree_identity(root)
+    (root / "via-gateway").unlink()
+    gateway.unlink()
+
+    first = root / "cycle-a"
+    second = root / "cycle-b"
+    first.symlink_to("cycle-b")
+    second.symlink_to("cycle-a")
+    with pytest.raises(EvalManifestError, match="dangling or escapes"):
+        runtime_tree_identity(root)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX special-file identity contract")
+def test_runtime_tree_identity_rejects_special_files(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    root.mkdir()
+    os.mkfifo(root / "fifo")
+    with pytest.raises(EvalManifestError, match="special file"):
+        runtime_tree_identity(root)
+
+
+def test_runtime_identity_validator_rejects_overlapping_and_external_runtime_roots(
+    tmp_path: Path,
+) -> None:
+    runtime = synthetic_runtime_identity(
+        public_repository=ROOT, work_root=tmp_path / "work",
+    )
+    overlapping = copy.deepcopy(runtime)
+    boundary = overlapping["sandbox_boundary"]
+    boundary["runtime_root"] = (tmp_path / "work" / "runtime").absolute().as_posix()
+    boundary["identity_sha256"] = eval_runner.sha256_bytes(eval_runner.canonical_json({
+        key: value for key, value in boundary.items() if key != "identity_sha256"
+    }))
+    overlapping["identity_sha256"] = eval_runner.sha256_bytes(eval_runner.canonical_json({
+        key: value for key, value in overlapping.items() if key != "identity_sha256"
+    }))
+    with pytest.raises(EvalManifestError, match="roots overlap"):
+        eval_common._validate_runtime_identity(overlapping)
+
+    external = copy.deepcopy(runtime)
+    external_build = external["codegraph_build"]
+    external_build["npm"]["path"] = (tmp_path / "external" / "npm-cli.js").as_posix()
+    external_build["identity_sha256"] = eval_runner.sha256_bytes(
+        eval_runner.canonical_json({
+            key: value for key, value in external_build.items()
+            if key != "identity_sha256"
+        })
+    )
+    external["identity_sha256"] = eval_runner.sha256_bytes(eval_runner.canonical_json({
+        key: value for key, value in external.items() if key != "identity_sha256"
+    }))
+    with pytest.raises(EvalManifestError, match="inconsistent with runtime"):
+        eval_common._validate_runtime_identity(external)
+
+
+def test_codegraph_capture_rejects_untracked_and_unhashed_ignored_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    repository = runtime_root / "codegraph"
+    entrypoint = repository / "dist" / "bin" / "codegraph.js"
+    dependencies = repository / "node_modules" / "fixture" / "index.js"
+    node = runtime_root / "node"
+    npm_cli = runtime_root / "npm-cli.js"
+    package_lock = repository / "package-lock.json"
+    for path in (entrypoint, dependencies, node, npm_cli, package_lock):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        eval_common, "_require_regular_ext4_path",
+        lambda path, _label, **_kwargs: Path(path).absolute(),
+    )
+    status = {"value": "?? rogue.env"}
+    ignored = {"value": ""}
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(_repository: Path, *args: str) -> str:
+        calls.append(args)
+        if args == ("rev-parse", "HEAD"):
+            return load_manifest()["arms"][1]["revision"]
+        if args == ("rev-parse", "HEAD^{tree}"):
+            return load_manifest()["arms"][1]["build_identity"]["repository_tree"]
+        if args[0] == "status":
+            return status["value"]
+        if args[0] == "ls-files":
+            return ignored["value"]
+        raise AssertionError(args)
+
+    monkeypatch.setattr(eval_common, "_git_output", fake_git)
+    kwargs = {
+        "repository": repository, "runtime_root": runtime_root,
+        "node": node, "npm_cli": npm_cli, "entrypoint": entrypoint,
+    }
+    with pytest.raises(EvalManifestError, match="untracked"):
+        eval_common.capture_codegraph_build_identity(**kwargs)
+    assert (
+        "status", "--porcelain=v1", "--untracked-files=all",
+    ) in calls
+
+    status["value"] = ""
+    ignored["value"] = ".env"
+    with pytest.raises(EvalManifestError, match="outside the hashed build closure"):
+        eval_common.capture_codegraph_build_identity(**kwargs)
+
+
 def test_runtime_preflight_detects_codegraph_and_installed_payload_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
-    entrypoint = tmp_path / "codegraph.js"
     python = tmp_path / ("python.exe" if os.name == "nt" else "python")
-    node.write_bytes(b"node-runtime")
-    entrypoint.write_bytes(b"codegraph-runtime")
     python.write_bytes(b"python-runtime")
     runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=tmp_path / "work")
+    node = Path(runtime["node"]["path"])
+    entrypoint = Path(runtime["codegraph_entrypoint"]["path"])
+    package_lock = Path(runtime["codegraph_build"]["package_lock"]["path"])
+    npm_cli = Path(runtime["codegraph_build"]["npm"]["path"])
     runtime["node"].update({
         "path": node.as_posix(), "filename": node.name, "sha256": sha256_file(node),
     })
@@ -675,10 +861,27 @@ def test_runtime_preflight_detects_codegraph_and_installed_payload_mutation(
         "path": entrypoint.as_posix(), "filename": entrypoint.name,
         "sha256": sha256_file(entrypoint),
     }
+    runtime["codegraph_build"]["node"] = dict(runtime["node"])
+    runtime["codegraph_build"]["entrypoint"] = dict(runtime["codegraph_entrypoint"])
+    runtime["codegraph_build"]["package_lock"]["sha256"] = sha256_file(package_lock)
+    runtime["codegraph_build"]["npm"]["sha256"] = sha256_file(npm_cli)
+    runtime["codegraph_build"]["identity_sha256"] = eval_runner.sha256_bytes(
+        eval_runner.canonical_json({
+            key: value for key, value in runtime["codegraph_build"].items()
+            if key != "identity_sha256"
+        })
+    )
+    runtime["identity_sha256"] = eval_runner.sha256_bytes(
+        eval_runner.canonical_json({
+            key: value for key, value in runtime.items()
+            if key != "identity_sha256"
+        })
+    )
     environment = {
         "suite_asset_sha256": eval_runner.asset_digest(),
         "codegraph_revision": load_manifest()["arms"][1]["revision"],
         "codegraph_entrypoint": dict(runtime["codegraph_entrypoint"]),
+        "codegraph_build": dict(runtime["codegraph_build"]),
         "runtime_identity": runtime,
         "identity_checks": [],
     }
@@ -694,11 +897,26 @@ def test_runtime_preflight_detects_codegraph_and_installed_payload_mutation(
         v03_python=python.as_posix(), codegraph_command=command,
     )
     entrypoint.write_bytes(b"mutated-codegraph-runtime")
-    with pytest.raises(RuntimeError, match="prepared entrypoint"):
+    with pytest.raises(RuntimeError, match="lightweight closure"):
         _runtime_identity_preflight(
             {"arm": "codegraph"}, environment, v02_python=python.as_posix(),
             v03_python=python.as_posix(), codegraph_command=command,
         )
+    entrypoint.write_bytes(b"synthetic codegraph entrypoint\n")
+    package_lock.write_bytes(b"mutated-package-lock")
+    with pytest.raises(RuntimeError, match="lightweight closure"):
+        _runtime_identity_preflight(
+            {"arm": "codegraph"}, environment, v02_python=python.as_posix(),
+            v03_python=python.as_posix(), codegraph_command=command,
+        )
+    package_lock.write_bytes(b"synthetic package lock\n")
+    npm_cli.write_bytes(b"mutated-npm-cli")
+    with pytest.raises(RuntimeError, match="lightweight closure"):
+        _runtime_identity_preflight(
+            {"arm": "codegraph"}, environment, v02_python=python.as_posix(),
+            v03_python=python.as_posix(), codegraph_command=command,
+        )
+    npm_cli.write_bytes(b"synthetic non-executable unit-test fixture\n")
 
     payload_hash = "a" * 64
     runtime["python"]["hlsgraph_v02"].update({
@@ -730,6 +948,73 @@ def test_runtime_preflight_detects_codegraph_and_installed_payload_mutation(
         _runtime_identity_preflight(
             {"arm": "hlsgraph-v02"}, environment, v02_python=python.as_posix(),
             v03_python=python.as_posix(), codegraph_command=command,
+        )
+
+
+def test_full_codegraph_preflight_binds_dist_and_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = synthetic_runtime_identity(
+        public_repository=ROOT, work_root=tmp_path / "work",
+    )
+    build = runtime["codegraph_build"]
+    node = Path(runtime["node"]["path"])
+    entrypoint = Path(runtime["codegraph_entrypoint"]["path"])
+    package_lock = Path(build["package_lock"]["path"])
+    npm_cli = Path(build["npm"]["path"])
+    runtime["node"]["sha256"] = sha256_file(node)
+    runtime["codegraph_entrypoint"]["sha256"] = sha256_file(entrypoint)
+    build["node"] = dict(runtime["node"])
+    build["entrypoint"] = dict(runtime["codegraph_entrypoint"])
+    build["package_lock"]["sha256"] = sha256_file(package_lock)
+    build["npm"]["sha256"] = sha256_file(npm_cli)
+    build["identity_sha256"] = eval_runner.sha256_bytes(eval_runner.canonical_json({
+        key: value for key, value in build.items() if key != "identity_sha256"
+    }))
+    runtime["identity_sha256"] = eval_runner.sha256_bytes(eval_runner.canonical_json({
+        key: value for key, value in runtime.items() if key != "identity_sha256"
+    }))
+    environment = {
+        "suite_asset_sha256": eval_runner.asset_digest(),
+        "codegraph_revision": load_manifest()["arms"][1]["revision"],
+        "codegraph_entrypoint": dict(runtime["codegraph_entrypoint"]),
+        "codegraph_build": dict(build), "runtime_identity": runtime,
+        "identity_checks": [],
+    }
+    manifest = copy.deepcopy(load_manifest())
+    manifest["arms"][1]["entrypoint_sha256"] = sha256_file(entrypoint)
+    monkeypatch.setattr(eval_runner, "load_manifest", lambda: manifest)
+    dist = Path(build["dist"]["path"])
+    dependencies = Path(build["dependencies"]["path"])
+    baseline = (runtime_tree_identity(dist), runtime_tree_identity(dependencies))
+
+    def capture(**_kwargs: object) -> dict[str, object]:
+        if (runtime_tree_identity(dist), runtime_tree_identity(dependencies)) == baseline:
+            return build
+        changed = copy.deepcopy(build)
+        changed["dist"]["tree_sha256"] = runtime_tree_identity(dist)
+        changed["dependencies"]["tree_sha256"] = runtime_tree_identity(dependencies)
+        return changed
+
+    monkeypatch.setattr(eval_runner, "capture_codegraph_build_identity", capture)
+    command = f'"{node.as_posix()}" "{entrypoint.as_posix()}"'
+    _runtime_identity_preflight(
+        {"arm": "codegraph"}, environment, v02_python="unused",
+        v03_python="unused", codegraph_command=command, full_codegraph=True,
+    )
+    added_dist_file = dist / "extra.js"
+    added_dist_file.write_bytes(b"mutated dist")
+    with pytest.raises(RuntimeError, match="full runtime closure"):
+        _runtime_identity_preflight(
+            {"arm": "codegraph"}, environment, v02_python="unused",
+            v03_python="unused", codegraph_command=command, full_codegraph=True,
+        )
+    added_dist_file.unlink()
+    (dependencies / "fixture" / "index.js").write_bytes(b"mutated dependency")
+    with pytest.raises(RuntimeError, match="full runtime closure"):
+        _runtime_identity_preflight(
+            {"arm": "codegraph"}, environment, v02_python="unused",
+            v03_python="unused", codegraph_command=command, full_codegraph=True,
         )
 
 

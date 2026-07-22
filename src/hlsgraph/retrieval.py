@@ -616,6 +616,20 @@ class RetrievalSpec:
         unknown = set(self.planes) - VALID_PLANES
         if unknown:
             raise ValueError(f"unsupported retrieval planes: {', '.join(sorted(unknown))}")
+        if type(self.include_private_snippets) is not bool:
+            raise ValueError("include_private_snippets must be a boolean")
+        if type(self.include_predictions) is not bool:
+            raise ValueError("include_predictions must be a boolean")
+        if "predictions" in self.planes and not self.include_predictions:
+            raise ValueError(
+                "the predictions plane requires include_predictions=True"
+            )
+        # ``planes`` is the final channel allow-list consumed by every
+        # retriever path.  The separate flag is the explicit capability gate:
+        # opting in adds the isolated prediction plane without changing the
+        # fact or guidance channels selected by the caller.
+        if self.include_predictions and "predictions" not in self.planes:
+            self.planes = (*self.planes, "predictions")
         if not 1 <= int(self.top_k) <= 50:
             raise ValueError("top_k must be in 1..50")
         self.top_k = int(self.top_k)
@@ -1307,6 +1321,8 @@ class HybridRetriever:
                 if not isinstance(item, RetrievalItem):
                     warnings.append(f"retrieval_adapter_invalid_item:{adapter_fingerprint}")
                     continue
+                if item.plane not in spec.planes:
+                    continue
                 # Generic adapters are untrusted retrieval inputs.  They may
                 # contribute only project-local unreviewed text or isolated
                 # predictions.  Canonical facts/evidence are projected from
@@ -1334,8 +1350,6 @@ class HybridRetriever:
                     )
                     continue
                 if item.plane == "predictions":
-                    if not spec.include_predictions:
-                        continue
                     if (item.record_kind != "prediction_envelope"
                             or item.authority_class != "prediction_hypothesis"):
                         warnings.append(
@@ -1501,7 +1515,7 @@ class HybridRetriever:
             warnings.append("knowledge_binding_artifact_revision_unbound")
         predictions = (self._rank_predictions(
             prediction_documents, adapter_prediction_items, terms, query_folded, limit,
-        ) if spec.include_predictions else [])
+        ) if "predictions" in spec.planes else [])
         if predictions:
             channel_scores["predictions_isolated"] = {
                 item.record_id: item.score for item in predictions
@@ -2187,7 +2201,7 @@ class HybridRetriever:
                         },
                     ),
                 ))
-        if spec.include_predictions and "predictions" in (set(spec.planes) | {"predictions"}):
+        if "predictions" in spec.planes:
             for prediction in self.bundle.store.predictions(self.snapshot_id):
                 subject_id = str(prediction.get("subject_id", ""))
                 if subject_id not in allowed_ids:

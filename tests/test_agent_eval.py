@@ -94,11 +94,12 @@ def _write_environment_lock(work_root: Path) -> tuple[str, dict[str, str]]:
         public_repository=ROOT, work_root=work_root,
     )
     environment = {
-        "schema_version": "hlsgraph.agent_eval.environment.v2",
+        "schema_version": "hlsgraph.agent_eval.environment.v3",
         "suite_asset_sha256": asset_digest(),
         "evaluation_harness_sha256": harness_digest(),
         "codegraph_revision": manifest["arms"][1]["revision"],
         "codegraph_entrypoint": dict(runtime_identity["codegraph_entrypoint"]),
+        "codegraph_build": dict(runtime_identity["codegraph_build"]),
         "source_backend": "libclang", "official_profile": True,
         "runtime_identity": runtime_identity,
         **declared, "identity_checks": identities,
@@ -165,7 +166,15 @@ def test_frozen_public_eval_assets_are_complete_and_licensed() -> None:
     assert tuple(item["id"] for item in manifest["arms"]) == ARM_IDS
     assert manifest["arms"][1]["revision"] == "286e9ccc2dad45336d4fd67052930322054d64b5"
     assert manifest["arms"][1]["entrypoint_sha256"] == (
-        "9909193d596dc12f0fa70fb4349f9a9d3447f69fee78821fc9330475eef087c7"
+        "03e4c791cc0dd91ed264278461bf9a56c0278aa0670d5942fc4732311c66de03"
+    )
+    build = manifest["arms"][1]["build_identity"]
+    assert build["runtime_tree_algorithm"] == "hlsgraph.runtime_tree.v1"
+    assert build["dist_tree_sha256"] == (
+        "cc0cefe48514fa34a8c3b488efb4377bec2f62ad84e32c57f495e2cd2cb2e61b"
+    )
+    assert build["dependency_tree_sha256"] == (
+        "20088cced4df7332c2787bf7d281e301a67d8fd831dad53a564a8d50d723a284"
     )
     assert len(questions) == 12
     assert len(load_static_cases()) == 12
@@ -177,7 +186,15 @@ def test_frozen_public_eval_assets_are_complete_and_licensed() -> None:
     )
     assert {item["license"] for item in lock["corpora"]} == {"Apache-2.0"}
     assert {item["tool_evidence"] for item in lock["corpora"] if item["id"] != "dataflow_gemm"} == {"none"}
-    assert audit_frozen_assets()["passed"] is True
+    audit = audit_frozen_assets()
+    assert audit["passed"] is True
+    assert audit["codegraph_entrypoint_sha256"] == manifest["arms"][1][
+        "entrypoint_sha256"
+    ]
+    assert audit["codegraph_dist_tree_sha256"] == build["dist_tree_sha256"]
+    assert audit["codegraph_dependency_tree_sha256"] == build[
+        "dependency_tree_sha256"
+    ]
 
 
 def test_run_plan_is_seeded_and_has_192_cells() -> None:

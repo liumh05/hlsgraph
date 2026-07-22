@@ -29,7 +29,9 @@ def _cold_start_matrix() -> list[dict[str, object]]:
     return synthetic_cold_start_matrix()[0]
 
 
-def _environment(wheel_sha256: str, package_sha256: str) -> dict[str, object]:
+def _environment(
+    wheel_sha256: str, package_sha256: str, *, work_root: Path,
+) -> dict[str, object]:
     manifest = load_manifest()
     v02_revision = next(
         item["revision"] for item in manifest["arms"] if item["id"] == "hlsgraph-v02"
@@ -92,14 +94,15 @@ def _environment(wheel_sha256: str, package_sha256: str) -> dict[str, object]:
             workspaces[f"{arm}/{corpus['id']}"] = identity
     runtime_identity = synthetic_runtime_identity(
         public_repository=Path(__file__).resolve().parents[1],
-        work_root=Path.cwd() / "synthetic-eval-work",
+        work_root=work_root,
     )
     return {
-        "schema_version": "hlsgraph.agent_eval.environment.v2",
+        "schema_version": "hlsgraph.agent_eval.environment.v3",
         "suite_asset_sha256": asset_digest(),
         "evaluation_harness_sha256": harness_digest(),
         "codegraph_revision": manifest["arms"][1]["revision"],
         "codegraph_entrypoint": dict(runtime_identity["codegraph_entrypoint"]),
+        "codegraph_build": dict(runtime_identity["codegraph_build"]),
         "source_backend": "libclang", "official_profile": True,
         "runtime_identity": runtime_identity,
         **declared, "identity_checks": identities,
@@ -119,7 +122,10 @@ def _release_fixture(tmp_path: Path, *, supported: bool = False) -> tuple[Path, 
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("hlsgraph/__init__.py", package["hlsgraph/__init__.py"])
     wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    environment = _environment(wheel_sha256, _payload_digest(package))
+    environment = _environment(
+        wheel_sha256, _payload_digest(package),
+        work_root=tmp_path / "synthetic-eval-work",
+    )
     environment_path = tmp_path / "environment.lock.json"
     environment_bytes = _write_json(environment_path, environment)
     candidate = prepared_hlsgraph_identity(environment, "hlsgraph-v03")
@@ -329,7 +335,9 @@ def test_prepare_plan_requires_frozen_v02_source_repository(tmp_path: Path) -> N
 def test_environment_lock_requires_exact_v02_source_and_complete_cold_matrix(
     tmp_path: Path,
 ) -> None:
-    environment = _environment("1" * 64, "f" * 64)
+    environment = _environment(
+        "1" * 64, "f" * 64, work_root=tmp_path / "synthetic-eval-work",
+    )
     path = tmp_path / "environment.lock.json"
     _write_json(path, environment)
     loaded = load_environment_lock(path)
@@ -342,7 +350,9 @@ def test_environment_lock_requires_exact_v02_source_and_complete_cold_matrix(
 
 
 def test_environment_lock_requires_v03_knowledge_sync_cold_phase(tmp_path: Path) -> None:
-    environment = _environment("1" * 64, "f" * 64)
+    environment = _environment(
+        "1" * 64, "f" * 64, work_root=tmp_path / "synthetic-eval-work",
+    )
     record = next(
         item for item in environment["cold_start_indexing"]
         if item["arm"] == "hlsgraph-v03"
@@ -357,7 +367,9 @@ def test_environment_lock_requires_v03_knowledge_sync_cold_phase(tmp_path: Path)
 
 
 def test_environment_lock_verifies_cold_start_absence_proofs(tmp_path: Path) -> None:
-    environment = _environment("1" * 64, "f" * 64)
+    environment = _environment(
+        "1" * 64, "f" * 64, work_root=tmp_path / "synthetic-eval-work",
+    )
     proof = next(
         item for item in environment["identity_checks"]
         if item.get("kind") == "cold-start-index-absence"
@@ -386,7 +398,9 @@ def test_environment_lock_verifies_cold_start_absence_proofs(tmp_path: Path) -> 
 def test_environment_lock_rejects_missing_or_mutated_runtime_identity(
     tmp_path: Path, mutation: object, message: str,
 ) -> None:
-    environment = _environment("1" * 64, "f" * 64)
+    environment = _environment(
+        "1" * 64, "f" * 64, work_root=tmp_path / "synthetic-eval-work",
+    )
     mutation(environment)
     path = tmp_path / "environment.lock.json"
     _write_json(path, environment)

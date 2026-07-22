@@ -76,6 +76,10 @@ export V03_PYTHON="$RUNTIME_ROOT/venvs/v03/bin/python"
 export V02_REPO="$RUNTIME_ROOT/hlsgraph-v02-src"
 export CODEGRAPH_REPO="$RUNTIME_ROOT/codegraph"
 export CODEGRAPH_JS="$CODEGRAPH_REPO/dist/bin/codegraph.js"
+export NODE_VERSION="22.17.0"
+export NODE_ROOT="$RUNTIME_ROOT/node-v$NODE_VERSION-linux-x64"
+export NODE_BIN="$NODE_ROOT/bin/node"
+export NPM_CLI="$NODE_ROOT/lib/node_modules/npm/bin/npm-cli.js"
 export CODEX_BIN="$RUNTIME_ROOT/codex/codex"
 mkdir -p -m 700 "$EVAL_ROOT" "$RUNTIME_ROOT" "$RESULTS_ROOT"
 
@@ -83,6 +87,8 @@ mkdir -p -m 700 "$EVAL_ROOT" "$RUNTIME_ROOT" "$RESULTS_ROOT"
 findmnt -T "$EVAL_ROOT"
 findmnt -T "$V02_PYTHON"
 findmnt -T "$V03_PYTHON"
+findmnt -T "$NODE_BIN"
+findmnt -T "$NPM_CLI"
 findmnt -T "$CODEGRAPH_JS"
 findmnt -T "$CODEX_BIN"
 findmnt -T "$(command -v bwrap)"
@@ -117,12 +123,37 @@ CODEX_HOME="$CODEX_HOME" "$CODEX_BIN" login
 The runner passes only the dedicated `CODEX_HOME`; it does not fall back to the
 default home or forward the forbidden authentication variables.
 
-Build CodeGraph from the frozen commit on ext4. The resulting
-`dist/bin/codegraph.js` must match the SHA-256 frozen in `manifest.json`; a
-matching Git commit with different entrypoint bytes is rejected. Disable its
-daemon, telemetry, and update checks for preparation, indexing, and every model
-cell. These four values are part of the locked execution contract and scoring
-rejects a missing or changed value:
+Install the exact official Node.js Linux x64 archive before building CodeGraph.
+The archive digest is verified before extraction; preparation separately binds
+the extracted Node ELF (`8071ae0f...4374b9`), npm 10.9.2 CLI
+(`8e5f6f34...fcbe7`), and their absolute paths. Do not substitute a system Node
+or a different npm patch release:
+
+```bash
+export NODE_ARCHIVE="node-v$NODE_VERSION-linux-x64.tar.xz"
+export NODE_ARCHIVE_SHA256="325c0f1261e0c61bcae369a1274028e9cfb7ab7949c05512c5b1e630f7e80e12"
+curl --fail --location \
+  "https://nodejs.org/dist/v$NODE_VERSION/$NODE_ARCHIVE" \
+  --output "$RUNTIME_ROOT/$NODE_ARCHIVE"
+printf '%s  %s\n' "$NODE_ARCHIVE_SHA256" "$RUNTIME_ROOT/$NODE_ARCHIVE" \
+  | sha256sum --check --strict -
+tar -xJf "$RUNTIME_ROOT/$NODE_ARCHIVE" -C "$RUNTIME_ROOT"
+printf '%s  %s\n' \
+  '8071ae0fca095a272ad698a90c7061801a86fb6392ddb81e922b68a91a4374b9' "$NODE_BIN" \
+  '8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7' "$NPM_CLI" \
+  | sha256sum --check --strict -
+export PATH="$NODE_ROOT/bin:/usr/bin:/bin"
+node --version                         # exactly v22.17.0
+npm --version                          # exactly 10.9.2
+```
+
+Build CodeGraph from the frozen commit on ext4. The declared reproduction
+recipe is exactly `umask 0022`, `npm ci`, then `npm run build`; it is a recipe,
+not evidence that a build occurred. The observed package-lock, tool, entrypoint,
+dist-tree, and dependency-tree byte identities are the evidence recorded by
+preparation. Disable the daemon, telemetry, and update checks for preparation,
+indexing, and every model cell. These four values are part of the locked
+execution contract and scoring rejects a missing or changed value:
 
 ```bash
 export CODEGRAPH_NO_DAEMON=1
@@ -131,10 +162,33 @@ export DO_NOT_TRACK=1
 export CODEGRAPH_NO_UPDATE_CHECK=1
 
 git clone https://github.com/colbymchenry/codegraph.git "$CODEGRAPH_REPO"
-git -C "$CODEGRAPH_REPO" checkout 286e9ccc2dad45336d4fd67052930322054d64b5
-npm --prefix "$CODEGRAPH_REPO" ci
-npm --prefix "$CODEGRAPH_REPO" run build
+git -C "$CODEGRAPH_REPO" checkout --detach 286e9ccc2dad45336d4fd67052930322054d64b5
+(
+  cd "$CODEGRAPH_REPO"
+  umask 0022
+  npm ci
+  npm run build
+)
 ```
+
+`hlsgraph.runtime_tree.v1` is archive-independent. It sorts relative paths and
+hashes `D` records for the root and every real directory (path + POSIX mode),
+`F` records for regular files (path + mode + byte SHA-256), and `L` records for
+symlinks (path + literal target). Directory identity is checked before and
+after enumeration. Absolute, lexically escaping, resolved-outside, dangling,
+cyclic, linked-parent, and special-file paths fail closed. With the recipe above,
+two independent clean builds must both produce:
+
+- `dist`: `cc0cefe48514fa34a8c3b488efb4377bec2f62ad84e32c57f495e2cd2cb2e61b`;
+- `node_modules`: `20088cced4df7332c2787bf7d281e301a67d8fd831dad53a564a8d50d723a284`;
+- `dist/bin/codegraph.js`: `03e4c791cc0dd91ed264278461bf9a56c0278aa0670d5942fc4732311c66de03`.
+
+A different umask changes the mode-bearing tree identity even when file bytes
+are identical and is therefore rejected. The checkout must also have no tracked
+changes and no non-ignored untracked files. Of ignored outputs, only `dist/` and
+`node_modules/` may exist because those two trees are explicitly hashed;
+ignored `.env`, log, cache, editor, or other repository-root material aborts
+preparation rather than remaining outside the closure.
 
 Materialize the isolated workspaces. Network access is confined to this explicit
 dependency/corpus preparation phase and the pinned public inputs; model cells
@@ -160,6 +214,7 @@ python3 -m eval.agent_ab.prepare \
   --v03-python "$V03_PYTHON" \
   --codegraph-command "$CODEGRAPH_COMMAND" \
   --codegraph-repo "$CODEGRAPH_REPO" \
+  --runtime-root "$RUNTIME_ROOT" --npm-cli "$NPM_CLI" \
   --v02-repo "$V02_REPO" \
   --v03-repo "$HLSGRAPH_REPO" \
   --codex-command "$CODEX_BIN" \
@@ -171,6 +226,7 @@ python3 -m eval.agent_ab.prepare \
   --v03-python "$V03_PYTHON" \
   --codegraph-command "$CODEGRAPH_COMMAND" \
   --codegraph-repo "$CODEGRAPH_REPO" \
+  --runtime-root "$RUNTIME_ROOT" --npm-cli "$NPM_CLI" \
   --v02-repo "$V02_REPO" \
   --v03-repo "$HLSGRAPH_REPO" \
   --codex-command "$CODEX_BIN" \
@@ -181,9 +237,9 @@ The release profile requires libclang in both environments. `--degraded` exists
 only for parser diagnostics; an environment lock produced with that flag is
 marked non-official and cannot support a performance claim.
 Official execution requires both HLSGraph checkouts to be clean and records their
-Git revisions, the exact CodeGraph entrypoint path/hash, Node/Python binary identities,
-the Codex CLI and Linux sandbox identities, and both verified wheel payload
-identities.
+Git revisions, the exact CodeGraph source tree, package lock, Node/npm,
+entrypoint, dist and dependency closure, Python binary identities, the Codex CLI
+and Linux sandbox identities, and both verified wheel payload identities.
 Preparation also installs the complete built-in knowledge catalog, including
 its audited executable-rule and citation-only classifications, into each v0.3
 evaluation ledger. The generated manifests declare AMD
@@ -233,7 +289,8 @@ reclassified as a native/file-only run.
 
 The OS sandbox is the primary confidentiality boundary. It denies the public
 repository, `CODEX_HOME`, every discovered `/mnt/<drive>` drvfs root, sensitive
-home roots, and an external private-looking canary root. Within `work_root`, the
+home roots, the complete execution `RUNTIME_ROOT`, and an external
+private-looking canary root. Within `work_root`, the
 locked `explicit_sibling_directory_deny_v1` policy denies the other three arm
 directories, the other three corpus directories under the current arm, and the
 sealed control directories; only the current workspace remains readable. The
@@ -277,8 +334,11 @@ The body-free private-retrieval access log is the only excluded mutable index
 file; the runner safely removes it before every cell so it cannot carry context
 between arms or repetitions. Every other workspace byte, including unexpected
 files, is covered by the frozen workspace identity.
-The CodeGraph JS bytes and both installed HLSGraph payloads are rechecked after
-every model cell and again at batch completion. Each successful score also
+The Node, npm CLI, package lock, and CodeGraph entrypoint bytes are rechecked
+after every model cell. The complete mode-bearing CodeGraph dist and dependency
+trees are rechecked before the first cell and after the final cell; both
+installed HLSGraph payloads are likewise checked per cell and at batch
+completion. Each successful score also
 requires usage from a terminal Codex completion event with all token counters
 present and `total_tokens > 0`; missing, synthesized, or zero terminal usage is
 a failed cell.

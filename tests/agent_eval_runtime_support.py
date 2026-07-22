@@ -109,9 +109,10 @@ def synthetic_runtime_identity(
     external = parent / ".hlsgraph-eval-private-canary"
     drvfs = parent / "synthetic-drvfs-c"
     home = parent / "synthetic-home"
+    runtime_root = parent / "synthetic-runtime"
     denies = sorted({
         public_repository.as_posix(), work_root.as_posix(), codex_home.as_posix(),
-        external.as_posix(), drvfs.as_posix(), home.as_posix(),
+        runtime_root.as_posix(), external.as_posix(), drvfs.as_posix(), home.as_posix(),
     })
     corpus_ids = [item["id"] for item in load_corpus_lock()["corpora"]]
     deny_catalog: dict[str, Any] = {
@@ -129,6 +130,7 @@ def synthetic_runtime_identity(
         "schema_version": "hlsgraph.agent_eval.sandbox_boundary.v1",
         "public_repository": public_repository.as_posix(),
         "work_root": work_root.as_posix(),
+        "runtime_root": runtime_root.as_posix(),
         "work_root_policy": "explicit_sibling_directory_deny_v1",
         "work_root_deny_catalog": deny_catalog,
         "work_root_deny_catalog_sha256": sha256_bytes(canonical_json(deny_catalog)),
@@ -140,16 +142,28 @@ def synthetic_runtime_identity(
         "deny_roots": denies,
     }
     boundary["identity_sha256"] = sha256_bytes(canonical_json(boundary))
-    runtime_root = parent / "synthetic-runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     for name in (
         "fixture", "codex", "codex-linux-sandbox", "bwrap", "node",
-        "codegraph.js", "harness-python", "v02-python", "v03-python",
+        "npm-cli.js", "harness-python", "v02-python", "v03-python",
     ):
         path = runtime_root / name
         path.write_bytes(b"synthetic non-executable unit-test fixture\n")
         if os.name == "posix":
             path.chmod(0o700)
+    codegraph_repo = runtime_root / "codegraph"
+    entrypoint = codegraph_repo / "dist" / "bin" / "codegraph.js"
+    package_lock = codegraph_repo / "package-lock.json"
+    dependency = codegraph_repo / "node_modules" / "fixture" / "index.js"
+    for path, data in (
+        (entrypoint, b"synthetic codegraph entrypoint\n"),
+        (package_lock, b"synthetic package lock\n"),
+        (dependency, b"synthetic dependency\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if os.name == "posix":
+            path.chmod(0o644)
     binary = {"filename": "fixture", "path": (runtime_root / "fixture").as_posix(),
               "version": "fixture-1", "sha256": "1" * 64}
     python = {
@@ -159,7 +173,7 @@ def synthetic_runtime_identity(
         "sha256": "2" * 64,
     }
     runtime: dict[str, Any] = {
-        "schema_version": "hlsgraph.agent_eval.runtime_identity.v1",
+        "schema_version": "hlsgraph.agent_eval.runtime_identity.v2",
         "host": {
             "os_name": "posix", "system": "Linux",
             "release": "6.18.0-microsoft-standard-WSL2", "machine": "x86_64",
@@ -176,9 +190,10 @@ def synthetic_runtime_identity(
         "bubblewrap": {**binary, "path": (runtime_root / "bwrap").as_posix(),
                        "filename": "bwrap", "version": "bubblewrap 0.6.1", "sha256": "5" * 64},
         "node": {**binary, "path": (runtime_root / "node").as_posix(),
-                 "filename": "node", "version": "v22.16.0", "sha256": "6" * 64},
+                 "filename": "node", "version": "v22.17.0",
+                 "sha256": load_manifest()["arms"][1]["build_identity"]["node"]["sha256"]},
         "codegraph_entrypoint": {
-            "path": (runtime_root / "codegraph.js").as_posix(),
+            "path": entrypoint.as_posix(),
             "filename": "codegraph.js",
             "sha256": load_manifest()["arms"][1]["entrypoint_sha256"],
         },
@@ -191,5 +206,40 @@ def synthetic_runtime_identity(
                              "filename": "v03-python", "sha256": "9" * 64},
         },
     }
+    frozen_build = load_manifest()["arms"][1]["build_identity"]
+    runtime["codegraph_build"] = {
+        "schema_version": "hlsgraph.agent_eval.codegraph_build.v1",
+        "runtime_tree_algorithm": frozen_build["runtime_tree_algorithm"],
+        "repository": {
+            "path": codegraph_repo.as_posix(),
+            "revision": load_manifest()["arms"][1]["revision"],
+            "tree": frozen_build["repository_tree"],
+        },
+        "package_lock": {
+            "path": package_lock.as_posix(), "filename": package_lock.name,
+            "sha256": frozen_build["package_lock_sha256"],
+        },
+        "node": dict(runtime["node"]),
+        "npm": {
+            "path": (runtime_root / "npm-cli.js").as_posix(),
+            "filename": "npm-cli.js", "version": frozen_build["npm"]["version"],
+            "sha256": frozen_build["npm"]["cli_sha256"],
+        },
+        "entrypoint": dict(runtime["codegraph_entrypoint"]),
+        "dist": {
+            "path": (codegraph_repo / "dist").as_posix(),
+            "algorithm": frozen_build["runtime_tree_algorithm"],
+            "tree_sha256": frozen_build["dist_tree_sha256"],
+        },
+        "dependencies": {
+            "path": (codegraph_repo / "node_modules").as_posix(),
+            "algorithm": frozen_build["runtime_tree_algorithm"],
+            "tree_sha256": frozen_build["dependency_tree_sha256"],
+        },
+        "reproduction_contract": frozen_build["reproduction_contract"],
+    }
+    runtime["codegraph_build"]["identity_sha256"] = sha256_bytes(canonical_json(
+        runtime["codegraph_build"]
+    ))
     runtime["identity_sha256"] = sha256_bytes(canonical_json(runtime))
     return runtime
