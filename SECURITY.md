@@ -36,8 +36,13 @@ depend on severity, downstream coordination, and whether a vendor is involved.
 - A GraphBundle must keep private source external by default. Verify that database,
   JSON/Parquet exports, REST/MCP responses, logs, and diagnostics contain no source
   body or secret environment values.
-- Local document indexes may contain metadata and hashes only. Never attach a
-  vendor PDF or extracted documentation to a report.
+- Canonical SQLite databases, GraphBundles, exports, generated reports, wheels,
+  and release artifacts must not contain private document bodies. The separate,
+  project-local `.hlsgraph/private/knowledge/chunks.sqlite` sidecar intentionally
+  stores extracted chunks from user-owned documents; protect and exclude that
+  whole private directory. Original PDF bytes stay at the user-selected source
+  path and are not copied into the sidecar. Never attach a vendor PDF, sidecar,
+  or extracted documentation to a report.
 - Do not run a proof of concept against infrastructure or designs you do not own or
   have permission to test.
 
@@ -51,6 +56,21 @@ depend on severity, downstream coordination, and whether a vendor is involved.
   never interpolate model output into a command.
 - Pin and review extractor plugins and model code. Embedding/model adapters must
   not execute unreviewed remote code by default.
+- Treat an explicitly selected `hlsgraph.knowledge_parsers.v1` parser or
+  `hlsgraph.embedders.v1` embedder as trusted, installed code. A parser receives
+  verified document bytes; an embedder receives private chunk plaintext. Their
+  capability declarations and the parser worker are not an OS security sandbox:
+  HLSGraph does not enforce filesystem or network isolation or a hard memory
+  ceiling. HLSGraph redirects process fd 1/2 only for the duration of each
+  `parse`/`embed` call and exposes a sanitized, body-free call error. That narrow
+  guard is not whole-plugin-lifetime containment and cannot stop trusted code
+  from deliberately reopening output handles or starting background work.
+  Current parser admission controls limit each document to 32 MiB, parser time
+  to 0.1--60 seconds (10 seconds by default), extracted output to 8,388,608
+  Unicode characters (about 32 MiB in the worst-case UTF-8 encoding), and the
+  PDF parser to 4,096 pages by default (configurable up to 10,000). These bounds
+  reduce accidental resource use but do not contain malicious installed code or
+  guarantee a peak-memory ceiling. Install and select only reviewed plugins.
 - Use least-privilege SSH accounts and isolated run directories. HLSGraph does not
   manage or distribute vendor licenses.
 

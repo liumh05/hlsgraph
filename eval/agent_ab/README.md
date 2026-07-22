@@ -121,7 +121,10 @@ CODEX_HOME="$CODEX_HOME" "$CODEX_BIN" login
 ```
 
 The runner passes only the dedicated `CODEX_HOME`; it does not fall back to the
-default home or forward the forbidden authentication variables.
+default home or forward the forbidden authentication variables. The complete
+narrow subprocess environment is hash-bound in `environment.lock.json` without
+publishing its values. Proxy URLs containing user information are rejected; the
+treatment MCP namespaces receive no proxy variables at all.
 
 Install the exact official Node.js Linux x64 archive before building CodeGraph.
 The archive digest is verified before extraction; preparation separately binds
@@ -287,39 +290,75 @@ tool and at least one such call must appear. A failed or unfinished first MCP
 attempt is retained explicitly as `failed` or `incomplete`; it is not silently
 reclassified as a native/file-only run.
 
-The OS sandbox is the primary confidentiality boundary. It denies the public
-repository, `CODEX_HOME`, every discovered `/mnt/<drive>` drvfs root, sensitive
-home roots, the complete execution `RUNTIME_ROOT`, and an external
-private-looking canary root. Within `work_root`, the
-locked `explicit_sibling_directory_deny_v1` policy denies the other three arm
-directories, the other three corpus directories under the current arm, and the
-sealed control directories; only the current workspace remains readable. The
-runner requires an exact top-level and per-arm directory inventory before and
-after use, so an unknown file or directory is a NO-GO. The two known readable
-root-level metadata files contain no questions or gold evidence;
-`environment.lock.json` is additionally byte-bound into the run set.
+The OS sandbox is the primary confidentiality boundary. Codex 0.144 launches
+local stdio MCP servers from its orchestrator rather than through the model
+shell sandbox, so the three treatment servers have a second, explicit boundary:
+their configured command is the locked `bwrap` executable itself. Native has no
+MCP server and does not use this second boundary. Each treatment `bwrap` starts
+an empty mount namespace, a new PID namespace with a fresh `/proc`, no shared
+network namespace, no capabilities, a tmpfs `/tmp`, and a cleared environment
+with `HOME=/tmp/home`. It read-only binds only `/usr`, the exact current
+workspace, and that arm's locked runtime entries; it never forwards proxies,
+`CODEX_HOME`, the normal user home, or the shared Codex executable.
 
-This directory-deny form is deliberate. Codex CLI 0.144.0's Linux `bwrap`
-backend cannot reopen a readable child after its parent has already been
-mounted as unreadable; an apparent `work_root=deny` plus child `read` policy
-therefore makes the current workspace return `ENOENT`. Explicit sibling
-directory denies provide the enforceable equivalent without relying on a
-prompt or trace check. Trace inspection remains a second audit layer, not a
-substitute for the OS boundary.
+The model shell's locked
+`default_deny_minimal_exact_allowlist_v1` policy starts from Codex CLI 0.144.0's
+`":minimal"="read"` filesystem token and does **not** extend `:read-only`.
+Each cell adds only its exact corpus workspace and the minimum runtime bytes
+needed by that arm. Native adds the locked Codex ELF. CodeGraph additionally
+adds the locked Node ELF, `package.json`, `dist/`, and `node_modules/`.
+HLSGraph adds only its version-specific virtual environment's `bin/`,
+`pyvenv.cfg`, and `site-packages/` roots.
+Every file/tree path, algorithm, and digest is bound into
+`environment.lock.json` and the sandbox-boundary identity. The parent runtime,
+the public checkout, the other workspaces, `runs_root`, `CODEX_HOME`, user
+homes, drvfs mounts, controls, and all undeclared external paths therefore stay
+absent by default rather than depending on a growing list of deny exceptions.
+
+The v0.3 corpus workspace remains wholly read-only. Preparation creates one
+zero-byte, mode-`0600` placeholder under a mode-`0700` private directory at
+`.hlsgraph/private/retrieval-access.jsonl` and includes that byte in the frozen
+workspace/index identity; POSIX file and directory modes are identity inputs as
+well. Each v0.3 cell receives a different external
+mode-`0600`, single-link audit file; treatment `bwrap` uses one exact writable
+file bind over the placeholder and no writable directory bind. After the cell,
+the harness stably snapshots the body-free JSONL, validates its closed metadata
+schema, and binds its hash/count receipt into `run.json`, the raw run evidence,
+and the score. Every external audit parent identity is frozen and rechecked
+before bind/read/score. Source-read credit requires a unique one-to-one set of
+returned `source_snippet` receipts and returned audit records. The scorer then
+reconstructs every excerpt from the matching `corpus.lock.json` file and line
+range; candidate-reported hashes or request flags alone earn no read credit.
+
+The runner still requires an exact top-level and per-arm directory inventory
+before and after use, so an unknown file or directory is a NO-GO. Neither
+`environment.lock.json`, `materialization.json`, `_cache`, nor the boundary
+control directory is model-readable. The environment lock is instead consumed
+and byte-bound by the trusted harness before entering the sandbox. Trace
+inspection remains a second audit layer, not a substitute for the OS boundary.
 
 Before the first model call, the runner executes fail-closed permission
-canaries. They prove that the current workspace is readable while both a
-same-arm sibling and an other-arm sibling, the boundary-control directory, the
-exact `runs_root`, the public gold repository, synthetic files in the dedicated
-`CODEX_HOME` and user home, an external/private-like sibling, and a fresh
-sentinel on every drvfs mount are unreadable; a local socket canary also proves
-network denial. Any unexpected allow, any failed allow, or an untestable mount
-aborts the batch.
+canaries for all four arms. They prove that the exact workspace and declared
+runtime entries are readable while same-arm and cross-arm workspaces, all
+controls, the exact `runs_root`, the public gold repository, dedicated
+`CODEX_HOME`, user home, undeclared and other-arm runtime content, an
+external/private-like root, and fresh sentinels on every drvfs mount are
+unreadable. A local socket canary for every arm proves network denial. Any
+unexpected allow, failed allow, or untestable mount aborts the batch.
+For each treatment, an MCP-protocol canary is additionally started through the
+same unique `bwrap` argv builder and attempts the same allowed and forbidden
+reads plus a loopback connection from inside an MCP tool. The three real
+treatment servers must also complete `initialize`, `tools/list`, and one frozen
+read-only tool call through that wrapper before the batch is admissible. The
+v0.3 canary additionally freezes its exact tool-call request hash, raw response
+artifact/hash, audit descriptor/hash, and body-free access identities; later
+validation rereads the external response and audit bytes rather than trusting
+the canary summary.
 
 Before execution, the runner verifies that `runs_root` is an unlinked ext4
-directory disjoint from every sandbox deny root. Every cell's OS permission
-profile contains an explicit deny for that exact root, and both the canary
-receipt and scoring-time command validation bind it. The runner then writes one
+directory disjoint from every protected boundary root. It is omitted from the
+allowlist, and its exact path is bound by both the canary receipt and immutable
+run-set metadata. The runner then writes one
 immutable `run-set.json` for the exact 192-cell matrix. It binds a random batch
 ID, each question/arm/repetition,
 the exact `runs_root`, the fixed 900-second timeout, the Codex executable and

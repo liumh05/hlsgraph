@@ -215,7 +215,15 @@ The trace stores a SHA-256 of the query, never the raw query.
 
 An optional semantic channel is available only through the local-only
 `hlsgraph.embedders.v1` plugin protocol. HLSGraph does not download a model,
-enable network access, or silently change the default profile.
+enable network access, or silently change the default profile. Selecting an
+embedder is nevertheless a trust decision: it is installed in-process code and
+receives each private chunk's plaintext. Its `local_only` declaration is
+validated as a protocol contract, not enforced as a filesystem/network/memory
+sandbox. During each `embed` call HLSGraph holds a process-wide lock, redirects
+OS fd 1/2 to a null sink, restores them afterward, and reduces failures to an
+exception class name with no message or cause. Those controls cover the call's
+standard descriptors and error surface only; reviewed plugins and ordinary OS
+process isolation remain necessary.
 
 ## Interfaces
 
@@ -246,6 +254,73 @@ Markdown, and HTML have bounded built-in parsers. Other formats, including PDF,
 require an explicitly selected `hlsgraph.knowledge_parsers.v1` local plugin;
 OCR and network access are not enabled by default.
 
+### Direct local PDF indexing
+
+The `pdf` extra registers the built-in entry point named `pdf`. It uses pypdf
+locally and does not require converting the manual to Markdown first:
+
+```bash
+python -m pip install "hlsgraph[pdf]"
+hlsgraph knowledge index --project /path/to/project \
+  --path /private/docs/ug1399-vitis-hls-en-us-2024.2.pdf \
+  --document-id local.amd.ug1399 --document-version 2024.2 \
+  --title "Vitis HLS User Guide 2024.2"
+hlsgraph knowledge build-local-index --project /path/to/project \
+  --parser pdf --parser-config extraction_mode=layout \
+  --parser-timeout-s 60 --max-parsed-chars 8388608
+```
+
+`knowledge index` records only path metadata, size, timestamp, and SHA-256.
+`build-local-index` revalidates those values, gives the parser verified bytes
+plus bounded metadata that omits the source URI/path, and invokes its `parse`
+method in a spawn child whose OS stdout and stderr descriptors are discarded
+first. The original PDF bytes remain at the user-selected file location; the
+private sidecar SQLite stores only the resulting chunks and index metadata.
+
+The child is a timeout/output control, not a security sandbox. A generic parser
+plugin is trusted installed code: HLSGraph does not enforce its declared
+no-network capability, restrict its filesystem, or provide hard memory
+isolation. The current host accepts at most 32 MiB per document and at most
+8,388,608 Unicode characters of parser output (about 32 MiB in the worst-case
+UTF-8 encoding); parser timeout defaults to 10 seconds and is configurable from
+0.1 to 60 seconds. The PDF parser defaults to 4,096 pages and permits an explicit
+maximum no greater than 10,000. A timeout, malformed/encrypted PDF, hash change,
+excessive page count, excessive output, result-channel failure, or
+stdio-containment failure is reported as a sanitized error and does not publish
+a partial index. OS fd 1/2 are discarded only during `parse`; this does not stop
+trusted code from reopening handles or doing background work. These controls do
+not guarantee a peak-memory ceiling, so only reviewed parser plugins should be
+installed and selected.
+
+Each text-bearing PDF page becomes a private heading named `PDF page N`; this is
+the page anchor returned with an authorized hit. Text extraction does not prove
+layout fidelity: figures, equations, reading order, scanned pages, and complex
+tables may be incomplete. For those documents, MinerU is an explicit local
+plugin/preprocessing choice, not a required dependency or an automatic network
+fallback. Its Markdown should preserve page/section markers and stay private.
+
+Recall uses the same unified pipeline as other evidence. The local sidecar
+contributes FTS5/BM25 candidates (and optional explicitly configured local
+embeddings); weighted RRF combines that channel with graph facts, observations,
+diagnostics, and public knowledge rules. Local PDF hits remain in the separate
+`local_unreviewed` plane. They cannot create graph edges, change authority, or
+become knowledge rules. For example:
+
+```bash
+hlsgraph retrieve --project /path/to/project --plane local \
+  "What does the guide say about pipeline initiation interval?"
+```
+
+That command returns metadata and citations by default. Returning the bounded
+page excerpt additionally requires project policy
+`privacy.mcp_source_snippets = "bounded"` and the trusted local request flag:
+
+```bash
+hlsgraph retrieve --project /path/to/project --plane local \
+  --include-private-snippets \
+  "What does the guide say about pipeline initiation interval?"
+```
+
 A user may instead run an external converter such as MinerU on a lawfully held
 PDF and index the resulting UTF-8 Markdown with the built-in parser. That is a
 user-side preprocessing path, not a build or runtime dependency of HLSGraph.
@@ -259,11 +334,17 @@ Metadata search is safe by default. A bounded excerpt requires both
 `include_private_snippets=true` in the trusted local request. Before returning
 content, HLSGraph revalidates project containment, link/reparse status, size,
 SHA-256, and source/document identity. Each query reads `chunks.sqlite` once
-through a stable file descriptor, verifies that exact byte snapshot against the
-manifest, and deserializes those bytes into an in-memory SQLite connection. It
-never reopens the database path after verification, and fails closed when the
-runtime lacks SQLite deserialize support. REST, bundles, ML exports, wheels,
-and source distributions never contain sidecar chunks.
+through a stable file descriptor and verifies that exact byte snapshot against
+the manifest. When SQLite deserialize is available, those same bytes are loaded
+directly into an in-memory connection. Otherwise HLSGraph writes only the
+already verified bytes into a fresh private temporary directory (mode `0700`)
+and file (mode `0600`), revalidates file identity, bytes, and SHA-256 before and
+after use, opens that staged file read-only/immutable, and backs it up into the
+in-memory connection. The mutable user sidecar path is never reopened after the
+verified read. Canonical SQLite databases, GraphBundles, exports, generated
+reports, wheels, source distributions, and releases never contain sidecar
+chunks; the private sidecar SQLite does contain them and must be protected as
+private data. REST never returns private chunks.
 
 Private excerpt attempts append a local audit record at
 `.hlsgraph/private/retrieval-access.jsonl`. Its schema is deliberately limited

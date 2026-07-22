@@ -14,13 +14,18 @@ from typing import Any, Iterable, Sequence
 from .common import (
     ARM_IDS, EvalManifestError, asset_digest, canonical_json, harness_digest,
     load_corpus_lock, load_environment_lock, load_manifest, load_questions,
-    safe_relative_path, sha256_bytes, sha256_file, verify_evaluation_checkout,
+    RETRIEVAL_AUDIT_SCHEMA_VERSION, safe_relative_path, sha256_bytes, sha256_file,
+    verify_evaluation_checkout,
     verify_prepared_workspace,
 )
-from .parse_trace import normalize_trace, validate_trace_policy
+from .parse_trace import (
+    _private_snippet_access_id, normalize_trace, validate_trace_policy,
+)
 from .runner import (
-    CODEGRAPH_ENV, DISABLED_CODEX_FEATURES, PERMISSION_PROFILE, _permission_overrides,
+    CODEGRAPH_ENV, DISABLED_CODEX_FEATURES, PERMISSION_PROFILE,
+    _audit_overlay_from_descriptor, _contained_mcp_command, _permission_overrides,
     _require_isolated_work_root, _validate_permission_canary,
+    _validate_treatment_mcp_canary,
     _verify_boundary_canary, build_prompt, build_run_plan,
 )
 from .setup_corpus import _provenance
@@ -574,6 +579,7 @@ def _snapshot_run(
         "prompt.txt": 128 * 1024,
         "codex.jsonl": 256 * 1024 * 1024,
         "codex.stderr.log": 64 * 1024 * 1024,
+        "retrieval-access.jsonl": 4 * 1024 * 1024,
     }
     source = {
         name: _stable_run_bytes(run_dir / name, max_bytes=limit)
@@ -593,6 +599,175 @@ def _snapshot_run(
     normalized = normalize_trace(events)
     normalized["run"] = run
     return source, normalized, events
+
+
+def _frozen_corpus_excerpt(
+    *, workspace: Path, corpus_id: str, proof: dict[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct one claimed excerpt from frozen corpus bytes, not MCP metadata."""
+
+    corpus = next(
+        (item for item in load_corpus_lock()["corpora"] if item["id"] == corpus_id),
+        None,
+    )
+    if corpus is None:
+        raise ValueError("private source receipt names an unknown corpus")
+    matching = [
+        item for item in corpus["files"]
+        if item.get("sha256") == proof.get("content_sha256")
+    ]
+    if len(matching) != 1:
+        raise ValueError("private source receipt does not identify one frozen corpus file")
+    relative = safe_relative_path(matching[0]["destination"])
+    root = Path(os.path.abspath(os.fspath(workspace)))
+    lexical = root / relative
+    current = root
+    for part in relative.parts:
+        current /= part
+        is_junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or bool(callable(is_junction) and is_junction()):
+            raise ValueError("frozen corpus receipt path is linked")
+    try:
+        lexical.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise ValueError("frozen corpus receipt path escapes its workspace") from exc
+    source = _stable_run_bytes(lexical, max_bytes=64 * 1024 * 1024)
+    if sha256_bytes(source) != matching[0]["sha256"]:
+        raise ValueError("frozen corpus bytes changed before receipt validation")
+    try:
+        lines = source.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("private source receipt points to a non-UTF-8 corpus file") from exc
+    start, end = proof.get("start_line"), proof.get("end_line")
+    if (isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or start < 1 or end < start or end > len(lines)
+            or end - start + 1 > 80):
+        raise ValueError("private source receipt has an invalid frozen line range")
+    excerpt = "\n".join(lines[start - 1:end])
+    if len(excerpt) > 4_000:
+        excerpt = excerpt[:4_000]
+    encoded = excerpt.encode("utf-8")
+    expected = {
+        "access_id": _private_snippet_access_id(
+            matching[0]["sha256"], start, end, len(encoded),
+        ),
+        "content_sha256": matching[0]["sha256"],
+        "start_line": start,
+        "end_line": end,
+        "byte_count": len(encoded),
+        "excerpt_sha256": sha256_bytes(encoded),
+    }
+    if proof != expected:
+        raise ValueError("private source receipt differs from frozen corpus bytes")
+    return expected
+
+
+def _score_retrieval_audit(
+    data: bytes, run: dict[str, Any], normalized: dict[str, Any], *, arm: str,
+    workspace: Path | None = None, corpus_id: str | None = None,
+) -> dict[str, Any]:
+    """Independently bind source-read credit to output and audit evidence."""
+
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("retrieval audit is not ASCII JSONL") from exc
+    if text and not text.endswith("\n"):
+        raise ValueError("retrieval audit lacks its final newline")
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line:
+            raise ValueError("retrieval audit contains a blank record")
+        record = _strict_json_bytes(
+            line.encode("ascii"), context=f"retrieval-access.jsonl:{line_number}",
+        )
+        if not isinstance(record, dict) or set(record) != {
+            "content_sha256", "anchor", "result", "byte_count",
+        }:
+            raise ValueError("retrieval audit exposes non-metadata fields")
+        anchor = record.get("anchor")
+        byte_count = record.get("byte_count")
+        if (not isinstance(record.get("content_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", record["content_sha256"]) is None
+                or not isinstance(record.get("result"), str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", record["result"]) is None
+                or isinstance(byte_count, bool) or not isinstance(byte_count, int)
+                or not 0 <= byte_count <= 16_000
+                or not isinstance(anchor, dict)
+                or set(anchor) - {"kind", "start_line", "end_line", "chunk_id"}):
+            raise ValueError("retrieval audit record violates its public schema")
+        for key, value in anchor.items():
+            if key in {"start_line", "end_line"}:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError("retrieval audit line anchor is invalid")
+            elif (not isinstance(value, str) or not value or len(value) > 128
+                  or "\x00" in value):
+                raise ValueError("retrieval audit string anchor is invalid")
+        records.append(record)
+    if len(records) > 10_000:
+        raise ValueError("retrieval audit exceeds its record limit")
+    returned = [item for item in records if item["result"] == "returned"]
+    expected_status = "verified" if arm == "hlsgraph-v03" else "not_applicable"
+    receipt = run.get("retrieval_audit")
+    expected_receipt = {
+        "schema_version": RETRIEVAL_AUDIT_SCHEMA_VERSION,
+        "status": expected_status,
+        "sha256": sha256_bytes(data),
+        "record_count": len(records),
+        "returned_count": len(returned),
+        "returned_bytes": sum(int(item["byte_count"]) for item in returned),
+    }
+    expected_receipt["receipt_sha256"] = sha256_bytes(canonical_json(expected_receipt))
+    if receipt != expected_receipt:
+        raise ValueError("run retrieval audit receipt is stale or relabelled")
+    private_calls = normalized.get("private_snippet_calls")
+    if not isinstance(private_calls, list):
+        raise ValueError("normalized trace lacks private snippet receipts")
+    if arm != "hlsgraph-v03":
+        if data or private_calls:
+            raise ValueError("non-v0.3 arm contains private retrieval evidence")
+        return {**expected_receipt, "source_access_calls": 0}
+    if workspace is None or not isinstance(corpus_id, str) or not corpus_id:
+        raise ValueError("v0.3 retrieval scoring lacks its frozen corpus workspace")
+    audit_access_ids: list[str] = []
+    for item in returned:
+        anchor = item.get("anchor")
+        if (not isinstance(anchor, dict)
+                or not isinstance(anchor.get("start_line"), int)
+                or isinstance(anchor.get("start_line"), bool)
+                or not isinstance(anchor.get("end_line"), int)
+                or isinstance(anchor.get("end_line"), bool)):
+            raise ValueError("returned retrieval audit lacks an exact line anchor")
+        audit_access_ids.append(_private_snippet_access_id(
+            item["content_sha256"], anchor["start_line"], anchor["end_line"],
+            item["byte_count"],
+        ))
+    if len(audit_access_ids) != len(set(audit_access_ids)):
+        raise ValueError("returned retrieval audit contains duplicate access identities")
+    proof_access_ids: list[str] = []
+    credited_calls = 0
+    for call in private_calls:
+        if (not isinstance(call, dict) or not isinstance(call.get("receipts"), list)
+                or not call["receipts"]
+                or not str(call.get("name", "")).casefold().replace("-", "_").endswith(
+                    "explore"
+                )):
+            raise ValueError("private source receipt is not bound to v0.3 explore")
+        for proof in call["receipts"]:
+            if not isinstance(proof, dict):
+                raise ValueError("private source output receipt is malformed")
+            verified = _frozen_corpus_excerpt(
+                workspace=workspace, corpus_id=corpus_id, proof=proof,
+            )
+            proof_access_ids.append(verified["access_id"])
+        credited_calls += 1
+    if (len(proof_access_ids) != len(set(proof_access_ids))
+            or set(proof_access_ids) != set(audit_access_ids)):
+        raise ValueError(
+            "private source outputs and returned audit records are not one-to-one"
+        )
+    return {**expected_receipt, "source_access_calls": credited_calls}
 
 
 def _validate_run_metadata(
@@ -632,6 +807,9 @@ def _validate_run_metadata(
     permission_canary = run_set.get("permission_canary")
     if isinstance(permission_canary, dict) and "canary_sha256" in permission_canary:
         expected["permission_canary_sha256"] = permission_canary["canary_sha256"]
+    mcp_canary = run_set.get("mcp_containment_canary")
+    if isinstance(mcp_canary, dict) and "canary_sha256" in mcp_canary:
+        expected["mcp_containment_canary_sha256"] = mcp_canary["canary_sha256"]
     mismatched = sorted(key for key, value in expected.items() if run.get(key) != value)
     if mismatched or run_dir.name != expected_cell["run_id"]:
         raise ValueError(
@@ -666,7 +844,7 @@ def _validate_run_metadata(
 
 def _validate_execution_contract(
     cell: dict[str, Any], work_root: Path, environment: dict[str, Any], *,
-    runs_root: Path,
+    runs_root: Path, batch_id: str | None = None,
 ) -> None:
     command = cell.get("command_argv")
     if not isinstance(command, list) or not command or any(
@@ -743,16 +921,24 @@ def _validate_execution_contract(
     has_codegraph = "mcp_servers.codegraph." in joined
     has_hlsgraph = "mcp_servers.hlsgraph." in joined
     arm = cell["arm"]
+    audit_descriptor = cell.get("retrieval_audit")
+    if batch_id is None and isinstance(audit_descriptor, dict):
+        parts = Path(str(audit_descriptor.get("path", ""))).parts
+        if len(parts) >= 2:
+            batch_id = parts[1]
+    audit_overlay = _audit_overlay_from_descriptor(
+        work_root, Path(expected_workspace), audit_descriptor,
+        batch_id=str(batch_id or ""), run_id=str(cell.get("run_id", "")),
+        require_empty=False,
+    )
+    if (arm == "hlsgraph-v03") != (audit_overlay is not None):
+        raise ValueError("run-set cell has the wrong retrieval audit contract for its arm")
     if arm == "native" and (has_codegraph or has_hlsgraph):
         raise ValueError("native arm unexpectedly enables an MCP server")
     if arm == "codegraph" and (not has_codegraph or has_hlsgraph):
         raise ValueError("CodeGraph arm has the wrong MCP server")
     if arm.startswith("hlsgraph-") and (not has_hlsgraph or has_codegraph):
         raise ValueError("HLSGraph arm has the wrong MCP server")
-    if arm == "hlsgraph-v02" and "HLSGRAPH_MCP_TOOLS=\"all\"" not in joined:
-        raise ValueError("v0.2 arm does not use the frozen all-tools mode")
-    if arm == "hlsgraph-v03" and "HLSGRAPH_MCP_TOOLS=\"explore\"" not in joined:
-        raise ValueError("v0.3 arm does not use the frozen explore-only mode")
     config_values = [
         command[index + 1] for index, value in enumerate(command[:-1]) if value == "-c"
     ]
@@ -770,14 +956,10 @@ def _validate_execution_contract(
     if arm == "codegraph":
         expected_config_keys.update({
             "mcp_servers.codegraph.command", "mcp_servers.codegraph.args",
-            *{
-                f"mcp_servers.codegraph.env.{key}" for key in CODEGRAPH_ENV
-            },
         })
     elif arm.startswith("hlsgraph-"):
         expected_config_keys.update({
             "mcp_servers.hlsgraph.command", "mcp_servers.hlsgraph.args",
-            "mcp_servers.hlsgraph.env.HLSGRAPH_MCP_TOOLS",
         })
     actual_config_keys = [value.split("=", 1)[0] for value in config_values if "=" in value]
     if (len(actual_config_keys) != len(config_values)
@@ -790,13 +972,6 @@ def _validate_execution_contract(
     if any(actual_config.get(key) != expected_value
            for key, expected_value in expected_permission_config.items()):
         raise ValueError("run-set command changes the frozen permission profile")
-    if arm == "codegraph" and any(
-        actual_config.get(f"mcp_servers.codegraph.env.{key}")
-        != json.dumps(value, ensure_ascii=False)
-        for key, value in CODEGRAPH_ENV.items()
-    ):
-        raise ValueError("run-set command changes the frozen CodeGraph offline environment")
-
     def parsed_config(key: str) -> Any:
         try:
             return json.loads(actual_config[key])
@@ -807,13 +982,17 @@ def _validate_execution_contract(
         node = runtime.get("node") if isinstance(runtime, dict) else None
         entrypoint = runtime.get("codegraph_entrypoint") if isinstance(runtime, dict) else None
         codegraph_args = parsed_config("mcp_servers.codegraph.args")
-        if (not isinstance(node, dict) or not isinstance(entrypoint, dict)
+        expected_command, expected_args = _contained_mcp_command(
+            arm=arm, workspace=Path(expected_workspace),
+            server_command=str(node.get("path", "")),
+            server_args=[str(entrypoint.get("path", "")), "serve", "--mcp"],
+            server_env=dict(CODEGRAPH_ENV), sandbox_boundary=boundary,
+        ) if isinstance(node, dict) and isinstance(entrypoint, dict) else ("", [])
+        if (not isinstance(codegraph_args, list)
                 or not same_lexical_path(
-                    parsed_config("mcp_servers.codegraph.command"), node.get("path")
+                    parsed_config("mcp_servers.codegraph.command"), expected_command
                 )
-                or not isinstance(codegraph_args, list) or len(codegraph_args) != 3
-                or not same_lexical_path(codegraph_args[0], entrypoint.get("path"))
-                or codegraph_args[1:] != ["serve", "--mcp"]):
+                or codegraph_args != expected_args):
             raise ValueError("run-set command changes the prepared CodeGraph runtime or args")
     elif arm.startswith("hlsgraph-"):
         python_key = "hlsgraph_v02" if arm == "hlsgraph-v02" else "hlsgraph_v03"
@@ -822,16 +1001,17 @@ def _validate_execution_contract(
             if isinstance(runtime, dict) else None
         )
         expected_mode = "all" if arm == "hlsgraph-v02" else "explore"
-        if (not isinstance(python_identity, dict)
-                or not same_lexical_path(
-                    parsed_config("mcp_servers.hlsgraph.command"),
-                    python_identity.get("path"),
-                )
-                or parsed_config("mcp_servers.hlsgraph.args") != [
-                    "-m", "hlsgraph.mcp.server", expected_workspace,
-                ]
-                or parsed_config("mcp_servers.hlsgraph.env.HLSGRAPH_MCP_TOOLS")
-                != expected_mode):
+        expected_command, expected_args = _contained_mcp_command(
+            arm=arm, workspace=Path(expected_workspace),
+            server_command=str(python_identity.get("path", "")),
+            server_args=["-m", "hlsgraph.mcp.server", expected_workspace],
+            server_env={"HLSGRAPH_MCP_TOOLS": expected_mode},
+            sandbox_boundary=boundary, audit_overlay=audit_overlay,
+            audit_overlay_require_empty=False,
+        ) if isinstance(python_identity, dict) else ("", [])
+        if (not same_lexical_path(
+                parsed_config("mcp_servers.hlsgraph.command"), expected_command
+                ) or parsed_config("mcp_servers.hlsgraph.args") != expected_args):
             raise ValueError("run-set command changes the prepared HLSGraph runtime or args")
     reasoning = next(
         value.split("=", 1)[1] for value in config_values
@@ -870,6 +1050,10 @@ def load_run_set(
             value.get("permission_canary"),
             environment["runtime_identity"]["sandbox_boundary"],
             runs_root=runs_root,
+        )
+        _validate_treatment_mcp_canary(
+            value.get("mcp_containment_canary"),
+            environment["runtime_identity"]["sandbox_boundary"],
         )
     except RuntimeError as exc:
         raise EvalManifestError(str(exc)) from exc
@@ -920,6 +1104,7 @@ def load_run_set(
             raise EvalManifestError(f"run-set cell has a relabelled prompt: {run_id}")
         _validate_execution_contract(
             cell, work_root, environment, runs_root=runs_root,
+            batch_id=value["batch_id"],
         )
     expected_dirs = set(expected_records)
     actual_dirs = {item.name for item in runs_root.iterdir() if item.is_dir()}
@@ -947,6 +1132,11 @@ def score_run(
     )
     verify_prepared_workspace(environment, work_root, run["arm"], run["corpus_id"])
     verify_workspace_corpus(workspace, run["corpus_id"])
+    retrieval_audit = _score_retrieval_audit(
+        source_bytes["retrieval-access.jsonl"], run, normalized,
+        arm=str(run.get("arm", "")), workspace=workspace,
+        corpus_id=str(run.get("corpus_id", "")),
+    )
     trace_policy = validate_trace_policy(
         events, arm=run["arm"], workspace=workspace,
         boundary_canary=boundary_canary,
@@ -998,8 +1188,11 @@ def score_run(
         "execution_index": run["execution_index"],
         **score,
         "trace_policy": trace_policy,
+        "retrieval_audit": retrieval_audit,
         "tool_calls": normalized["tool_calls"],
-        "file_reads": normalized["file_reads"],
+        "file_reads": (
+            normalized["file_reads"] + retrieval_audit["source_access_calls"]
+        ),
         "file_read_semantics": normalized["file_read_semantics"],
         "input_tokens": usage["input_tokens"],
         "cached_input_tokens": usage["cached_input_tokens"],

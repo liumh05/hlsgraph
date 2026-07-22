@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "citation_audit_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "citation_url": {"format": "uri", "type": "string"},
+              "evidence_url": {"format": "uri", "type": "string"},
+              "identity": {"type": "null"},
+              "resolver_id": {"const": "direct.v1"}
+            },
+            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+          },
+          {
+            "properties": {
+              "citation_url": {"format": "uri", "type": "string"},
+              "evidence_url": {"format": "uri", "type": "string"},
+              "identity": {
+                "additionalProperties": false,
+                "properties": {
+                  "document_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "document_slug": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"},
+                  "publication_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
+                  "version": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"}
+                },
+                "required": ["publication_id", "document_id", "document_slug", "version", "title"],
+                "type": "object"
+              },
+              "resolver_id": {"const": "amd.docs.khub.map.v1"}
+            },
+            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+          },
+          {
+            "properties": {
+              "citation_url": {"format": "uri", "type": "string"},
+              "evidence_url": {"format": "uri", "type": "string"},
+              "identity": {
+                "additionalProperties": false,
+                "properties": {
+                  "content_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "document_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "document_slug": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"},
+                  "publication_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
+                  "topic_title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
+                  "toc_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
+                  "version": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"}
+                },
+                "required": ["publication_id", "document_id", "document_slug", "version", "title", "toc_id", "content_id", "topic_title"],
+                "type": "object"
+              },
+              "resolver_id": {"const": "amd.docs.khub.topic.v1"}
+            },
+            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+          }
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": {
+      "const": "hlsgraph.knowledge-review.evidence-map.v1"
+    }
+  },
+  "required": ["schema_version", "citation_audit_sha256", "entries"],
+  "type": "object"
+}

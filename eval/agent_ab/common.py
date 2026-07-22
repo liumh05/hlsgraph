@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 
 HERE = Path(__file__).resolve().parent
@@ -31,7 +32,14 @@ STATIC_CASE_SCHEMA_VERSION = "hlsgraph.agent_eval.static_case.v1"
 ARM_IDS = ("native", "codegraph", "hlsgraph-v02", "hlsgraph-v03")
 ENVIRONMENT_SCHEMA_VERSION = "hlsgraph.agent_eval.environment.v3"
 RUNTIME_IDENTITY_SCHEMA_VERSION = "hlsgraph.agent_eval.runtime_identity.v2"
-SANDBOX_BOUNDARY_SCHEMA_VERSION = "hlsgraph.agent_eval.sandbox_boundary.v1"
+SANDBOX_BOUNDARY_SCHEMA_VERSION = "hlsgraph.agent_eval.sandbox_boundary.v2"
+SANDBOX_ALLOW_TREE_ALGORITHM = "hlsgraph.sandbox_allow_tree.v1"
+SANDBOX_FILESYSTEM_POLICY = "default_deny_minimal_exact_allowlist_v1"
+SANDBOX_MINIMAL_TOKEN = ":minimal"
+MCP_CONTAINMENT_SCHEMA_VERSION = "hlsgraph.agent_eval.mcp_containment.v1"
+MCP_SYSTEM_PROFILE = "ubuntu_22_04_usr_ro_tmpfs_no_network_v1"
+RETRIEVAL_ACCESS_RELATIVE = Path(".hlsgraph/private/retrieval-access.jsonl")
+RETRIEVAL_AUDIT_SCHEMA_VERSION = "hlsgraph.agent_eval.retrieval_audit.v1"
 CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION = "hlsgraph.agent_eval.codegraph_build.v1"
 RUNTIME_TREE_ALGORITHM = "hlsgraph.runtime_tree.v1"
 OFFICIAL_CODEX_VERSION = "codex-cli 0.144.0"
@@ -204,6 +212,157 @@ def runtime_tree_identity(root: Path) -> str:
 
     digest = hashlib.sha256()
     digest.update(RUNTIME_TREE_ALGORITHM.encode("ascii") + b"\0")
+    for _relative, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
+    return digest.hexdigest()
+
+
+def sandbox_allow_tree_identity(root: Path) -> str:
+    """Hash an exact runtime subtree that may contain normal venv links.
+
+    The frozen CodeGraph identity deliberately rejects every escaping link.
+    A Python virtual environment is different: its launcher normally contains
+    a byte-stable absolute link to ``/usr/bin/python3`` and ``lib64`` points to
+    ``lib``.  The default-deny sandbox already supplies the Codex ``:minimal``
+    system image, so this separate algorithm records link text while allowing
+    only resolved targets inside the tree or the minimal system prefixes.
+    It never follows links while enumerating the allowlisted runtime bytes.
+    """
+
+    lexical_root = Path(os.path.abspath(os.fspath(root)))
+    _assert_unlinked_within(Path(lexical_root.anchor), lexical_root)
+    if _linked(lexical_root) or not lexical_root.is_dir():
+        raise EvalManifestError(
+            f"sandbox runtime allow root is missing or linked: {lexical_root}"
+        )
+    resolved_root = lexical_root.resolve(strict=True)
+    minimal_prefixes = tuple(
+        Path(value).resolve(strict=True)
+        for value in ("/bin", "/lib", "/lib64", "/usr")
+        if Path(value).exists()
+    )
+    records: list[tuple[str, bytes]] = []
+    pending = [lexical_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            _assert_unlinked_within(lexical_root, directory)
+            before_directory = directory.lstat()
+            if not stat.S_ISDIR(before_directory.st_mode) or _linked(directory):
+                raise EvalManifestError(
+                    f"sandbox runtime directory became linked: {directory}"
+                )
+            directory.resolve(strict=True).relative_to(resolved_root)
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+            _assert_unlinked_within(lexical_root, directory)
+            after_directory = directory.lstat()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise EvalManifestError(
+                f"cannot enumerate sandbox runtime tree: {directory}: {exc}"
+            ) from exc
+        directory_identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns,
+        )
+        if directory_identity(before_directory) != directory_identity(after_directory):
+            raise EvalManifestError(
+                f"sandbox runtime directory changed while enumerated: {directory}"
+            )
+        relative_directory = (
+            "." if directory == lexical_root
+            else directory.relative_to(lexical_root).as_posix()
+        )
+        records.append((
+            relative_directory,
+            b"D\0" + relative_directory.encode("utf-8") + b"\0"
+            + f"{stat.S_IMODE(before_directory.st_mode):04o}".encode("ascii") + b"\0",
+        ))
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                _assert_unlinked_within(lexical_root, path.parent)
+                relative = path.relative_to(lexical_root).as_posix()
+                relative_bytes = relative.encode("utf-8", errors="strict")
+                before = path.lstat()
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise EvalManifestError(
+                    f"invalid sandbox runtime entry: {path}: {exc}"
+                ) from exc
+            mode = before.st_mode
+            if stat.S_ISDIR(mode):
+                pending.append(path)
+                continue
+            if stat.S_ISREG(mode):
+                data = _stable_file_bytes(path)
+                _assert_unlinked_within(lexical_root, path.parent)
+                after = path.lstat()
+                identity = lambda info: (
+                    info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                    info.st_mtime_ns,
+                )
+                if identity(before) != identity(after):
+                    raise EvalManifestError(
+                        f"sandbox runtime file changed while hashed: {relative}"
+                    )
+                records.append((
+                    relative,
+                    b"F\0" + relative_bytes + b"\0"
+                    + f"{stat.S_IMODE(mode):04o}".encode("ascii") + b"\0"
+                    + hashlib.sha256(data).digest() + b"\0",
+                ))
+                continue
+            if stat.S_ISLNK(mode):
+                try:
+                    _assert_unlinked_within(lexical_root, path.parent)
+                    target = os.readlink(path)
+                    resolved_target = path.resolve(strict=True)
+                    target_info = resolved_target.stat()
+                except (OSError, RuntimeError) as exc:
+                    raise EvalManifestError(
+                        f"sandbox runtime link is invalid: {relative}"
+                    ) from exc
+                inside_tree = _path_is_within(resolved_target, resolved_root)
+                inside_minimal = any(
+                    _path_is_within(resolved_target, prefix)
+                    for prefix in minimal_prefixes
+                )
+                if (not inside_tree and not inside_minimal) or not (
+                    stat.S_ISREG(target_info.st_mode)
+                    or stat.S_ISDIR(target_info.st_mode)
+                ):
+                    raise EvalManifestError(
+                        f"sandbox runtime link escapes the declared minimal roots: {relative}"
+                    )
+                after = path.lstat()
+                _assert_unlinked_within(lexical_root, path.parent)
+                if (
+                    before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                    before.st_mtime_ns, target,
+                ) != (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                    after.st_mtime_ns, os.readlink(path),
+                ):
+                    raise EvalManifestError(
+                        f"sandbox runtime link changed while hashed: {relative}"
+                    )
+                records.append((
+                    relative,
+                    b"L\0" + relative_bytes + b"\0"
+                    + target.encode("utf-8", errors="strict") + b"\0",
+                ))
+                continue
+            raise EvalManifestError(
+                f"sandbox runtime tree contains a special file: {relative}"
+            )
+        _assert_unlinked_within(lexical_root, directory)
+        final_directory = directory.lstat()
+        if directory_identity(before_directory) != directory_identity(final_directory):
+            raise EvalManifestError(
+                f"sandbox runtime directory changed while hashed: {directory}"
+            )
+
+    digest = hashlib.sha256()
+    digest.update(SANDBOX_ALLOW_TREE_ALGORITHM.encode("ascii") + b"\0")
     for _relative, record in sorted(records, key=lambda item: item[0]):
         digest.update(record)
     return digest.hexdigest()
@@ -443,11 +602,15 @@ def require_official_ext4_directory(
     return lexical
 
 
-def _resolve_executable(value: str, label: str) -> Path:
+def _resolve_executable(
+    value: str, label: str, *, reject_links: bool = False,
+) -> Path:
     argv = resolve_command_argv(value)
     if len(argv) != 1:
         raise EvalManifestError(f"official {label} must be one direct executable")
-    return _require_regular_ext4_path(Path(argv[0]), label)
+    return _require_regular_ext4_path(
+        Path(argv[0]), label, reject_links=reject_links,
+    )
 
 
 def official_process_environment() -> dict[str, str]:
@@ -468,7 +631,19 @@ def official_process_environment() -> dict[str, str]:
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
         "WSL_DISTRO_NAME", "WSL_INTEROP",
     )
-    return {key: os.environ[key] for key in allowed if os.environ.get(key)}
+    environment = {key: os.environ[key] for key in allowed if os.environ.get(key)}
+    for key, value in environment.items():
+        if "proxy" not in key.casefold():
+            continue
+        try:
+            parsed = urlsplit(value)
+        except ValueError as exc:
+            raise EvalManifestError("official evaluation has an invalid proxy URL") from exc
+        if parsed.username is not None or parsed.password is not None:
+            raise EvalManifestError(
+                "official evaluation forbids credentials in forwarded proxy URLs"
+            )
+    return environment
 
 
 def _version_output(command: list[str]) -> str:
@@ -783,7 +958,10 @@ def capture_official_runtime_identity(
                     f"official {left_name} and {right_name} must be disjoint"
                 )
 
-    codex = _resolve_executable(codex_command, "Codex CLI")
+    codex = _resolve_executable(codex_command, "Codex CLI", reject_links=True)
+    if not _path_is_within(codex, runtime_root):
+        raise EvalManifestError("official Codex CLI must be inside the runtime root")
+    _assert_unlinked_within(runtime_root, codex)
     with codex.open("rb") as codex_handle:
         codex_magic = codex_handle.read(4)
     if codex_magic != b"\x7fELF":
@@ -800,7 +978,9 @@ def capture_official_runtime_identity(
         raise EvalManifestError(
             "official CodeGraph command must be exactly node plus its frozen JS entrypoint"
         )
-    node = _resolve_executable(codegraph_parts[0], "Node executable")
+    node = _resolve_executable(
+        codegraph_parts[0], "Node executable", reject_links=True,
+    )
     node_version = _version_output([str(node), "--version"])
     match = re.fullmatch(r"v(\d+)\.\d+\.\d+", node_version)
     if match is None or not (20 <= int(match.group(1)) < 25):
@@ -839,7 +1019,7 @@ def capture_official_runtime_identity(
         *drvfs_roots, *home_roots,
     }
     corpus_ids = [item["id"] for item in load_corpus_lock()["corpora"]]
-    deny_catalog: dict[str, Any] = {
+    workspace_catalog: dict[str, Any] = {
         "arm_roots": {
             arm: (work_root / arm).as_posix() for arm in ARM_IDS
         },
@@ -852,20 +1032,145 @@ def capture_official_runtime_identity(
             (work_root / "_cache").as_posix(),
         ],
     }
+    codex_allow = {
+        "path": codex.as_posix(), "kind": "file",
+        "algorithm": "sha256", "sha256": sha256_file(codex),
+    }
+    node_allow = {
+        "path": node.as_posix(), "kind": "file",
+        "algorithm": "sha256", "sha256": sha256_file(node),
+    }
+    package_json = _require_regular_ext4_path(
+        codegraph_repository / "package.json", "CodeGraph package.json",
+    )
+    package_allow = {
+        "path": package_json.as_posix(), "kind": "file",
+        "algorithm": "sha256", "sha256": sha256_file(package_json),
+    }
+    dist_allow = {
+        "path": codegraph_build["dist"]["path"], "kind": "tree",
+        "algorithm": RUNTIME_TREE_ALGORITHM,
+        "sha256": codegraph_build["dist"]["tree_sha256"],
+    }
+    dependencies_allow = {
+        "path": codegraph_build["dependencies"]["path"], "kind": "tree",
+        "algorithm": RUNTIME_TREE_ALGORITHM,
+        "sha256": codegraph_build["dependencies"]["tree_sha256"],
+    }
+
+    def venv_allow(python_value: str, label: str) -> list[dict[str, str]]:
+        python_path = Path(resolve_command_argv(python_value)[0])
+        environment_root = python_path.parent.parent
+        if (
+            not _path_is_within(environment_root, runtime_root)
+            or environment_root == runtime_root
+            or not (environment_root / "pyvenv.cfg").is_file()
+        ):
+            raise EvalManifestError(
+                f"official {label} must be an isolated venv inside runtime root"
+            )
+        environment_root = _require_regular_ext4_path(
+            environment_root, f"{label} environment", directory=True, reject_links=True,
+        )
+        _assert_unlinked_within(runtime_root, environment_root)
+        bin_root = _require_regular_ext4_path(
+            python_path.parent, f"{label} launcher directory",
+            directory=True, reject_links=True,
+        )
+        _assert_unlinked_within(runtime_root, bin_root)
+        config = _require_regular_ext4_path(
+            environment_root / "pyvenv.cfg", f"{label} pyvenv.cfg",
+        )
+        _assert_unlinked_within(runtime_root, config)
+        purelib_text = _version_output([
+            str(python_path), "-I", "-c",
+            "import sysconfig;print(sysconfig.get_path('purelib'))",
+        ])
+        purelib = _require_regular_ext4_path(
+            Path(purelib_text), f"{label} site-packages",
+            directory=True, reject_links=True,
+        )
+        if not _path_is_within(purelib, environment_root):
+            raise EvalManifestError(
+                f"official {label} site-packages escapes its isolated venv"
+            )
+        _assert_unlinked_within(environment_root, purelib)
+        return [
+            {
+                "path": bin_root.as_posix(), "kind": "tree",
+                "algorithm": SANDBOX_ALLOW_TREE_ALGORITHM,
+                "sha256": sandbox_allow_tree_identity(bin_root),
+            },
+            {
+                "path": config.as_posix(), "kind": "file",
+                "algorithm": "sha256", "sha256": sha256_file(config),
+            },
+            {
+                "path": purelib.as_posix(), "kind": "tree",
+                "algorithm": SANDBOX_ALLOW_TREE_ALGORITHM,
+                "sha256": sandbox_allow_tree_identity(purelib),
+            },
+        ]
+
+    v02_allow = venv_allow(v02_python, "v0.2 Python")
+    v03_allow = venv_allow(v03_python, "v0.3 Python")
+    runtime_allow_roots = {
+        "native": [codex_allow],
+        "codegraph": [
+            codex_allow, node_allow, package_allow, dist_allow, dependencies_allow,
+        ],
+        "hlsgraph-v02": [codex_allow, *v02_allow],
+        "hlsgraph-v03": [codex_allow, *v03_allow],
+    }
+    runtime_allow_roots = {
+        arm: sorted(entries, key=lambda item: item["path"])
+        for arm, entries in runtime_allow_roots.items()
+    }
+    if any(
+        Path(entry["path"]) == runtime_root
+        or not _path_is_within(Path(entry["path"]), runtime_root)
+        for entries in runtime_allow_roots.values() for entry in entries
+    ):
+        raise EvalManifestError(
+            "official model runtime allow roots must be exact children of runtime root"
+        )
+    process_environment = official_process_environment()
+    process_environment_contract = {
+        "keys": sorted(process_environment),
+        "sha256": sha256_bytes(canonical_json(process_environment)),
+    }
     boundary: dict[str, Any] = {
         "schema_version": SANDBOX_BOUNDARY_SCHEMA_VERSION,
         "public_repository": public_repository.as_posix(),
         "work_root": work_root.as_posix(),
         "runtime_root": runtime_root.as_posix(),
-        "work_root_policy": "explicit_sibling_directory_deny_v1",
-        "work_root_deny_catalog": deny_catalog,
-        "work_root_deny_catalog_sha256": sha256_bytes(canonical_json(deny_catalog)),
+        "filesystem_policy": SANDBOX_FILESYSTEM_POLICY,
+        "filesystem_base_token": SANDBOX_MINIMAL_TOKEN,
+        "filesystem_base_mode": "read",
+        "workspace_mode": "read",
+        "workspace_catalog": workspace_catalog,
+        "workspace_catalog_sha256": sha256_bytes(canonical_json(workspace_catalog)),
+        "runtime_allow_roots": runtime_allow_roots,
+        "runtime_allow_roots_sha256": sha256_bytes(canonical_json(runtime_allow_roots)),
         "codex_home": codex_home.as_posix(),
         "home_canary_root": Path.home().resolve().as_posix(),
         "external_canary_root": external_canary_root.as_posix(),
         "drvfs_roots": [item.as_posix() for item in drvfs_roots],
         "home_roots": [item.as_posix() for item in home_roots],
         "deny_roots": sorted(item.as_posix() for item in deny_roots),
+        "process_environment_contract": process_environment_contract,
+        "mcp_containment": {
+            "schema_version": MCP_CONTAINMENT_SCHEMA_VERSION,
+            "launcher": {
+                "path": bwrap.as_posix(),
+                "filename": bwrap.name,
+                "sha256": sha256_file(bwrap),
+            },
+            "system_profile": MCP_SYSTEM_PROFILE,
+            "network_mode": "unshare_all_no_share_net",
+            "root_mode": "empty_exact_ro_bind",
+            "shared_runtime_exclusions": [codex.as_posix()],
+        },
     }
     boundary["identity_sha256"] = sha256_bytes(canonical_json(boundary))
     runtime: dict[str, Any] = {
@@ -895,7 +1200,10 @@ def capture_official_runtime_identity(
 
 
 def _validate_runtime_identity(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("schema_version") != RUNTIME_IDENTITY_SCHEMA_VERSION:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != RUNTIME_IDENTITY_SCHEMA_VERSION
+    ):
         raise EvalManifestError("environment lock lacks the official runtime identity")
     unhashed = {key: item for key, item in value.items() if key != "identity_sha256"}
     if value.get("identity_sha256") != sha256_bytes(canonical_json(unhashed)):
@@ -908,7 +1216,10 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
             or "microsoft-standard-wsl2" not in str(host.get("release", "")).casefold()):
         raise EvalManifestError("environment lock was not prepared on Ubuntu-22.04 WSL2")
     boundary = value.get("sandbox_boundary")
-    if not isinstance(boundary, dict) or boundary.get("schema_version") != SANDBOX_BOUNDARY_SCHEMA_VERSION:
+    if (
+        not isinstance(boundary, dict)
+        or boundary.get("schema_version") != SANDBOX_BOUNDARY_SCHEMA_VERSION
+    ):
         raise EvalManifestError("environment lock lacks the sandbox boundary")
     boundary_unhashed = {
         key: item for key, item in boundary.items() if key != "identity_sha256"
@@ -932,9 +1243,16 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
         for right in isolated_boundary_roots[index + 1:]
     ):
         raise EvalManifestError("environment runtime, work, checkout, and auth roots overlap")
-    if boundary.get("work_root_policy") != "explicit_sibling_directory_deny_v1":
-        raise EvalManifestError("environment sandbox boundary has the wrong work-root policy")
-    catalog = boundary.get("work_root_deny_catalog")
+    if (
+        boundary.get("filesystem_policy") != SANDBOX_FILESYSTEM_POLICY
+        or boundary.get("filesystem_base_token") != SANDBOX_MINIMAL_TOKEN
+        or boundary.get("filesystem_base_mode") != "read"
+        or boundary.get("workspace_mode") != "read"
+    ):
+        raise EvalManifestError(
+            "environment sandbox boundary lacks the default-deny filesystem policy"
+        )
+    catalog = boundary.get("workspace_catalog")
     expected_workspace_roots = {
         f"{arm}/{corpus['id']}" for arm in ARM_IDS
         for corpus in load_corpus_lock()["corpora"]
@@ -953,9 +1271,45 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
                        catalog["workspace_roots"].values(),
                        catalog["control_roots"],
                    ) for path in group)
-            or boundary.get("work_root_deny_catalog_sha256")
+            or boundary.get("workspace_catalog_sha256")
             != sha256_bytes(canonical_json(catalog))):
-        raise EvalManifestError("environment sandbox boundary has an invalid deny catalog")
+        raise EvalManifestError("environment sandbox boundary has an invalid workspace catalog")
+    runtime_allow_roots = boundary.get("runtime_allow_roots")
+    if (
+        not isinstance(runtime_allow_roots, dict)
+        or set(runtime_allow_roots) != set(ARM_IDS)
+        or boundary.get("runtime_allow_roots_sha256")
+        != sha256_bytes(canonical_json(runtime_allow_roots))
+    ):
+        raise EvalManifestError("environment sandbox boundary has an invalid runtime allowlist")
+    for arm, entries in runtime_allow_roots.items():
+        if not isinstance(entries, list) or not entries:
+            raise EvalManifestError(f"environment sandbox allowlist is empty for {arm}")
+        paths: list[str] = []
+        for entry in entries:
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"path", "kind", "algorithm", "sha256"}
+                or not isinstance(entry.get("path"), str)
+                or not Path(entry["path"]).is_absolute()
+                or entry.get("kind") not in {"file", "tree"}
+                or entry.get("algorithm") not in {
+                    "sha256", RUNTIME_TREE_ALGORITHM, SANDBOX_ALLOW_TREE_ALGORITHM,
+                }
+                or _SHA256_RE.fullmatch(str(entry.get("sha256", ""))) is None
+            ):
+                raise EvalManifestError(
+                    f"environment sandbox allowlist has an invalid entry for {arm}"
+                )
+            if entry["kind"] == "file" and entry["algorithm"] != "sha256":
+                raise EvalManifestError("sandbox allowlisted file has the wrong algorithm")
+            if entry["kind"] == "tree" and entry["algorithm"] == "sha256":
+                raise EvalManifestError("sandbox allowlisted tree has the wrong algorithm")
+            paths.append(entry["path"])
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise EvalManifestError(
+                f"environment sandbox allowlist is not canonical for {arm}"
+            )
     for key in ("drvfs_roots", "home_roots", "deny_roots"):
         paths = boundary.get(key)
         if (not isinstance(paths, list) or not paths
@@ -970,7 +1324,40 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
         *boundary["drvfs_roots"], *boundary["home_roots"],
     }
     if not required_denies.issubset(set(boundary["deny_roots"])):
-        raise EvalManifestError("environment sandbox boundary omits a required deny root")
+        raise EvalManifestError("environment sandbox boundary omits a protected root")
+    mcp_containment = boundary.get("mcp_containment")
+    if (
+        not isinstance(mcp_containment, dict)
+        or set(mcp_containment) != {
+            "schema_version", "launcher", "system_profile", "network_mode",
+            "root_mode", "shared_runtime_exclusions",
+        }
+        or mcp_containment.get("schema_version") != MCP_CONTAINMENT_SCHEMA_VERSION
+        or mcp_containment.get("system_profile") != MCP_SYSTEM_PROFILE
+        or mcp_containment.get("network_mode") != "unshare_all_no_share_net"
+        or mcp_containment.get("root_mode") != "empty_exact_ro_bind"
+        or mcp_containment.get("shared_runtime_exclusions") != [value["codex"]["path"]]
+    ):
+        raise EvalManifestError("environment lock lacks the treatment MCP containment contract")
+    mcp_launcher = mcp_containment.get("launcher")
+    if (
+        not isinstance(mcp_launcher, dict)
+        or set(mcp_launcher) != {"path", "filename", "sha256"}
+        or mcp_launcher.get("path") != value["bubblewrap"]["path"]
+        or mcp_launcher.get("filename") != value["bubblewrap"]["filename"]
+        or mcp_launcher.get("sha256") != value["bubblewrap"]["sha256"]
+    ):
+        raise EvalManifestError("environment MCP launcher differs from locked bubblewrap")
+    process_contract = boundary.get("process_environment_contract")
+    if (
+        not isinstance(process_contract, dict)
+        or set(process_contract) != {"keys", "sha256"}
+        or not isinstance(process_contract.get("keys"), list)
+        or process_contract["keys"] != sorted(set(process_contract["keys"]))
+        or any(not isinstance(item, str) for item in process_contract["keys"])
+        or _SHA256_RE.fullmatch(str(process_contract.get("sha256", ""))) is None
+    ):
+        raise EvalManifestError("environment lock lacks the process-environment contract")
     home_canary = Path(boundary["home_canary_root"])
     if not any(
         home_canary == Path(item) or _path_is_within(home_canary, Path(item))
@@ -1024,6 +1411,82 @@ def _validate_runtime_identity(value: Any) -> dict[str, Any]:
             or codegraph_build["entrypoint"] != entrypoint
             or any(not _path_is_within(Path(path), runtime_root) for path in build_paths)):
         raise EvalManifestError("CodeGraph build closure is inconsistent with runtime identity")
+    codex_entry = {
+        "path": value["codex"]["path"], "kind": "file",
+        "algorithm": "sha256", "sha256": value["codex"]["sha256"],
+    }
+    node_entry = {
+        "path": value["node"]["path"], "kind": "file",
+        "algorithm": "sha256", "sha256": value["node"]["sha256"],
+    }
+    package_path = Path(codegraph_build["repository"]["path"]) / "package.json"
+    package_entries = [
+        item for item in runtime_allow_roots["codegraph"]
+        if item.get("path") == package_path.as_posix()
+        and item.get("kind") == "file" and item.get("algorithm") == "sha256"
+    ]
+    if len(package_entries) != 1:
+        raise EvalManifestError("CodeGraph sandbox allowlist lacks package.json")
+    dist_entry = {
+        "path": codegraph_build["dist"]["path"], "kind": "tree",
+        "algorithm": RUNTIME_TREE_ALGORITHM,
+        "sha256": codegraph_build["dist"]["tree_sha256"],
+    }
+    dependencies_entry = {
+        "path": codegraph_build["dependencies"]["path"], "kind": "tree",
+        "algorithm": RUNTIME_TREE_ALGORITHM,
+        "sha256": codegraph_build["dependencies"]["tree_sha256"],
+    }
+    def expected_venv_entries(python_key: str, arm: str) -> list[dict[str, Any]]:
+        identity = python[python_key]
+        root = Path(identity["path"]).parent.parent
+        version = str(identity["version"]).split(".")
+        if len(version) < 2 or not all(part.isdigit() for part in version[:2]):
+            return []
+        expected = {
+            (root / "bin").as_posix(): ("tree", SANDBOX_ALLOW_TREE_ALGORITHM),
+            (root / "pyvenv.cfg").as_posix(): ("file", "sha256"),
+            (root / "lib" / f"python{version[0]}.{version[1]}" / "site-packages").as_posix(): (
+                "tree", SANDBOX_ALLOW_TREE_ALGORITHM,
+            ),
+        }
+        entries = [
+            item for item in runtime_allow_roots[arm]
+            if item.get("path") in expected
+            and (item.get("kind"), item.get("algorithm"))
+            == expected[item["path"]]
+        ]
+        return entries if len(entries) == 3 else []
+
+    v02_entries = expected_venv_entries("hlsgraph_v02", "hlsgraph-v02")
+    v03_entries = expected_venv_entries("hlsgraph_v03", "hlsgraph-v03")
+    expected_allow_roots = {
+        "native": [codex_entry],
+        "codegraph": sorted([
+            codex_entry, node_entry, package_entries[0], dist_entry,
+            dependencies_entry,
+        ], key=lambda item: item["path"]),
+        "hlsgraph-v02": sorted(
+            [codex_entry, *v02_entries],
+            key=lambda item: item.get("path", ""),
+        ),
+        "hlsgraph-v03": sorted(
+            [codex_entry, *v03_entries],
+            key=lambda item: item.get("path", ""),
+        ),
+    }
+    if (
+        len(v02_entries) != 3 or len(v03_entries) != 3
+        or runtime_allow_roots != expected_allow_roots
+        or any(
+            Path(entry["path"]) == runtime_root
+            or not _path_is_within(Path(entry["path"]), runtime_root)
+            for entries in runtime_allow_roots.values() for entry in entries
+        )
+    ):
+        raise EvalManifestError(
+            "sandbox runtime allowlist is broader than the exact locked runtimes"
+        )
     return value
 
 
@@ -1290,18 +1753,39 @@ def _assert_unlinked_within(root: Path, path: Path) -> None:
 def _stable_file_bytes(path: Path, *, max_bytes: int = 512 * 1024 * 1024) -> bytes:
     if _linked(path) or not path.is_file():
         raise EvalManifestError(f"evaluation file is missing or linked: {path}")
-    before = path.stat()
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise EvalManifestError(f"evaluation file is not regular: {path}")
     if before.st_size > max_bytes:
         raise EvalManifestError(f"evaluation file exceeds the identity limit: {path}")
-    with path.open("rb") as stream:
-        opened = os.fstat(stream.fileno())
-        data = stream.read(max_bytes + 1)
-        closed = os.fstat(stream.fileno())
-    after = path.stat()
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(
+            getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        closed = os.fstat(descriptor)
+        after = path.lstat()
+    except OSError as exc:
+        raise EvalManifestError(f"evaluation file cannot be opened safely: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     identity = lambda info: (
-        info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+        info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns,
     )
-    if (len(data) > max_bytes or identity(before) != identity(opened)
+    if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(after.st_mode)
+            or _linked(path) or len(data) > max_bytes or identity(before) != identity(opened)
             or identity(opened) != identity(closed)
             or identity(closed) != identity(after)):
         raise EvalManifestError(f"evaluation file changed while hashed: {path}")
@@ -1313,9 +1797,26 @@ def _tree_identity(root: Path, *, excluded: frozenset[str] = frozenset()) -> str
     if _linked(root) or not root.is_dir():
         raise EvalManifestError(f"evaluation index is missing or linked: {root}")
     digest = hashlib.sha256()
-    records: list[tuple[str, Path]] = []
+    digest.update(b"hlsgraph.eval.tree_identity.v2\0")
+    records: list[tuple[str, bytes]] = []
     for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         directory_path = Path(directory)
+        if _linked(directory_path):
+            raise EvalManifestError("evaluation tree contains a linked directory")
+        directory_info = directory_path.lstat()
+        directory_relative = (
+            "." if directory_path == root
+            else directory_path.relative_to(root).as_posix()
+        )
+        directory_mode = (
+            f"{stat.S_IMODE(directory_info.st_mode):04o}"
+            if os.name == "posix" else "mode-na"
+        )
+        records.append((
+            "D:" + directory_relative,
+            b"D\0" + directory_relative.encode("utf-8") + b"\0"
+            + directory_mode.encode("ascii") + b"\0",
+        ))
         for name in sorted(dirnames):
             child = directory_path / name
             relative = child.relative_to(root).as_posix()
@@ -1327,13 +1828,20 @@ def _tree_identity(root: Path, *, excluded: frozenset[str] = frozenset()) -> str
             if _linked(child):
                 raise EvalManifestError(f"evaluation tree contains a linked file: {relative}")
             if relative not in excluded:
-                records.append((relative, child))
-    for relative, path in sorted(records):
-        data = _stable_file_bytes(path)
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(hashlib.sha256(data).digest())
-        digest.update(b"\0")
+                info = child.lstat()
+                mode = (
+                    f"{stat.S_IMODE(info.st_mode):04o}"
+                    if os.name == "posix" else "mode-na"
+                )
+                data = _stable_file_bytes(child)
+                records.append((
+                    "F:" + relative,
+                    b"F\0" + relative.encode("utf-8") + b"\0"
+                    + mode.encode("ascii") + b"\0"
+                    + hashlib.sha256(data).digest() + b"\0",
+                ))
+    for _key, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
     return digest.hexdigest()
 
 
@@ -1474,10 +1982,11 @@ def workspace_identity(work_root: Path, arm: str, corpus_id: str) -> dict[str, A
         })),
         "index_kind": "none",
         "index_sha256": sha256_bytes(b"no-index"),
-        "workspace_tree_sha256": _tree_identity(
-            workspace,
-            excluded=frozenset({".hlsgraph/private/retrieval-access.jsonl"}),
-        ),
+        # The v0.3 workspace contains a frozen zero-byte mount point for the
+        # per-cell retrieval audit overlay.  The host byte is part of the
+        # identity and never becomes writable: bubblewrap overlays one external
+        # run-scoped file at this exact path for the MCP process only.
+        "workspace_tree_sha256": _tree_identity(workspace),
         "cold_start_input_sha256": cold_start_input_identity(
             work_root, arm, corpus_id,
         )["input_tree_sha256"],
@@ -1491,10 +2000,7 @@ def workspace_identity(work_root: Path, arm: str, corpus_id: str) -> dict[str, A
         index_root = workspace / ".hlsgraph"
         result.update({
             "index_kind": arm,
-            "index_sha256": _tree_identity(
-                index_root,
-                excluded=frozenset({"private/retrieval-access.jsonl"}),
-            ),
+            "index_sha256": _tree_identity(index_root),
             **_hlsgraph_index_metadata(index_root / "graph.db"),
         })
     result["workspace_identity_sha256"] = sha256_bytes(canonical_json(result))
@@ -1883,15 +2389,19 @@ def safe_relative_path(value: str) -> Path:
 __all__ = [
     "ANSWER_SCHEMA_PATH", "ARM_IDS", "CODEGRAPH_BUILD_IDENTITY_SCHEMA_VERSION",
     "CODEGRAPH_OFFLINE_ENV", "CORPUS_LOCK_PATH", "EvalManifestError",
-    "ENVIRONMENT_SCHEMA_VERSION", "HERE", "QUESTIONS_PATH", "STATIC_CASES_PATH",
-    "RUNTIME_TREE_ALGORITHM", "SUITE_PATH", "asset_digest", "canonical_json",
+    "ENVIRONMENT_SCHEMA_VERSION", "HERE", "MCP_CONTAINMENT_SCHEMA_VERSION",
+    "MCP_SYSTEM_PROFILE", "QUESTIONS_PATH", "STATIC_CASES_PATH",
+    "RUNTIME_TREE_ALGORITHM", "SANDBOX_ALLOW_TREE_ALGORITHM",
+    "SANDBOX_BOUNDARY_SCHEMA_VERSION", "SANDBOX_FILESYSTEM_POLICY",
+    "SANDBOX_MINIMAL_TOKEN", "SUITE_PATH", "asset_digest", "canonical_json",
     "capture_codegraph_build_identity", "cold_start_input_identity",
     "load_corpus_lock",
     "capture_official_runtime_identity", "harness_digest", "load_environment_lock",
     "load_manifest", "load_questions", "official_process_environment",
     "load_static_cases", "prepared_hlsgraph_identity", "resolve_command_argv",
     "require_official_ext4_directory", "resolve_local_executable",
-    "runtime_tree_identity", "safe_relative_path", "sha256_bytes", "sha256_file",
+    "runtime_tree_identity", "sandbox_allow_tree_identity", "safe_relative_path",
+    "sha256_bytes", "sha256_file",
     "require_official_linux_wsl2", "verify_evaluation_checkout",
     "verify_official_runtime_identity", "verify_prepared_workspace", "workspace_identity",
 ]

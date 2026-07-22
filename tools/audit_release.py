@@ -20,7 +20,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "src"
@@ -166,11 +166,13 @@ REQUIRED_SDIST = {
     "tests/fixtures/v02_minimal_bundle.json",
     "tools/knowledge_review.schema.json",
     "tools/knowledge_review_receipt.schema.json",
+    "tools/knowledge_review_evidence.schema.json",
     "tools/knowledge_review_prompts/adversarial.md",
     "tools/knowledge_review_prompts/semantic.md",
     "tools/run_knowledge_review.py",
     "tools/audit_release.py",
     "docs/knowledge-citation-audit-v0.3.json",
+    "docs/knowledge-review-evidence-v0.3.json",
     "docs/knowledge-review-v0.3.adversarial.json",
     "docs/knowledge-review-v0.3.adversarial.receipt.json",
     "docs/knowledge-review-v0.3.adversarial.trace.jsonl",
@@ -196,11 +198,37 @@ ADVERSARIAL_REVIEW_RECEIPT_PATH = (
 SEMANTIC_REVIEW_TRACE_PATH = "docs/knowledge-review-v0.3.semantic.trace.jsonl"
 ADVERSARIAL_REVIEW_TRACE_PATH = "docs/knowledge-review-v0.3.adversarial.trace.jsonl"
 CITATION_AUDIT_PATH = "docs/knowledge-citation-audit-v0.3.json"
-REVIEW_RECEIPT_SCHEMA_VERSION = "hlsgraph.knowledge-review.cli-receipt.v2"
-REVIEW_TRACE_SCHEMA_VERSION = "hlsgraph.knowledge-review.tool-trace.v2"
+CITATION_EVIDENCE_PATH = "docs/knowledge-review-evidence-v0.3.json"
+CITATION_EVIDENCE_SCHEMA_PATH = "tools/knowledge_review_evidence.schema.json"
+CITATION_EVIDENCE_SCHEMA_VERSION = (
+    "hlsgraph.knowledge-review.evidence-map.v1"
+)
+CITATION_EVIDENCE_SCHEMA_SHA256 = (
+    "a788a0468d5f334b4e9433928692e5ca8f0f0da533389dcd41f2e0db6cc92059"
+)
+REVIEW_RECEIPT_SCHEMA_VERSION = "hlsgraph.knowledge-review.cli-receipt.v4"
+REVIEW_BOUNDARY_CONTRACT_SCHEMA_VERSION = (
+    "hlsgraph.knowledge-review.boundary-contract.v2"
+)
+REVIEW_RUNTIME_MANIFEST_SCHEMA_VERSION = (
+    "hlsgraph.knowledge-review.runtime-manifest.v2"
+)
+REVIEW_BOUNDARY_POLICY = "default_deny_minimal_allowlist_v1"
+REVIEW_CACHE_PARENT_POLICY = "caller_owned_0700_single_cache_v1"
+REVIEW_EVIDENCE_PARENT_POLICY = "caller_owned_0700_dedicated_evidence_v1"
+REVIEW_RUNTIME_OWNERSHIP_POLICY = (
+    "caller_owned_frozen_0500_no_links_v1"
+)
+REVIEW_TRACE_SCHEMA_VERSION = "hlsgraph.knowledge-review.tool-trace.v3"
 REVIEW_MODEL = "gpt-5.6-sol"
 REVIEW_REASONING_EFFORT = "medium"
 REVIEW_CODEX_CLI_VERSION = "codex-cli 0.144.0"
+REVIEW_TOOL_OUTPUT_TOKEN_LIMIT = 50_000
+REVIEW_INITIAL_PROMPT_MAX_BYTES = 512 * 1024
+REVIEW_MAX_RAW_BYTES = 64 * 1024 * 1024
+REVIEW_OFFICIAL_CODEX_ELF_SHA256 = (
+    "901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429"
+)
 REVIEW_INVOCATIONS_KEY = "review_invocations"
 IMPLEMENTATION_SURFACE_HASH_KEY = (
     "src/hlsgraph/**/*.py#implementation-surface"
@@ -216,6 +244,12 @@ ELK_SOURCE_REVISIONS = frozenset({
     "62d5909f96fad541bc101ad52dabaece6b7eab7e",
     "7ca51784e42a24201f29bc13e458728b6fc61cdc",
 })
+
+
+def _formal_host_is_windows() -> bool:
+    """Test seam; formal production audits use the interpreter host."""
+
+    return os.name == "nt"
 SOURCE_SKIP_DIRS = frozenset({
     ".git", ".hlsgraph", ".mypy_cache", ".nox", ".packaging-test",
     ".pytest_cache", ".ruff_cache", ".tox", ".venv", ".wheel-test",
@@ -649,8 +683,12 @@ def _release_sdist_package_digest(data: bytes) -> str:
     return _payload_digest(payload)
 
 
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int]:
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+        value.st_ctime_ns, value.st_mode, value.st_nlink,
+        int(getattr(value, "st_uid", -1)),
+    )
 
 
 def _is_reparse_or_link(path: Path) -> bool:
@@ -708,6 +746,11 @@ def _strict_path_components(
 
 def _strict_file_bytes(
     path: Path, label: str, *, root: Path | None = None,
+    required_file_mode: int | None = None,
+    required_parent_mode: int | None = None,
+    require_current_owner: bool = False,
+    require_single_link: bool = False,
+    max_bytes: int | None = None,
 ) -> bytes:
     """Read one regular file through a stable handle without following links."""
 
@@ -715,33 +758,58 @@ def _strict_file_bytes(
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    parent = lexical.parent
     try:
+        parent_before = os.stat(parent, follow_symlinks=False)
         before_path = os.stat(lexical, follow_symlinks=False)
         descriptor = os.open(lexical, flags)
-    except OSError as exc:
-        raise ValueError(f"{label} is missing, linked, or unreadable: {exc}") from exc
+    except OSError:
+        raise ValueError(f"{label} is missing, linked, or unreadable") from None
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"{label} is not a regular file")
         if (before_path.st_dev, before_path.st_ino) != (before.st_dev, before.st_ino):
             raise ValueError(f"{label} changed before it was opened")
+        if require_single_link and (before_path.st_nlink != 1 or before.st_nlink != 1):
+            raise ValueError(f"{label} has hard-link aliases")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError(f"{label} exceeds its fixed byte limit")
+        if os.name != "nt" and require_current_owner:
+            uid = os.geteuid()
+            if before.st_uid != uid or parent_before.st_uid != uid:
+                raise ValueError(f"{label} violates its owner contract")
+        if (os.name != "nt" and required_file_mode is not None
+                and stat.S_IMODE(before.st_mode) != required_file_mode):
+            raise ValueError(f"{label} violates its file-mode contract")
+        if (os.name != "nt" and required_parent_mode is not None
+                and stat.S_IMODE(parent_before.st_mode) != required_parent_mode):
+            raise ValueError(f"{label} violates its parent-mode contract")
         chunks: list[bytes] = []
+        size = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            count = 1024 * 1024
+            if max_bytes is not None:
+                count = min(count, max_bytes + 1 - size)
+            chunk = os.read(descriptor, count)
             if not chunk:
                 break
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                raise ValueError(f"{label} exceeds its fixed byte limit")
             chunks.append(chunk)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
     try:
         after_path = os.stat(lexical, follow_symlinks=False)
-    except OSError as exc:
-        raise ValueError(f"{label} disappeared while it was read") from exc
+        parent_after = os.stat(parent, follow_symlinks=False)
+    except OSError:
+        raise ValueError(f"{label} disappeared while it was read") from None
     if (
         _stat_identity(before) != _stat_identity(after)
         or _stat_identity(before_path) != _stat_identity(after_path)
+        or _stat_identity(parent_before) != _stat_identity(parent_after)
         or (after_path.st_dev, after_path.st_ino) != (after.st_dev, after.st_ino)
     ):
         raise ValueError(f"{label} changed while it was read")
@@ -806,8 +874,8 @@ def _review_result_contract_issues(
         issues.append(f"{label} is not approved")
     if value.get("issues") != []:
         issues.append(f"{label} contains unresolved issues")
-    if not isinstance(value.get("summary"), str):
-        issues.append(f"{label} summary is not a string")
+    if value.get("summary") != "approved_no_issues":
+        issues.append(f"{label} summary is not the fixed approved value")
     surfaces = value.get("review_surface_sha256")
     if surfaces != expected_surfaces:
         issues.append(f"{label} does not bind the exact current pack surfaces")
@@ -874,12 +942,145 @@ _RECEIPT_FIELDS = frozenset({
     "schema_version", "protocol_id", "invocation_id", "thread_id", "model",
     "reasoning_effort", "prompt_sha256", "output_schema_sha256",
     "review_snapshot_sha256", "cache_manifest_sha256",
+    "citation_evidence_sha256",
+    "chunk_contract_sha256", "model_inspection_contract_sha256",
+    "parser_contract_sha256s", "tool_output_token_limit",
+    "initial_prompt_bytes", "initial_prompt_token_upper_bound",
+    "initial_prompt_max_bytes",
+    "official_codex_elf_sha256",
+    "boundary_contract",
     "result_sha256", "command_sha256", "raw_event_stream_sha256",
     "event_stream_path",
     "event_stream_sha256",
     "codex_cli_version", "completed", "exit_code",
 })
+_BOUNDARY_CONTRACT_FIELDS = frozenset({
+    "schema_version", "policy", "filesystem_allowlist", "network_enabled",
+    "runtime_manifest", "cache_manifest_sha256", "cache_parent_policy",
+    "evidence_parent_policy", "canary_results", "contract_sha256",
+})
+_RUNTIME_MANIFEST_FIELDS = frozenset({
+    "schema_version", "ownership_policy", "executable_relative_path",
+    "executable_sha256", "entries", "sha256",
+})
+_RUNTIME_ENTRY_FIELDS = frozenset({
+    "relative_path", "kind", "size", "mode", "sha256",
+})
+_REVIEW_CANARY_FIELDS = frozenset({
+    "cache_read", "runtime_read", "checkout_denied", "auth_denied",
+    "external_denied", "peer_sibling_denied", "evidence_denied",
+    "cache_write_denied",
+})
+_REVIEW_FILESYSTEM_ALLOWLIST = [
+    {"token": ":minimal", "access": "read"},
+    {"token": "$CACHE", "access": "read"},
+    {"token": "$CODEX_RUNTIME", "access": "read"},
+]
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _INVOCATION_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+
+
+def _expected_boundary_schema_contract() -> dict[str, Any]:
+    sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    allowlist_rows = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["token", "access"],
+            "properties": {
+                "token": {"const": token},
+                "access": {"const": "read"},
+            },
+        }
+        for token in (":minimal", "$CACHE", "$CODEX_RUNTIME")
+    ]
+    runtime_entry = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["relative_path", "kind", "size", "mode", "sha256"],
+        "properties": {
+            "relative_path": {"type": "string", "minLength": 1},
+            "kind": {"enum": ["file", "dir"]},
+            "size": {"type": "integer", "minimum": 0},
+            "mode": {"type": "string", "pattern": "^[0-7]{4}$"},
+            "sha256": sha256,
+        },
+    }
+    runtime_manifest = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version", "ownership_policy", "executable_relative_path",
+            "executable_sha256", "entries", "sha256",
+        ],
+        "properties": {
+            "schema_version": {
+                "const": REVIEW_RUNTIME_MANIFEST_SCHEMA_VERSION,
+            },
+            "ownership_policy": {
+                "const": REVIEW_RUNTIME_OWNERSHIP_POLICY,
+            },
+            "executable_relative_path": {
+                "type": "string", "minLength": 1,
+            },
+            "executable_sha256": sha256,
+            "entries": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": runtime_entry,
+            },
+            "sha256": sha256,
+        },
+    }
+    canary_results = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "cache_read", "runtime_read", "checkout_denied", "auth_denied",
+            "external_denied", "peer_sibling_denied", "evidence_denied",
+            "cache_write_denied",
+        ],
+        "properties": {
+            key: {"const": True} for key in (
+                "cache_read", "runtime_read", "checkout_denied", "auth_denied",
+                "external_denied", "peer_sibling_denied", "evidence_denied",
+                "cache_write_denied",
+            )
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version", "policy", "filesystem_allowlist",
+            "network_enabled", "runtime_manifest", "cache_manifest_sha256",
+            "cache_parent_policy", "evidence_parent_policy", "canary_results",
+            "contract_sha256",
+        ],
+        "properties": {
+            "schema_version": {
+                "const": REVIEW_BOUNDARY_CONTRACT_SCHEMA_VERSION,
+            },
+            "policy": {"const": REVIEW_BOUNDARY_POLICY},
+            "filesystem_allowlist": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": allowlist_rows,
+                "items": False,
+            },
+            "network_enabled": {"const": False},
+            "runtime_manifest": runtime_manifest,
+            "cache_manifest_sha256": sha256,
+            "cache_parent_policy": {"const": REVIEW_CACHE_PARENT_POLICY},
+            "evidence_parent_policy": {
+                "const": REVIEW_EVIDENCE_PARENT_POLICY,
+            },
+            "canary_results": canary_results,
+            "contract_sha256": sha256,
+        },
+    }
 
 
 def _receipt_schema_contract_issues(value: dict[str, Any]) -> list[str]:
@@ -893,12 +1094,17 @@ def _receipt_schema_contract_issues(value: dict[str, Any]) -> list[str]:
         or not isinstance(properties, dict)
         or set(properties) != set(_RECEIPT_FIELDS)
     ):
-        return ["knowledge-review receipt schema is not the closed v2 contract"]
+        return ["knowledge-review receipt schema is not the closed v4 contract"]
     expected_constants = {
         "schema_version": {"const": REVIEW_RECEIPT_SCHEMA_VERSION},
         "model": {"const": REVIEW_MODEL},
         "reasoning_effort": {"const": REVIEW_REASONING_EFFORT},
         "codex_cli_version": {"const": REVIEW_CODEX_CLI_VERSION},
+        "tool_output_token_limit": {"const": REVIEW_TOOL_OUTPUT_TOKEN_LIMIT},
+        "initial_prompt_max_bytes": {"const": REVIEW_INITIAL_PROMPT_MAX_BYTES},
+        "official_codex_elf_sha256": {
+            "const": REVIEW_OFFICIAL_CODEX_ELF_SHA256,
+        },
         "completed": {"const": True},
         "exit_code": {"const": 0},
     }
@@ -921,8 +1127,10 @@ def _receipt_schema_contract_issues(value: dict[str, Any]) -> list[str]:
             issues.append(f"knowledge-review receipt schema weakens {key}")
     for key in (
         "prompt_sha256", "output_schema_sha256", "result_sha256",
-        "review_snapshot_sha256", "cache_manifest_sha256", "command_sha256",
+        "review_snapshot_sha256", "citation_evidence_sha256",
+        "cache_manifest_sha256", "command_sha256",
         "raw_event_stream_sha256", "event_stream_sha256",
+        "chunk_contract_sha256", "model_inspection_contract_sha256",
     ):
         if properties.get(key) != {
             "type": "string", "pattern": "^[0-9a-f]{64}$",
@@ -935,7 +1143,182 @@ def _receipt_schema_contract_issues(value: dict[str, Any]) -> list[str]:
                 SEMANTIC_REVIEW_TRACE_PATH, ADVERSARIAL_REVIEW_TRACE_PATH,
             }):
         issues.append("knowledge-review receipt schema weakens event_stream_path")
+    if properties.get("boundary_contract") != _expected_boundary_schema_contract():
+        issues.append("knowledge-review receipt schema weakens boundary_contract")
+    parser_contracts = properties.get("parser_contract_sha256s")
+    if parser_contracts != {
+        "type": "array", "uniqueItems": True,
+        "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    }:
+        issues.append("knowledge-review receipt schema weakens parser contracts")
+    bounded_integer = {
+        "type": "integer", "minimum": 1,
+        "maximum": REVIEW_INITIAL_PROMPT_MAX_BYTES,
+    }
+    for key in ("initial_prompt_bytes", "initial_prompt_token_upper_bound"):
+        if properties.get(key) != bounded_integer:
+            issues.append(f"knowledge-review receipt schema weakens {key}")
     return issues
+
+
+def _review_contract_sha256(value: dict[str, Any], hash_field: str) -> str:
+    payload = dict(value)
+    payload.pop(hash_field, None)
+    data = (json.dumps(
+        payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False,
+    ) + "\n").encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _runtime_manifest_contract_issues(
+    value: object, *, label: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label} runtime_manifest is not an object"]
+    issues: list[str] = []
+    if set(value) != _RUNTIME_MANIFEST_FIELDS:
+        issues.append(f"{label} runtime_manifest is not a closed contract")
+    if value.get("schema_version") != REVIEW_RUNTIME_MANIFEST_SCHEMA_VERSION:
+        issues.append(f"{label} runtime_manifest has an invalid schema_version")
+    if value.get("ownership_policy") != REVIEW_RUNTIME_OWNERSHIP_POLICY:
+        issues.append(f"{label} runtime_manifest has an invalid ownership_policy")
+    entries = value.get("entries")
+    if not isinstance(entries, list) or not entries:
+        issues.append(f"{label} runtime_manifest has no entries")
+        entries = []
+    elif len(entries) != 2:
+        issues.append(
+            f"{label} runtime_manifest is not the exact single-file runtime"
+        )
+    paths: list[str] = []
+    for index, entry in enumerate(entries):
+        entry_label = f"{label} runtime_manifest entry {index}"
+        if not isinstance(entry, dict):
+            issues.append(f"{entry_label} is not an object")
+            continue
+        if set(entry) != _RUNTIME_ENTRY_FIELDS:
+            issues.append(f"{entry_label} is not a closed contract")
+        relative = entry.get("relative_path")
+        if not isinstance(relative, str) or not relative:
+            issues.append(f"{entry_label} has an invalid relative_path")
+        else:
+            paths.append(relative)
+            path = PurePosixPath(relative)
+            if relative != "." and (
+                "\\" in relative
+                or path.is_absolute()
+                or path.as_posix() != relative
+                or any(part in {"", ".", ".."} for part in path.parts)
+            ):
+                issues.append(f"{entry_label} has an unsafe relative_path")
+        kind = entry.get("kind")
+        if kind not in {"file", "dir"}:
+            issues.append(f"{entry_label} has an invalid kind")
+        size = entry.get("size")
+        if type(size) is not int or size < 0:
+            issues.append(f"{entry_label} has an invalid size")
+        mode = entry.get("mode")
+        if not isinstance(mode, str) or re.fullmatch(r"[0-7]{4}", mode) is None:
+            issues.append(f"{entry_label} has an invalid mode")
+            parsed_mode = None
+        else:
+            parsed_mode = int(mode, 8)
+            if parsed_mode & 0o222:
+                issues.append(f"{entry_label} is writable")
+        digest = entry.get("sha256")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            issues.append(f"{entry_label} has an invalid sha256")
+        if kind == "dir" and (size != 0 or digest != _EMPTY_SHA256):
+            issues.append(f"{entry_label} has invalid directory content metadata")
+        if kind == "dir" and parsed_mode is not None and parsed_mode & 0o500 != 0o500:
+            issues.append(f"{entry_label} is not owner-readable/traversable")
+        if kind == "file" and parsed_mode is not None and parsed_mode & 0o400 == 0:
+            issues.append(f"{entry_label} is not owner-readable")
+        if relative == "." and (index != 0 or kind != "dir"):
+            issues.append(f"{entry_label} is not the canonical runtime root")
+    if not paths or paths[0] != "." or paths.count(".") != 1:
+        issues.append(f"{label} runtime_manifest lacks one canonical root entry")
+    entries_by_path = {
+        str(entry.get("relative_path")): entry
+        for entry in entries if isinstance(entry, dict)
+        and isinstance(entry.get("relative_path"), str)
+    }
+    root_entry = entries_by_path.get(".")
+    if not isinstance(root_entry, dict) or root_entry.get("mode") != "0500":
+        issues.append(f"{label} runtime_manifest root is not frozen mode 0500")
+    for relative, entry in entries_by_path.items():
+        if relative == ".":
+            continue
+        parent = PurePosixPath(relative).parent.as_posix()
+        parent_entry = entries_by_path.get(parent)
+        if not isinstance(parent_entry, dict) or parent_entry.get("kind") != "dir":
+            issues.append(f"{label} runtime_manifest has an incomplete directory tree")
+            break
+    executable_relative = value.get("executable_relative_path")
+    executable_sha256 = value.get("executable_sha256")
+    executable_entry = entries_by_path.get(str(executable_relative))
+    if (not isinstance(executable_relative, str)
+            or executable_relative in {"", "."}
+            or len(PurePosixPath(executable_relative).parts) != 1
+            or set(entries_by_path) != {".", str(executable_relative)}
+            or not isinstance(executable_entry, dict)
+            or executable_entry.get("kind") != "file"
+            or not isinstance(executable_entry.get("mode"), str)
+            or re.fullmatch(r"[0-7]{4}", executable_entry["mode"]) is None
+            or int(executable_entry["mode"], 8) & 0o100 == 0
+            or not isinstance(executable_sha256, str)
+            or _SHA256_RE.fullmatch(executable_sha256) is None
+            or executable_entry.get("sha256") != executable_sha256):
+        issues.append(f"{label} runtime_manifest lacks its exact executable identity")
+    if executable_sha256 != REVIEW_OFFICIAL_CODEX_ELF_SHA256:
+        issues.append(f"{label} runtime_manifest does not use the fixed official Codex ELF")
+    if len(paths) != len(set(paths)):
+        issues.append(f"{label} runtime_manifest has duplicate relative_path values")
+    if paths != sorted(paths):
+        issues.append(f"{label} runtime_manifest entries are not canonically ordered")
+    manifest_sha256 = value.get("sha256")
+    if (
+        not isinstance(manifest_sha256, str)
+        or _SHA256_RE.fullmatch(manifest_sha256) is None
+        or manifest_sha256 != _review_contract_sha256(value, "sha256")
+    ):
+        issues.append(f"{label} runtime_manifest has an invalid sha256")
+    return issues
+
+
+def _boundary_contract_issues(
+    value: object, *, label: str, expected_cache_manifest_sha256: str,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label} boundary_contract is not an object"]
+    issues: list[str] = []
+    if set(value) != _BOUNDARY_CONTRACT_FIELDS:
+        issues.append(f"{label} boundary_contract is not a closed contract")
+    expected_scalars = {
+        "schema_version": REVIEW_BOUNDARY_CONTRACT_SCHEMA_VERSION,
+        "policy": REVIEW_BOUNDARY_POLICY,
+        "filesystem_allowlist": _REVIEW_FILESYSTEM_ALLOWLIST,
+        "network_enabled": False,
+        "cache_manifest_sha256": expected_cache_manifest_sha256,
+        "cache_parent_policy": REVIEW_CACHE_PARENT_POLICY,
+        "evidence_parent_policy": REVIEW_EVIDENCE_PARENT_POLICY,
+        "canary_results": {key: True for key in _REVIEW_CANARY_FIELDS},
+    }
+    for key, expected in expected_scalars.items():
+        if value.get(key) != expected:
+            issues.append(f"{label} boundary_contract has invalid {key}")
+    canaries = value.get("canary_results")
+    if not isinstance(canaries, dict) or set(canaries) != _REVIEW_CANARY_FIELDS:
+        issues.append(f"{label} boundary_contract canary_results is not closed")
+    issues.extend(_runtime_manifest_contract_issues(value.get("runtime_manifest"), label=label))
+    contract_sha256 = value.get("contract_sha256")
+    if (
+        not isinstance(contract_sha256, str)
+        or _SHA256_RE.fullmatch(contract_sha256) is None
+        or contract_sha256 != _review_contract_sha256(value, "contract_sha256")
+    ):
+        issues.append(f"{label} boundary_contract has an invalid contract_sha256")
+    return list(dict.fromkeys(issues))
 
 
 def _review_receipt_contract_issues(
@@ -945,7 +1328,12 @@ def _review_receipt_contract_issues(
     expected_event_stream_sha256: str, expected_raw_event_stream_sha256: str,
     expected_invocation_id: str, expected_thread_id: str,
     expected_command_sha256: str, expected_snapshot_sha256: str,
+    expected_citation_evidence_sha256: str,
     expected_cache_manifest_sha256: str,
+    expected_chunk_contract_sha256: str,
+    expected_model_inspection_contract_sha256: str,
+    expected_parser_contract_sha256s: list[str],
+    expected_prompt_bytes: int,
 ) -> list[str]:
     issues: list[str] = []
     if set(value) != _RECEIPT_FIELDS:
@@ -958,7 +1346,18 @@ def _review_receipt_contract_issues(
         "prompt_sha256": expected_prompt_sha256,
         "output_schema_sha256": expected_schema_sha256,
         "review_snapshot_sha256": expected_snapshot_sha256,
+        "citation_evidence_sha256": expected_citation_evidence_sha256,
         "cache_manifest_sha256": expected_cache_manifest_sha256,
+        "chunk_contract_sha256": expected_chunk_contract_sha256,
+        "model_inspection_contract_sha256": (
+            expected_model_inspection_contract_sha256
+        ),
+        "parser_contract_sha256s": expected_parser_contract_sha256s,
+        "tool_output_token_limit": REVIEW_TOOL_OUTPUT_TOKEN_LIMIT,
+        "initial_prompt_bytes": expected_prompt_bytes,
+        "initial_prompt_token_upper_bound": expected_prompt_bytes,
+        "initial_prompt_max_bytes": REVIEW_INITIAL_PROMPT_MAX_BYTES,
+        "official_codex_elf_sha256": REVIEW_OFFICIAL_CODEX_ELF_SHA256,
         "result_sha256": expected_result_sha256,
         "command_sha256": expected_command_sha256,
         "raw_event_stream_sha256": expected_raw_event_stream_sha256,
@@ -978,11 +1377,23 @@ def _review_receipt_contract_issues(
         if not isinstance(token, str) or _INVOCATION_TOKEN_RE.fullmatch(token) is None:
             issues.append(f"{label} has invalid {key}")
     for key in (
-        "review_snapshot_sha256", "cache_manifest_sha256", "command_sha256",
+        "review_snapshot_sha256", "citation_evidence_sha256",
+        "cache_manifest_sha256", "command_sha256",
         "raw_event_stream_sha256", "event_stream_sha256",
+        "chunk_contract_sha256", "model_inspection_contract_sha256",
     ):
         if _SHA256_RE.fullmatch(str(value.get(key, ""))) is None:
             issues.append(f"{label} has invalid {key}")
+    issues.extend(_boundary_contract_issues(
+        value.get("boundary_contract"), label=label,
+        expected_cache_manifest_sha256=expected_cache_manifest_sha256,
+    ))
+    parser_contracts = value.get("parser_contract_sha256s")
+    if (not isinstance(parser_contracts, list)
+            or parser_contracts != sorted(set(parser_contracts))
+            or any(_SHA256_RE.fullmatch(str(item)) is None
+                   for item in parser_contracts)):
+        issues.append(f"{label} has invalid parser_contract_sha256s")
     return issues
 
 
@@ -992,12 +1403,25 @@ def _receipt_invocation_projection(
     keys = (
         "protocol_id", "invocation_id", "thread_id", "model",
         "reasoning_effort", "prompt_sha256", "output_schema_sha256",
-        "review_snapshot_sha256", "cache_manifest_sha256",
+        "review_snapshot_sha256", "citation_evidence_sha256",
+        "cache_manifest_sha256", "chunk_contract_sha256",
+        "model_inspection_contract_sha256", "parser_contract_sha256s",
+        "tool_output_token_limit", "initial_prompt_bytes",
+        "initial_prompt_token_upper_bound", "initial_prompt_max_bytes",
+        "official_codex_elf_sha256",
         "result_sha256", "command_sha256", "event_stream_path",
         "raw_event_stream_sha256", "event_stream_sha256",
         "codex_cli_version",
     )
     result = {key: receipt.get(key) for key in keys}
+    boundary = receipt.get("boundary_contract")
+    result["boundary_contract_sha256"] = (
+        boundary.get("contract_sha256") if isinstance(boundary, dict) else None
+    )
+    runtime = boundary.get("runtime_manifest") if isinstance(boundary, dict) else None
+    result["runtime_manifest_sha256"] = (
+        runtime.get("sha256") if isinstance(runtime, dict) else None
+    )
     result["cli_receipt_sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
     return result
 
@@ -1202,6 +1626,191 @@ def _required_review_read_paths(root: Path, prompt_path: str) -> set[str]:
     return _knowledge_review_runner.required_read_paths(root, protocol_id)
 
 
+def _audit_citation_evidence_mapping(
+    root: Path, *, citation_bytes: bytes,
+    expected_citations: dict[str, dict[str, Any]],
+) -> tuple[list[str], bytes, dict[str, dict[str, Any]]]:
+    """Independently validate the closed public citation/evidence map."""
+
+    issues: list[str] = []
+    try:
+        schema, schema_bytes = _strict_json_object(
+            root / CITATION_EVIDENCE_SCHEMA_PATH,
+            "citation evidence mapping schema", root=root,
+        )
+        value, data = _strict_json_object(
+            root / CITATION_EVIDENCE_PATH,
+            "citation evidence mapping", root=root,
+        )
+    except (OSError, ValueError) as exc:
+        return [str(exc)], b"", {}
+    if hashlib.sha256(schema_bytes).hexdigest() != CITATION_EVIDENCE_SCHEMA_SHA256:
+        issues.append("citation evidence schema bytes differ from the closed v1 contract")
+    properties = schema.get("properties")
+    if (schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema"
+            or schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or set(schema.get("required", [])) != {
+                "schema_version", "citation_audit_sha256", "entries",
+            }
+            or not isinstance(properties, dict)
+            or set(properties) != {
+                "schema_version", "citation_audit_sha256", "entries",
+            }
+            or properties.get("schema_version") != {
+                "const": CITATION_EVIDENCE_SCHEMA_VERSION,
+            }
+            or properties.get("citation_audit_sha256") != {
+                "pattern": "^[0-9a-f]{64}$", "type": "string",
+            }):
+        issues.append("citation evidence schema is not the closed v1 contract")
+    if set(value) != {"schema_version", "citation_audit_sha256", "entries"}:
+        issues.append("citation evidence mapping is not a closed contract")
+    if value.get("schema_version") != CITATION_EVIDENCE_SCHEMA_VERSION:
+        issues.append("citation evidence mapping has the wrong schema version")
+    if value.get("citation_audit_sha256") != hashlib.sha256(citation_bytes).hexdigest():
+        issues.append("citation evidence mapping does not bind the citation audit")
+    expected_urls = {
+        str(row.get("citation_url")) for row in expected_citations.values()
+    }
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        issues.append("citation evidence mapping entries is not an array")
+        entries = []
+    observed: dict[str, dict[str, Any]] = {}
+    amd_citation = re.compile(
+        r"^/r/(?P<version>[A-Za-z0-9._-]+)-English/"
+        r"(?P<slug>[A-Za-z0-9._-]+)(?P<topic>/.*)?$"
+    )
+    amd_map = re.compile(r"^/api/khub/maps/(?P<publication>[A-Za-z0-9_~-]+)$")
+    amd_topic = re.compile(
+        r"^/api/khub/maps/(?P<publication>[A-Za-z0-9_~-]+)/topics/"
+        r"(?P<content>[A-Za-z0-9_~-]+)/content$"
+    )
+    amd_opaque_id = re.compile(r"^[A-Za-z0-9_~-]+$")
+    identity_control = re.compile(r"[\x00-\x1f\x7f]")
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {
+            "citation_url", "evidence_url", "resolver_id", "identity",
+        }:
+            issues.append("citation evidence mapping contains a malformed entry")
+            continue
+        citation_url = entry.get("citation_url")
+        evidence_url = entry.get("evidence_url")
+        if (not isinstance(citation_url, str) or citation_url in observed
+                or not isinstance(evidence_url, str)):
+            issues.append("citation evidence mapping has duplicate or invalid locators")
+            continue
+        observed[citation_url] = entry
+        try:
+            citation_parts = urlsplit(citation_url)
+            evidence_parts = urlsplit(evidence_url)
+            same_host = (
+                citation_parts.scheme.casefold() == "https"
+                and evidence_parts.scheme.casefold() == "https"
+                and bool(citation_parts.hostname)
+                and (citation_parts.hostname or "").casefold()
+                == (evidence_parts.hostname or "").casefold()
+                and citation_parts.username is None
+                and citation_parts.password is None
+                and evidence_parts.username is None
+                and evidence_parts.password is None
+                and citation_parts.port is None and evidence_parts.port is None
+            )
+        except ValueError:
+            same_host = False
+        if not same_host:
+            issues.append("citation evidence mapping leaves same-host HTTPS")
+            continue
+        if (citation_parts.hostname or "").casefold() != "docs.amd.com":
+            if (entry.get("resolver_id") != "direct.v1"
+                    or entry.get("identity") is not None
+                    or evidence_url != citation_url):
+                issues.append("non-AMD citation does not use exact direct evidence")
+            continue
+        citation_match = amd_citation.fullmatch(citation_parts.path)
+        identity = entry.get("identity")
+        if citation_match is None or not isinstance(identity, dict):
+            issues.append("AMD citation evidence identity is malformed")
+            continue
+        version = citation_match.group("version")
+        slug = citation_match.group("slug")
+        is_root = citation_match.group("topic") in (None, "", "/")
+        evidence_match = (
+            amd_map.fullmatch(evidence_parts.path)
+            if is_root else amd_topic.fullmatch(evidence_parts.path)
+        )
+        base_fields = {
+            "publication_id", "document_id", "document_slug", "version", "title",
+        }
+        expected_fields = base_fields if is_root else base_fields | {
+            "toc_id", "content_id", "topic_title",
+        }
+        if (set(identity) != expected_fields or evidence_match is None
+                or identity.get("version") != version
+                or identity.get("document_slug") != slug
+                or identity.get("publication_id")
+                != evidence_match.group("publication")
+                or any(not isinstance(identity.get(key), str) or not identity.get(key)
+                       for key in expected_fields)
+                or any(
+                    not isinstance(identity.get(key), str)
+                    or len(identity[key]) > 256
+                    or identity_control.search(identity[key]) is not None
+                    for key in expected_fields
+                )
+                or any(
+                    amd_opaque_id.fullmatch(str(identity.get(key, ""))) is None
+                    for key in ({"publication_id", "document_id"}
+                                if is_root else {
+                                    "publication_id", "document_id", "toc_id",
+                                    "content_id",
+                                })
+                )
+                or citation_parts.query or citation_parts.fragment
+                or evidence_parts.fragment):
+            issues.append("AMD citation evidence identity does not close")
+            continue
+        if is_root:
+            if (entry.get("resolver_id") != "amd.docs.khub.map.v1"
+                    or evidence_parts.query):
+                issues.append("AMD document root does not use exact map evidence")
+        elif (entry.get("resolver_id") != "amd.docs.khub.topic.v1"
+                or identity.get("content_id") != evidence_match.group("content")
+                or parse_qsl(evidence_parts.query, keep_blank_values=True)
+                != [("target", "DESIGNED_READER")]):
+            issues.append("AMD topic does not use exact KHUB content evidence")
+    if set(observed) != expected_urls or len(entries) != len(expected_urls):
+        issues.append("citation evidence mapping inventory is incomplete or has extras")
+    if entries != [observed[url] for url in sorted(observed)]:
+        issues.append("citation evidence mapping is not uniquely sorted")
+    return list(dict.fromkeys(issues)), data, observed
+
+
+def _audit_cache_evidence_projection(
+    manifest: dict[str, Any], mappings: dict[str, dict[str, Any]], *, label: str,
+) -> list[str]:
+    citations = manifest.get("citations")
+    if not isinstance(citations, list):
+        return [f"{label} cache has no citation inventory"]
+    observed: dict[str, dict[str, Any]] = {}
+    for row in citations:
+        if not isinstance(row, dict):
+            return [f"{label} cache has a malformed citation entry"]
+        requested = row.get("requested_url")
+        if not isinstance(requested, str) or requested in observed:
+            return [f"{label} cache has duplicate citation entries"]
+        observed[requested] = row
+        mapping = mappings.get(requested)
+        if (mapping is None
+                or row.get("evidence_url") != mapping.get("evidence_url")
+                or row.get("resolver_id") != mapping.get("resolver_id")):
+            return [f"{label} cache citation/evidence projection is stale"]
+    if set(observed) != set(mappings) or len(citations) != len(mappings):
+        return [f"{label} cache citation/evidence inventory has missing or extra rows"]
+    return []
+
+
 def _audit_review_tool_trace(
     root: Path, *, trace_path: str, prompt_path: str, result_bytes: bytes,
     expected_citations: dict[str, dict[str, Any]], snapshot: Any,
@@ -1222,12 +1831,23 @@ def _audit_review_tool_trace(
     ).encode("utf-8")
     if rendered != data:
         issues.append(f"knowledge-review tool trace {trace_path} is not canonical JSONL")
-    required_reads = _required_review_read_paths(root, prompt_path)
-    observed_reads: set[str] = set()
+    required_file_chunks = {
+        str(item["path"]): {str(chunk["path"]) for chunk in item["chunks"]}
+        for item in cache.manifest.get("files", [])
+        if isinstance(item, dict) and item.get("model_inspection_required") is True
+    }
+    observed_file_chunks: dict[str, set[str]] = {}
     expected_urls = {
         str(row.get("citation_url")) for row in expected_citations.values()
     }
-    observed_urls: set[str] = set()
+    required_citation_chunks = {
+        str(item["requested_url"]): {
+            str(chunk["path"]) for chunk in item.get("inspection_chunks", [])
+        }
+        for item in cache.manifest.get("citations", [])
+        if isinstance(item, dict) and item.get("available") is True
+    }
+    observed_citation_chunks: dict[str, set[str]] = {}
     snapshot_files = snapshot.file_map
     cache_citations = {
         str(item.get("requested_url")): item
@@ -1241,10 +1861,12 @@ def _audit_review_tool_trace(
         if row.get("sequence") != index:
             issues.append(f"{prefix} has a non-canonical sequence")
         kind = row.get("kind")
-        if kind in {"file_read", "file_hash"}:
+        if kind == "file_chunk_read":
             if set(row) != {
-                "schema_version", "sequence", "kind", "path", "hash_kind", "sha256",
-                "cache_sha256",
+                "schema_version", "sequence", "kind", "path", "hash_kind",
+                "sha256", "cache_sha256", "chunk_contract_sha256",
+                "chunk_index", "chunk_path", "chunk_sha256", "chunk_size",
+                "byte_start", "byte_end",
             }:
                 issues.append(f"{prefix} has a malformed frozen-file record")
                 continue
@@ -1265,13 +1887,43 @@ def _audit_review_tool_trace(
                 expected_file.cache_sha256,
             ):
                 issues.append(f"{prefix} has a stale frozen-file hash")
-            if kind == "file_read":
-                observed_reads.add(relative)
-        elif kind == "citation_inspect":
+            expected_manifest = next((
+                item for item in cache.manifest.get("files", [])
+                if isinstance(item, dict) and item.get("path") == relative
+            ), None)
+            chunks = (
+                expected_manifest.get("chunks", [])
+                if isinstance(expected_manifest, dict) else []
+            )
+            expected_chunk = next((
+                item for item in chunks
+                if isinstance(item, dict) and item.get("path") == row.get("chunk_path")
+            ), None)
+            expected_chunk_projection = {
+                "chunk_index": expected_chunk.get("index") if expected_chunk else None,
+                "chunk_sha256": expected_chunk.get("sha256") if expected_chunk else None,
+                "chunk_size": expected_chunk.get("size") if expected_chunk else None,
+                "byte_start": expected_chunk.get("byte_start") if expected_chunk else None,
+                "byte_end": expected_chunk.get("byte_end") if expected_chunk else None,
+                "chunk_contract_sha256": cache.manifest["chunk_contract"]["sha256"],
+            }
+            if (expected_chunk is None or any(
+                row.get(key) != value
+                for key, value in expected_chunk_projection.items()
+            )):
+                issues.append(f"{prefix} has stale frozen-file chunk metadata")
+            else:
+                observed_file_chunks.setdefault(relative, set()).add(
+                    str(row["chunk_path"])
+                )
+        elif kind == "citation_chunk_read":
             if set(row) != {
                 "schema_version", "sequence", "kind", "requested_url",
+                "evidence_url", "resolver_id",
                 "reference_ids", "body_sha256", "inspection_sha256",
-                "parser_id", "parser_version", "parser_command_sha256",
+                "parser_id", "parser_contract_sha256",
+                "chunk_contract_sha256", "chunk_index", "chunk_path",
+                "chunk_sha256", "chunk_size", "byte_start", "byte_end",
                 "body_stored",
             }:
                 issues.append(f"{prefix} has a malformed citation-inspection record")
@@ -1280,34 +1932,52 @@ def _audit_review_tool_trace(
             if not isinstance(requested, str) or requested not in expected_urls:
                 issues.append(f"{prefix} fetches an unapproved locator")
                 continue
-            observed_urls.add(requested)
             expected_cache = cache_citations.get(requested)
             if expected_cache is None or expected_cache.get("available") is not True:
                 issues.append(f"{prefix} inspects an unavailable citation")
                 continue
             expected_projection = {
                 "reference_ids": expected_cache.get("reference_ids"),
+                "evidence_url": expected_cache.get("evidence_url"),
+                "resolver_id": expected_cache.get("resolver_id"),
                 "body_sha256": expected_cache.get("body_sha256"),
                 "inspection_sha256": expected_cache.get("inspection_sha256"),
-                "parser_id": expected_cache.get("parser_id"),
-                "parser_version": expected_cache.get("parser_version"),
-                "parser_command_sha256": expected_cache.get("parser_command_sha256"),
+                "parser_id": "hlsgraph.review.citation-text.v1",
+                "parser_contract_sha256": expected_cache.get("parser_command_sha256"),
+                "chunk_contract_sha256": cache.manifest["chunk_contract"]["sha256"],
                 "body_stored": False,
             }
             if any(row.get(key) != value for key, value in expected_projection.items()):
                 issues.append(f"{prefix} differs from the frozen citation cache")
-        elif kind == "citation_hash":
-            if set(row) != {
-                "schema_version", "sequence", "kind", "requested_url",
-                "inspection_sha256",
-            }:
-                issues.append(f"{prefix} has a malformed citation-hash record")
                 continue
-            requested = row.get("requested_url")
-            expected_cache = cache_citations.get(str(requested))
-            if (expected_cache is None or row.get("inspection_sha256")
-                    != expected_cache.get("inspection_sha256")):
-                issues.append(f"{prefix} hashes a stale or unapproved citation")
+            expected_chunk = next((
+                item for item in expected_cache.get("inspection_chunks", [])
+                if isinstance(item, dict) and item.get("path") == row.get("chunk_path")
+            ), None)
+            if expected_chunk is None or any(row.get(key) != expected_chunk.get(source) for key, source in (
+                ("chunk_index", "index"), ("chunk_sha256", "sha256"),
+                ("chunk_size", "size"), ("byte_start", "byte_start"),
+                ("byte_end", "byte_end"),
+            )):
+                issues.append(f"{prefix} has stale citation chunk metadata")
+            else:
+                observed_citation_chunks.setdefault(requested, set()).add(
+                    str(row["chunk_path"])
+                )
+        elif kind in {"file_chunk_hash", "citation_chunk_hash"}:
+            # Hash rows are content-addressing evidence only and never satisfy
+            # the model-inspection completeness sets.
+            if kind == "file_chunk_hash" and set(row) != {
+                "schema_version", "sequence", "kind", "path", "chunk_index",
+                "chunk_path", "chunk_sha256",
+            }:
+                issues.append(f"{prefix} has a malformed source-chunk hash record")
+            elif kind == "citation_chunk_hash" and set(row) != {
+                "schema_version", "sequence", "kind", "requested_url",
+                "evidence_url", "resolver_id", "inspection_sha256",
+                "chunk_index", "chunk_path", "chunk_sha256",
+            }:
+                issues.append(f"{prefix} has a malformed citation-chunk hash record")
         elif kind == "result_emit":
             result_rows += 1
             if set(row) != {
@@ -1320,12 +1990,19 @@ def _audit_review_tool_trace(
             issues.append(
                 f"{prefix} uses a forbidden search, write, command, or unknown operation"
             )
-    missing_reads = sorted(required_reads - observed_reads)
+    missing_reads = sorted(
+        path for path, required in required_file_chunks.items()
+        if observed_file_chunks.get(path, set()) != required
+    )
     if missing_reads:
         issues.append(
             f"knowledge-review tool trace {trace_path} omits reviewed files: {missing_reads!r}"
         )
-    if observed_urls != expected_urls:
+    incomplete_citations = sorted(
+        url for url, required in required_citation_chunks.items()
+        if observed_citation_chunks.get(url, set()) != required
+    )
+    if incomplete_citations or set(required_citation_chunks) != expected_urls:
         issues.append(
             f"knowledge-review tool trace {trace_path} does not inspect every exact locator"
         )
@@ -1350,6 +2027,9 @@ def _audit_knowledge_review_release_gate(
     every pack's review metadata so a post-review edit fails closed.
     """
 
+    if _formal_host_is_windows():
+        return ["formal knowledge-review release audit is Linux/WSL2-only; Windows is NO-GO"]
+
     issues: list[str] = []
     root = root.resolve()
     try:
@@ -1364,6 +2044,7 @@ def _audit_knowledge_review_release_gate(
         issues.append("semantic review is not the fixed public release artifact")
     if adversarial_path != (root / ADVERSARIAL_REVIEW_PATH).absolute():
         issues.append("adversarial review is not the fixed public release artifact")
+    raw_roots: list[tuple[str, Path]] = []
     for label, raw_path in (
         ("semantic", semantic_raw.absolute()),
         ("adversarial", adversarial_raw.absolute()),
@@ -1376,22 +2057,13 @@ def _audit_knowledge_review_release_gate(
             issues.append(
                 f"raw {label} Codex review stream must be a restricted external artifact"
             )
-        if os.name != "nt" and raw_path.exists():
-            try:
-                raw_mode = stat.S_IMODE(
-                    raw_path.stat(follow_symlinks=False).st_mode
-                )
-                parent_mode = stat.S_IMODE(
-                    raw_path.parent.stat(follow_symlinks=False).st_mode
-                )
-            except OSError as exc:
-                issues.append(f"cannot inspect raw {label} evidence modes: {exc}")
-            else:
-                if raw_mode != 0o600 or parent_mode != 0o700:
-                    issues.append(
-                        f"raw {label} evidence must use file mode 0600 "
-                        "inside a 0700 directory"
-                    )
+        try:
+            raw_roots.append((
+                f"raw {label} evidence", raw_path.parent.resolve(strict=True),
+            ))
+        except OSError:
+            issues.append(f"raw {label} evidence parent is unavailable")
+    cache_roots: list[tuple[str, Path]] = []
     for label, cache_path in (
         ("semantic", semantic_cache.absolute()),
         ("adversarial", adversarial_cache.absolute()),
@@ -1402,6 +2074,32 @@ def _audit_knowledge_review_release_gate(
             pass
         else:
             issues.append(f"{label} review cache must be an external artifact")
+        try:
+            cache_roots.append((
+                f"{label} review cache", cache_path.resolve(strict=True),
+            ))
+        except OSError:
+            issues.append(f"{label} review cache is unavailable")
+    protected_roots: list[tuple[str, Path]] = [
+        ("review checkout", root), *raw_roots, *cache_roots,
+    ]
+    if os.name != "nt":
+        codex_home_text = os.environ.get("CODEX_HOME", "")
+        if not codex_home_text:
+            issues.append("formal release audit requires the dedicated CODEX_HOME")
+        else:
+            try:
+                protected_roots.append((
+                    "dedicated CODEX_HOME", Path(codex_home_text).resolve(strict=True),
+                ))
+            except OSError:
+                issues.append("dedicated CODEX_HOME is unavailable")
+    for index, (left_label, left_path) in enumerate(protected_roots):
+        for right_label, right_path in protected_roots[index + 1:]:
+            if (left_path == right_path
+                    or left_path.is_relative_to(right_path)
+                    or right_path.is_relative_to(left_path)):
+                issues.append(f"{left_label} must be disjoint from {right_label}")
     try:
         helper_root = Path(_knowledge_review_surface.ROOT).resolve()
     except (AttributeError, OSError) as exc:
@@ -1455,13 +2153,20 @@ def _audit_knowledge_review_release_gate(
         )
         semantic_raw_bytes = _strict_file_bytes(
             semantic_raw, "raw semantic Codex review stream",
+            required_file_mode=0o600, required_parent_mode=0o700,
+            require_current_owner=True, require_single_link=True,
+            max_bytes=REVIEW_MAX_RAW_BYTES,
         )
         adversarial_raw_bytes = _strict_file_bytes(
             adversarial_raw, "raw adversarial Codex review stream",
+            required_file_mode=0o600, required_parent_mode=0o700,
+            require_current_owner=True, require_single_link=True,
+            max_bytes=REVIEW_MAX_RAW_BYTES,
         )
     except (OSError, ValueError) as exc:
         return [str(exc)]
 
+    semantic_snapshot = adversarial_snapshot = None
     try:
         semantic_snapshot = _knowledge_review_runner.freeze_review_snapshot(
             root, SEMANTIC_REVIEW_PROTOCOL,
@@ -1470,29 +2175,31 @@ def _audit_knowledge_review_release_gate(
             root, ADVERSARIAL_REVIEW_PROTOCOL,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return [f"cannot freeze current knowledge-review inputs: {exc}"]
+        issues.append(f"cannot freeze current knowledge-review inputs: {exc}")
     semantic_cache_value = adversarial_cache_value = None
     semantic_replay = adversarial_replay = None
-    try:
-        semantic_cache_value = _knowledge_review_runner.load_review_cache(
-            semantic_cache, semantic_snapshot,
-        )
-        semantic_replay = _knowledge_review_runner.replay_raw_review(
-            root, SEMANTIC_REVIEW_PROTOCOL, semantic_raw_bytes,
-            snapshot=semantic_snapshot, cache=semantic_cache_value,
-        )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        issues.append(f"cannot replay raw semantic knowledge-review stream: {exc}")
-    try:
-        adversarial_cache_value = _knowledge_review_runner.load_review_cache(
-            adversarial_cache, adversarial_snapshot,
-        )
-        adversarial_replay = _knowledge_review_runner.replay_raw_review(
-            root, ADVERSARIAL_REVIEW_PROTOCOL, adversarial_raw_bytes,
-            snapshot=adversarial_snapshot, cache=adversarial_cache_value,
-        )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        issues.append(f"cannot replay raw adversarial knowledge-review stream: {exc}")
+    if semantic_snapshot is not None:
+        try:
+            semantic_cache_value = _knowledge_review_runner.load_review_cache(
+                semantic_cache, semantic_snapshot,
+            )
+            semantic_replay = _knowledge_review_runner.replay_raw_review(
+                root, SEMANTIC_REVIEW_PROTOCOL, semantic_raw_bytes,
+                snapshot=semantic_snapshot, cache=semantic_cache_value,
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            issues.append(f"cannot replay raw semantic knowledge-review stream: {exc}")
+    if adversarial_snapshot is not None:
+        try:
+            adversarial_cache_value = _knowledge_review_runner.load_review_cache(
+                adversarial_cache, adversarial_snapshot,
+            )
+            adversarial_replay = _knowledge_review_runner.replay_raw_review(
+                root, ADVERSARIAL_REVIEW_PROTOCOL, adversarial_raw_bytes,
+                snapshot=adversarial_snapshot, cache=adversarial_cache_value,
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            issues.append(f"cannot replay raw adversarial knowledge-review stream: {exc}")
     if semantic_replay is not None and semantic_replay.result_bytes != semantic_bytes:
         issues.append("semantic review result was not derived from its raw Codex stream")
     if (adversarial_replay is not None
@@ -1560,12 +2267,15 @@ def _audit_knowledge_review_release_gate(
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         issues.append(f"cannot recompute knowledge-review surfaces: {exc}")
         return issues
-    if (semantic_snapshot.surfaces != expected_surfaces
-            or adversarial_snapshot.surfaces != expected_surfaces):
+    if (semantic_snapshot is not None and adversarial_snapshot is not None
+            and (semantic_snapshot.surfaces != expected_surfaces
+                 or adversarial_snapshot.surfaces != expected_surfaces)):
         issues.append("retained review snapshots do not bind the current pack surfaces")
-    if (semantic_snapshot.implementation_surface_sha256 != expected_implementation
-            or adversarial_snapshot.implementation_surface_sha256
-            != expected_implementation):
+    if (semantic_snapshot is not None and adversarial_snapshot is not None
+            and (semantic_snapshot.implementation_surface_sha256
+                 != expected_implementation
+                 or adversarial_snapshot.implementation_surface_sha256
+                 != expected_implementation)):
         issues.append("retained review snapshots do not bind the current implementation")
     citation_issues, citation_bytes, expected_citations = (
         _audit_citation_release_artifact(
@@ -1574,6 +2284,31 @@ def _audit_knowledge_review_release_gate(
     )
     issues.extend(citation_issues)
     citation_audit_sha256 = hashlib.sha256(citation_bytes).hexdigest()
+    evidence_issues, evidence_bytes, evidence_mappings = (
+        _audit_citation_evidence_mapping(
+            root, citation_bytes=citation_bytes,
+            expected_citations=expected_citations,
+        )
+    )
+    issues.extend(evidence_issues)
+    citation_evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+    if semantic_snapshot is None or adversarial_snapshot is None:
+        return list(dict.fromkeys(issues))
+    if (semantic_snapshot.citation_evidence_sha256
+            != citation_evidence_sha256
+            or adversarial_snapshot.citation_evidence_sha256
+            != citation_evidence_sha256):
+        issues.append("retained review snapshots do not bind the evidence mapping")
+    if semantic_cache_value is not None:
+        issues.extend(_audit_cache_evidence_projection(
+            semantic_cache_value.manifest, evidence_mappings,
+            label="semantic knowledge-review",
+        ))
+    if adversarial_cache_value is not None:
+        issues.extend(_audit_cache_evidence_projection(
+            adversarial_cache_value.manifest, evidence_mappings,
+            label="adversarial knowledge-review",
+        ))
     semantic_trace_bytes: bytes | None = None
     if semantic_cache_value is not None:
         semantic_trace_issues, semantic_trace_bytes = _audit_review_tool_trace(
@@ -1629,7 +2364,18 @@ def _audit_knowledge_review_release_gate(
                 )
             ),
             expected_snapshot_sha256=semantic_snapshot.sha256,
+            expected_citation_evidence_sha256=citation_evidence_sha256,
             expected_cache_manifest_sha256=semantic_cache_value.sha256,
+            expected_chunk_contract_sha256=(
+                semantic_cache_value.manifest["chunk_contract"]["sha256"]
+            ),
+            expected_model_inspection_contract_sha256=(
+                semantic_cache_value.manifest["inspection_contract"]["sha256"]
+            ),
+            expected_parser_contract_sha256s=(
+                semantic_cache_value.manifest["parser_contract_sha256s"]
+            ),
+            expected_prompt_bytes=len(semantic_effective_prompt),
         ))
     if (adversarial_cache_value is not None and adversarial_replay is not None
             and adversarial_trace_bytes is not None):
@@ -1658,8 +2404,35 @@ def _audit_knowledge_review_release_gate(
                 )
             ),
             expected_snapshot_sha256=adversarial_snapshot.sha256,
+            expected_citation_evidence_sha256=citation_evidence_sha256,
             expected_cache_manifest_sha256=adversarial_cache_value.sha256,
+            expected_chunk_contract_sha256=(
+                adversarial_cache_value.manifest["chunk_contract"]["sha256"]
+            ),
+            expected_model_inspection_contract_sha256=(
+                adversarial_cache_value.manifest["inspection_contract"]["sha256"]
+            ),
+            expected_parser_contract_sha256s=(
+                adversarial_cache_value.manifest["parser_contract_sha256s"]
+            ),
+            expected_prompt_bytes=len(adversarial_effective_prompt),
         ))
+
+    semantic_boundary = semantic_receipt.get("boundary_contract")
+    adversarial_boundary = adversarial_receipt.get("boundary_contract")
+    semantic_runtime = (
+        semantic_boundary.get("runtime_manifest")
+        if isinstance(semantic_boundary, dict) else None
+    )
+    adversarial_runtime = (
+        adversarial_boundary.get("runtime_manifest")
+        if isinstance(adversarial_boundary, dict) else None
+    )
+    if (not isinstance(semantic_runtime, dict)
+            or semantic_runtime != adversarial_runtime):
+        issues.append(
+            "semantic and adversarial reviews did not use one identical Codex runtime"
+        )
 
     schema_surface = (
         schema.get("properties", {})
@@ -1694,9 +2467,39 @@ def _audit_knowledge_review_release_gate(
         }
         or not isinstance(schema_properties.get("citation_results"), dict)
         or schema_properties.get("approved") != {"type": "boolean"}
-        or schema_properties.get("summary") != {"type": "string"}
+        or schema_properties.get("summary") != {
+            "enum": ["approved_no_issues", "rejected_with_controlled_issues"],
+        }
     ):
         issues.append("knowledge-review schema weakens a required result field")
+    issue_contract = schema_properties.get("issues")
+    expected_issue_contract = {
+        "type": "array",
+        "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["severity", "code"],
+            "properties": {
+                "severity": {"enum": ["critical", "high", "medium", "low"]},
+                "code": {"enum": [
+                    "semantic_gap", "activation_bypass", "citation_unavailable",
+                    "citation_rejected", "contract_violation",
+                ]},
+            },
+        },
+    }
+    if issue_contract != expected_issue_contract:
+        issues.append("knowledge-review schema permits uncontrolled public issue prose")
+    citation_items = schema_properties.get("citation_results", {}).get("items", {})
+    citation_issue_contract = citation_items.get("properties", {}).get("issues")
+    if citation_issue_contract != {
+        "type": "array",
+        "items": {"enum": [
+            "locator_unavailable", "resolver_mismatch", "version_mismatch",
+            "section_mismatch", "paraphrase_unsupported",
+            "applicability_too_broad", "inspection_incomplete",
+        ]},
+    }:
+        issues.append("knowledge-review schema permits uncontrolled citation issue prose")
     issues.extend(_review_result_contract_issues(
         semantic, label="semantic knowledge review",
         expected_protocol=SEMANTIC_REVIEW_PROTOCOL,

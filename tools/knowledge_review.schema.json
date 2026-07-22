@@ -80,7 +80,17 @@
           "applicability_not_broader": {"type": ["boolean", "null"]},
           "issues": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {
+              "enum": [
+                "locator_unavailable",
+                "resolver_mismatch",
+                "version_mismatch",
+                "section_mismatch",
+                "paraphrase_unsupported",
+                "applicability_too_broad",
+                "inspection_incomplete"
+              ]
+            }
           }
         }
       }
@@ -91,21 +101,26 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "severity", "pack_id", "rule_id", "binding_target", "finding",
-          "evidence", "required_fix"
-        ],
+        "required": ["severity", "code"],
         "properties": {
           "severity": {"enum": ["critical", "high", "medium", "low"]},
-          "pack_id": {"type": "string"},
-          "rule_id": {"type": ["string", "null"]},
-          "binding_target": {"type": ["string", "null"]},
-          "finding": {"type": "string"},
-          "evidence": {"type": "string"},
-          "required_fix": {"type": "string"}
+          "code": {
+            "enum": [
+              "semantic_gap",
+              "activation_bypass",
+              "citation_unavailable",
+              "citation_rejected",
+              "contract_violation"
+            ]
+          }
         }
       }
     },
-    "summary": {"type": "string"}
+    "summary": {
+      "enum": [
+        "approved_no_issues",
+        "rejected_with_controlled_issues"
+      ]
+    }
   }
 }

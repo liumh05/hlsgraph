@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -7,12 +8,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
 import pytest
 
 from tools import knowledge_review_surface
 from tools import audit_knowledge_citations
 from tools import run_knowledge_review
+from tools import audit_release
 from tools.audit_release import (
     ADVERSARIAL_REVIEW_PATH,
     ADVERSARIAL_REVIEW_PROMPT_PATH,
@@ -49,6 +52,11 @@ PACKS = {
 }
 
 
+def _raw_evidence_path(root: Path, raw_name: str) -> Path:
+    protocol = raw_name.split(".", 1)[0]
+    return root.parent / f"{protocol}.evidence" / raw_name
+
+
 def _write_json(path: Path, value: object) -> bytes:
     data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +76,10 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> bytes:
 def _trusted_fetch(
     url: str, _timeout: float, _max_bytes: int,
 ) -> run_knowledge_review.TrustedFetch:
+    mapping_path = ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH
+    if mapping_path.is_file():
+        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        return _evidence_fetcher(mapping)(url, _timeout, _max_bytes)
     locator_hash = hashlib.sha256(url.encode("utf-8")).hexdigest().encode("ascii")
     if "documentation-service.arm.com/static/" in url:
         body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + locator_hash
@@ -79,6 +91,144 @@ def _trusted_fetch(
         status=200, final_url=url, redirect_chain=(url,),
         content_type=content_type, body=body, charset="utf-8",
     )
+
+
+def _fixture_evidence_mapping(citation_bytes: bytes) -> dict[str, object]:
+    citation = json.loads(citation_bytes)
+    urls = sorted({str(row["citation_url"]) for row in citation["references"]})
+    entries: list[dict[str, object]] = []
+    for url in urls:
+        parts = urlsplit(url)
+        if parts.hostname != "docs.amd.com":
+            entries.append({
+                "citation_url": url, "evidence_url": url,
+                "resolver_id": "direct.v1", "identity": None,
+            })
+            continue
+        match = run_knowledge_review._AMD_CITATION_PATH_RE.fullmatch(parts.path)
+        assert match is not None
+        version = match.group("version") or match.group("version_topic")
+        slug = match.group("document_slug") or match.group("document_slug_topic")
+        publication_id = "pub" + hashlib.sha256(slug.encode()).hexdigest()[:16]
+        document_id = slug.split("-", 1)[0].upper()
+        base = {
+            "publication_id": publication_id, "document_id": document_id,
+            "document_slug": slug, "version": version,
+            "title": f"Fixture {document_id} User Guide",
+        }
+        if parts.path == f"/r/{version}-English/{slug}/":
+            entries.append({
+                "citation_url": url,
+                "evidence_url": (
+                    f"https://docs.amd.com/api/khub/maps/{publication_id}"
+                ),
+                "resolver_id": "amd.docs.khub.map.v1", "identity": base,
+            })
+        else:
+            suffix = parts.path.rsplit("/", 1)[-1]
+            token = hashlib.sha256(url.encode()).hexdigest()[:16]
+            entries.append({
+                "citation_url": url,
+                "evidence_url": (
+                    f"https://docs.amd.com/api/khub/maps/{publication_id}/"
+                    f"topics/content{token}/content?target=DESIGNED_READER"
+                ),
+                "resolver_id": "amd.docs.khub.topic.v1",
+                "identity": {
+                    **base, "toc_id": f"toc{token}",
+                    "content_id": f"content{token}", "topic_title": suffix,
+                },
+            })
+    return {
+        "schema_version": run_knowledge_review.CITATION_EVIDENCE_SCHEMA_VERSION,
+        "citation_audit_sha256": hashlib.sha256(citation_bytes).hexdigest(),
+        "entries": entries,
+    }
+
+
+def _evidence_fetcher(mapping: dict[str, object]):
+    entries = [row for row in mapping["entries"] if isinstance(row, dict)]
+    by_evidence = {str(row["evidence_url"]): row for row in entries}
+    by_publication: dict[str, list[dict[str, object]]] = {}
+    for row in entries:
+        identity = row.get("identity")
+        if isinstance(identity, dict) and "publication_id" in identity:
+            by_publication.setdefault(str(identity["publication_id"]), []).append(row)
+
+    def fetch(url: str, _timeout: float, _max_bytes: int):
+        parts = urlsplit(url)
+        path_parts = parts.path.strip("/").split("/")
+        body: bytes
+        content_type = "text/plain"
+        if (parts.hostname == "docs.amd.com" and len(path_parts) == 4
+                and path_parts[:3] == ["api", "khub", "maps"]):
+            publication_id = path_parts[3]
+            rows = by_publication[publication_id]
+            identity = rows[0]["identity"]
+            assert isinstance(identity, dict)
+            body = run_knowledge_review._canonical_json({
+                "id": publication_id, "title": identity["title"],
+                "baseId": f"{identity['document_id']}-en-us-{identity['version']}.ditamap",
+                "clusterId": identity["document_id"],
+                "prettyUrl": (
+                    f"/go/{identity['version']}-English/{identity['document_slug']}"
+                ),
+                "readerUrl": (
+                    f"/r/{identity['version']}-English/{identity['document_slug']}"
+                ),
+                "fingerprint": "fixture-fingerprint",
+                "metadata": [
+                    {"key": "Doc_Version", "values": [f"{identity['version']} English"]},
+                    {"key": "Document_ID", "values": [identity["document_id"]]},
+                    {"key": "Access_Level", "values": ["Public"]},
+                    {"key": "ft:publicationId", "values": [publication_id]},
+                    {"key": "ft:prettyUrl", "values": [
+                        f"{identity['version']}-English/{identity['document_slug']}"
+                    ]},
+                ],
+            })
+            content_type = "application/json"
+        elif (parts.hostname == "docs.amd.com" and len(path_parts) == 5
+                and path_parts[:3] == ["api", "khub", "maps"]
+                and path_parts[4] == "pages"):
+            publication_id = path_parts[3]
+            topics = []
+            for row in by_publication[publication_id]:
+                identity = row["identity"]
+                if row["resolver_id"] != "amd.docs.khub.topic.v1":
+                    continue
+                assert isinstance(identity, dict)
+                topics.append({
+                    "tocId": identity["toc_id"],
+                    "contentId": identity["content_id"],
+                    "title": identity["topic_title"],
+                    "prettyUrl": urlsplit(str(row["citation_url"])).path,
+                    "children": [],
+                })
+            body = run_knowledge_review._canonical_json({
+                "configuration": {}, "paginatedToc": topics,
+                "translationError": False,
+            })
+            content_type = "application/json"
+        elif url in by_evidence:
+            body = b"HLSGRAPH-MAPPED-TOPIC-TEXT-" + hashlib.sha256(
+                url.encode("utf-8")
+            ).hexdigest().encode("ascii")
+        elif "documentation-service.arm.com/static/" in url:
+            body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + hashlib.sha256(
+                url.encode("utf-8")
+            ).hexdigest().encode("ascii")
+            content_type = "application/pdf"
+        else:
+            body = b"HLSGRAPH-CACHE-TEXT-" + hashlib.sha256(
+                url.encode("utf-8")
+            ).hexdigest().encode("ascii")
+        return run_knowledge_review.TrustedFetch(
+            status=200, final_url=url, redirect_chain=(url,),
+            content_type=content_type, body=body, charset="utf-8",
+        )
+
+    return fetch
 
 
 def _fixture_pdf_text(body: bytes) -> run_knowledge_review.TextDerivation:
@@ -119,7 +269,7 @@ def _approved_result(
         "citation_results": citation_results,
         "approved": True,
         "issues": [],
-        "summary": summary,
+        "summary": "approved_no_issues",
     }
 
 
@@ -151,14 +301,15 @@ def _raw_stream(
             },
         })
 
-    for item in snapshot.files:
-        command(f"head -n 100000000 files/{item.path}")
-    inspected_paths: set[str] = set()
+    for item in cache.manifest["files"]:
+        if item.get("model_inspection_required") is not True:
+            continue
+        for chunk in item["chunks"]:
+            command(f"head -n 100000000 {chunk['path']}")
     for entry in cache.manifest["citations"]:
-        path = entry.get("inspection_path")
-        if entry.get("available") is True and path not in inspected_paths:
-            inspected_paths.add(str(path))
-            command(f"head -n 100000000 {path}")
+        if entry.get("available") is True:
+            for chunk in entry["inspection_chunks"]:
+                command(f"head -n 100000000 {chunk['path']}")
     rows.extend([
         {
             "type": "item.completed",
@@ -189,6 +340,47 @@ def _snapshot_cache(
     return snapshot, cache
 
 
+def _fixture_boundary_contract(
+    cache: run_knowledge_review.ReviewCache,
+) -> dict[str, object]:
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    runtime_payload: dict[str, object] = {
+        "schema_version": run_knowledge_review.RUNTIME_MANIFEST_SCHEMA_VERSION,
+        "ownership_policy": run_knowledge_review.RUNTIME_OWNERSHIP_POLICY,
+        "executable_relative_path": "codex",
+        "executable_sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
+        "entries": [
+            {
+                "relative_path": ".", "kind": "dir", "size": 0,
+                "mode": "0500", "sha256": empty_sha256,
+            },
+            {
+                "relative_path": "codex", "kind": "file", "size": 5,
+                "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
+            },
+        ],
+    }
+    runtime_payload["sha256"] = hashlib.sha256(
+        run_knowledge_review._canonical_json(runtime_payload)
+    ).hexdigest()
+    return run_knowledge_review._build_boundary_contract(
+        runtime_manifest=runtime_payload,
+        cache_manifest_sha256=cache.sha256,
+        cache_parent_policy=run_knowledge_review.CACHE_PARENT_POLICY,
+        evidence_parent_policy=run_knowledge_review.EVIDENCE_PARENT_POLICY,
+        canary_results={
+            "cache_read": True,
+            "runtime_read": True,
+            "checkout_denied": True,
+            "auth_denied": True,
+            "external_denied": True,
+            "peer_sibling_denied": True,
+            "evidence_denied": True,
+            "cache_write_denied": True,
+        },
+    )
+
+
 @pytest.fixture
 def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "public"
@@ -197,6 +389,7 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     for relative in (
         REVIEW_SCHEMA_PATH,
         REVIEW_RECEIPT_SCHEMA_PATH,
+        run_knowledge_review.CITATION_EVIDENCE_SCHEMA_PATH,
         SEMANTIC_REVIEW_PROMPT_PATH,
         ADVERSARIAL_REVIEW_PROMPT_PATH,
         "tools/knowledge_review_surface.py",
@@ -216,6 +409,11 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     monkeypatch.setattr(audit_knowledge_citations, "ROOT", root)
     monkeypatch.setattr(audit_knowledge_citations, "SOURCE_ROOT", root / "src")
     monkeypatch.setattr(run_knowledge_review, "SCRIPT_ROOT", root)
+    monkeypatch.setattr(run_knowledge_review, "_formal_host_is_windows", lambda: False)
+    monkeypatch.setattr(audit_release, "_formal_host_is_windows", lambda: False)
+    codex_home = root.parent / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     def citation_fetch(url: str, _timeout: float, _max_bytes: int):
         payload = (
@@ -232,7 +430,12 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     citation = audit_knowledge_citations.audit_builtin_citations(
         online=True, fetcher=citation_fetch,
     )
-    _write_json(root / CITATION_AUDIT_PATH, citation)
+    citation_bytes = _write_json(root / CITATION_AUDIT_PATH, citation)
+    evidence_mapping = _fixture_evidence_mapping(citation_bytes)
+    _write_json(
+        root / run_knowledge_review.CITATION_EVIDENCE_PATH,
+        evidence_mapping,
+    )
 
     invocations: list[
         tuple[
@@ -255,7 +458,8 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
         snapshot = run_knowledge_review.freeze_review_snapshot(root, protocol_id)
         cache = run_knowledge_review.create_review_cache(
             root, snapshot, root.parent / cache_name,
-            fetcher=_trusted_fetch, pdf_text_extractor=_fixture_pdf_text,
+            fetcher=_evidence_fetcher(evidence_mapping),
+            pdf_text_extractor=_fixture_pdf_text,
         )
         cache = run_knowledge_review.load_review_cache(cache.root, snapshot)
         result_value = _approved_result(snapshot, summary=summary)
@@ -263,7 +467,7 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
             snapshot=snapshot, cache=cache, result=result_value,
             thread_id=thread_id,
         )
-        raw_path = root.parent / raw_name
+        raw_path = _raw_evidence_path(root, raw_name)
         run_knowledge_review._write_private(raw_path, raw_bytes)
         replay = run_knowledge_review.replay_raw_review(
             root, protocol_id, raw_bytes, snapshot=snapshot, cache=cache,
@@ -277,6 +481,7 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
         )
         receipt = run_knowledge_review.build_receipt(
             root, replay, snapshot=snapshot, cache=cache, prompt=prompt,
+            boundary_contract=_fixture_boundary_contract(cache),
         )
         (root / files["receipt"]).write_bytes(
             run_knowledge_review._canonical_json(receipt)
@@ -285,8 +490,8 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
 
     run_knowledge_review.seal_review_attestations(
         root,
-        semantic_raw=root.parent / "semantic.raw.jsonl",
-        adversarial_raw=root.parent / "adversarial.raw.jsonl",
+        semantic_raw=_raw_evidence_path(root, "semantic.raw.jsonl"),
+        adversarial_raw=_raw_evidence_path(root, "adversarial.raw.jsonl"),
         semantic_cache=root.parent / "semantic.cache",
         adversarial_cache=root.parent / "adversarial.cache",
     )
@@ -296,8 +501,8 @@ def _audit(root: Path) -> list[str]:
         root,
         semantic_review=root / SEMANTIC_REVIEW_PATH,
         adversarial_review=root / ADVERSARIAL_REVIEW_PATH,
-        semantic_raw=root.parent / "semantic.raw.jsonl",
-        adversarial_raw=root.parent / "adversarial.raw.jsonl",
+        semantic_raw=_raw_evidence_path(root, "semantic.raw.jsonl"),
+        adversarial_raw=_raw_evidence_path(root, "adversarial.raw.jsonl"),
         semantic_cache=root.parent / "semantic.cache",
         adversarial_cache=root.parent / "adversarial.cache",
     )
@@ -307,6 +512,67 @@ def test_final_review_gate_accepts_exact_repeated_review_bytes(
     reviewed_release_root: Path,
 ) -> None:
     assert _audit(reviewed_release_root) == []
+
+
+def test_seal_rejects_boundary_contract_tamper(
+    reviewed_release_root: Path,
+) -> None:
+    path = reviewed_release_root / SEMANTIC_REVIEW_RECEIPT_PATH
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["boundary_contract"]["canary_results"]["peer_sibling_denied"] = False
+    _write_json(path, receipt)
+    with pytest.raises(ValueError, match="boundary contract"):
+        run_knowledge_review.seal_review_attestations(
+            reviewed_release_root,
+            semantic_raw=_raw_evidence_path(
+                reviewed_release_root, "semantic.raw.jsonl",
+            ),
+            adversarial_raw=_raw_evidence_path(
+                reviewed_release_root, "adversarial.raw.jsonl",
+            ),
+            semantic_cache=reviewed_release_root.parent / "semantic.cache",
+            adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
+        )
+
+
+def test_seal_and_release_audit_reject_different_review_runtimes(
+    reviewed_release_root: Path,
+) -> None:
+    path = reviewed_release_root / ADVERSARIAL_REVIEW_RECEIPT_PATH
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    contract = receipt["boundary_contract"]
+    runtime = contract["runtime_manifest"]
+    executable = next(
+        item for item in runtime["entries"]
+        if item["relative_path"] == runtime["executable_relative_path"]
+    )
+    executable["sha256"] = "b" * 64
+    runtime["executable_sha256"] = "b" * 64
+    runtime["sha256"] = hashlib.sha256(
+        run_knowledge_review._canonical_json({
+            key: value for key, value in runtime.items() if key != "sha256"
+        })
+    ).hexdigest()
+    contract["contract_sha256"] = hashlib.sha256(
+        run_knowledge_review._canonical_json({
+            key: value for key, value in contract.items()
+            if key != "contract_sha256"
+        })
+    ).hexdigest()
+    _write_json(path, receipt)
+    with pytest.raises(ValueError, match="exact executable identity"):
+        run_knowledge_review.seal_review_attestations(
+            reviewed_release_root,
+            semantic_raw=_raw_evidence_path(
+                reviewed_release_root, "semantic.raw.jsonl",
+            ),
+            adversarial_raw=_raw_evidence_path(
+                reviewed_release_root, "adversarial.raw.jsonl",
+            ),
+            semantic_cache=reviewed_release_root.parent / "semantic.cache",
+            adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
+        )
+    assert any("identical Codex runtime" in item for item in _audit(reviewed_release_root))
 
 
 def test_final_review_gate_rejects_post_review_semantic_change(
@@ -337,7 +603,7 @@ def test_final_review_gate_rejects_review_result_byte_tamper(
 ) -> None:
     semantic_path = reviewed_release_root / SEMANTIC_REVIEW_PATH
     value = json.loads(semantic_path.read_text(encoding="utf-8"))
-    value["summary"] += " Changed after approval."
+    value["summary"] = "rejected_with_controlled_issues"
     _write_json(semantic_path, value)
     issues = _audit(reviewed_release_root)
     assert any(
@@ -429,8 +695,26 @@ def test_final_review_gate_rejects_stale_citation_artifact(
     value["references"][0]["reference_surface_sha256"] = "0" * 64
     _write_json(path, value)
     issues = _audit(reviewed_release_root)
-    assert any("manifest_sha256 is inconsistent" in item for item in issues)
+    assert any(
+        "manifest_sha256 is inconsistent" in item
+        or "citation evidence mapping is stale" in item
+        for item in issues
+    )
     assert any("references differ from the current pack inventory" in item for item in issues)
+
+
+def test_final_review_gate_rejects_weakened_evidence_schema(
+    reviewed_release_root: Path,
+) -> None:
+    path = reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_SCHEMA_PATH
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["properties"]["entries"]["minItems"] = 0
+    _write_json(path, value)
+    issues = _audit(reviewed_release_root)
+    assert any(
+        "citation evidence schema bytes differ from the closed v1 contract" in item
+        for item in issues
+    )
 
 
 def test_final_review_gate_binds_surface_helper_raw_bytes(
@@ -514,11 +798,225 @@ def test_final_review_gate_rejects_parent_symlink(
 def test_review_rejects_raw_stream_inside_cache(tmp_path: Path) -> None:
     cache = tmp_path / "semantic.cache"
     raw = cache / "semantic.codex.jsonl"
-    with pytest.raises(RuntimeError, match="outside the review cache"):
+    expected = "Windows is NO-GO" if os.name == "nt" else "outside the review cache"
+    with pytest.raises(RuntimeError, match=expected):
         run_knowledge_review.run_review(
             ROOT, run_knowledge_review.SEMANTIC_PROTOCOL, raw, cache,
             codex_command="codex", timeout_seconds=1,
         )
+
+
+def _review_boundary_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
+    root = tmp_path / "checkout"
+    cache = tmp_path / "cache"
+    codex_home = tmp_path / "codex-home"
+    external = tmp_path / "external"
+    runtime = tmp_path / "runtime"
+    peer = tmp_path / "peer-sibling"
+    evidence = tmp_path / "evidence"
+    for directory in (root, cache, codex_home, external, runtime, peer, evidence):
+        directory.mkdir()
+    (root / "README.md").write_text("public checkout\n", encoding="utf-8")
+    (cache / run_knowledge_review.CACHE_MANIFEST_NAME).write_text(
+        "{}\n", encoding="utf-8",
+    )
+    (codex_home / "auth.json").write_text("{}\n", encoding="utf-8")
+    (external / "canary.txt").write_text("private\n", encoding="utf-8")
+    (runtime / "codex").write_text("runtime\n", encoding="utf-8")
+    (peer / "canary.txt").write_text("private\n", encoding="utf-8")
+    (evidence / "canary.txt").write_text("private\n", encoding="utf-8")
+    boundary: dict[str, object] = {
+        "runtime_probe": str(runtime / "codex"),
+        "auth_probe": str(codex_home / "auth.json"),
+        "external_probe": str(external / "canary.txt"),
+        "peer_sibling_probe": str(peer / "canary.txt"),
+        "evidence_probe": str(evidence / "canary.txt"),
+    }
+    return root, cache, boundary
+
+
+def test_review_boundary_uses_direct_allowlist_and_default_deny_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, cache, boundary = _review_boundary_fixture(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(run_knowledge_review.shutil, "which", lambda *_args, **_kwargs: "/usr/bin/python3")
+
+    def fake_canary(command: list[str], _environment: dict[str, str]) -> int:
+        commands.append(command)
+        return 0
+
+    monkeypatch.setattr(run_knowledge_review, "_run_canary", fake_canary)
+    results = run_knowledge_review._verify_boundary_canaries(
+        codex="codex",
+        root=root,
+        cache_root=cache,
+        profile_values=[],
+        boundary=boundary,
+        environment={"PATH": "/usr/bin:/bin"},
+    )
+    assert all(value is True for value in results.values())
+    assert set(results) == {
+        "cache_read", "runtime_read", "checkout_denied", "auth_denied",
+        "external_denied", "peer_sibling_denied", "evidence_denied",
+        "cache_write_denied",
+    }
+    assert len(commands) == 1
+    assert str(boundary["peer_sibling_probe"]) in commands[0]
+    assert str(cache / run_knowledge_review.CACHE_MANIFEST_NAME) in commands[0]
+    assert str(boundary["runtime_probe"]) in commands[0]
+    assert str(boundary["evidence_probe"]) in commands[0]
+    assert not any("scandir" in value for item in commands for value in item)
+
+
+def test_review_boundary_rejects_readable_peer_sibling_under_default_deny(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, cache, boundary = _review_boundary_fixture(tmp_path)
+    monkeypatch.setattr(run_knowledge_review.shutil, "which", lambda *_args, **_kwargs: "/usr/bin/python3")
+
+    def fake_canary(command: list[str], _environment: dict[str, str]) -> int:
+        assert str(boundary["peer_sibling_probe"]) in command
+        return 1 << 5
+
+    monkeypatch.setattr(run_knowledge_review, "_run_canary", fake_canary)
+    with pytest.raises(RuntimeError, match="peer_sibling_denied"):
+        run_knowledge_review._verify_boundary_canaries(
+            codex="codex",
+            root=root,
+            cache_root=cache,
+            profile_values=[],
+            boundary=boundary,
+            environment={"PATH": "/usr/bin:/bin"},
+        )
+
+
+def test_review_private_evidence_must_not_overlap_runtime_or_cache(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence"
+    runtime = evidence / "runtime"
+    cache = tmp_path / "cache"
+    for path in (evidence, runtime, cache):
+        path.mkdir()
+    with pytest.raises(RuntimeError, match="Codex runtime"):
+        run_knowledge_review._assert_private_evidence_disjoint(
+            evidence, (("Codex runtime", runtime), ("cache", cache)),
+        )
+    run_knowledge_review._assert_private_evidence_disjoint(
+        evidence, (("cache", cache),),
+    )
+
+
+def test_runtime_manifest_requires_exact_executable_and_closed_tree() -> None:
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    root_only: dict[str, object] = {
+        "schema_version": run_knowledge_review.RUNTIME_MANIFEST_SCHEMA_VERSION,
+        "ownership_policy": run_knowledge_review.RUNTIME_OWNERSHIP_POLICY,
+        "executable_relative_path": "codex",
+        "executable_sha256": "a" * 64,
+        "entries": [{
+            "relative_path": ".", "kind": "dir", "size": 0,
+            "mode": "0500", "sha256": empty_sha256,
+        }],
+    }
+    root_only["sha256"] = hashlib.sha256(
+        run_knowledge_review._canonical_json(root_only)
+    ).hexdigest()
+    with pytest.raises(ValueError, match="exact executable identity"):
+        run_knowledge_review._validate_runtime_manifest(root_only)
+
+    orphan = copy.deepcopy(root_only)
+    orphan["entries"].append({
+        "relative_path": "missing/codex", "kind": "file", "size": 5,
+        "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
+    })
+    orphan["executable_relative_path"] = "missing/codex"
+    orphan["executable_sha256"] = run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256
+    orphan.pop("sha256")
+    orphan["sha256"] = hashlib.sha256(
+        run_knowledge_review._canonical_json(orphan)
+    ).hexdigest()
+    with pytest.raises(ValueError, match="incomplete directory tree"):
+        run_knowledge_review._validate_runtime_manifest(orphan)
+
+
+def test_review_command_contract_is_default_deny_minimal_allowlist() -> None:
+    argv = run_knowledge_review.canonical_command_argv(
+        run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    assert not any(".extends=" in value for value in argv)
+    filesystem = next(
+        value for value in argv
+        if value.startswith(
+            f"permissions.{run_knowledge_review.PERMISSION_PROFILE}.filesystem="
+        )
+    )
+    assert filesystem.endswith(
+        '{":minimal"="read","$CACHE"="read","$CODEX_RUNTIME"="read"}'
+    )
+    assert "deny" not in filesystem
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_review_cache_parent_must_be_private_and_single_child(tmp_path: Path) -> None:
+    parent = tmp_path / "semantic-cache-parent"
+    parent.mkdir(mode=0o700)
+    cache = parent / "cache"
+    cache.mkdir(mode=0o700)
+    assert run_knowledge_review._validate_review_cache_parent(cache) == (
+        run_knowledge_review.CACHE_PARENT_POLICY
+    )
+
+    sibling = parent / "raw-output.jsonl"
+    sibling.write_text("private\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="contain only the frozen cache"):
+        run_knowledge_review._validate_review_cache_parent(cache)
+    sibling.unlink()
+
+    parent.chmod(0o755)
+    with pytest.raises(RuntimeError, match="mode 0700"):
+        run_knowledge_review._validate_review_cache_parent(cache)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX runtime tree contract")
+def test_review_runtime_manifest_is_pathless_stable_and_link_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    codex = runtime / "codex"
+    codex.write_bytes(b"frozen-codex-runtime")
+    codex.chmod(0o500)
+    runtime.chmod(0o500)
+    monkeypatch.setattr(run_knowledge_review, "_mount_fstype", lambda _path: "ext4")
+    monkeypatch.setattr(
+        run_knowledge_review, "OFFICIAL_CODEX_ELF_SHA256",
+        hashlib.sha256(b"frozen-codex-runtime").hexdigest(),
+    )
+    first = run_knowledge_review._freeze_runtime_manifest(codex)
+    second = run_knowledge_review._freeze_runtime_manifest(codex)
+    assert first == second
+    assert first["entries"][0]["relative_path"] == "."
+    assert all(not entry["relative_path"].startswith("/") for entry in first["entries"])
+    assert str(tmp_path) not in json.dumps(first, sort_keys=True)
+
+    runtime.chmod(0o700)
+    linked = runtime / "linked"
+    linked.symlink_to(codex)
+    runtime.chmod(0o500)
+    with pytest.raises(RuntimeError, match="one executable|linked entry"):
+        run_knowledge_review._freeze_runtime_manifest(codex)
+
+    runtime.chmod(0o700)
+    linked.unlink()
+    extra = runtime / "NOTICE"
+    extra.write_text("unexpected", encoding="utf-8")
+    extra.chmod(0o400)
+    runtime.chmod(0o500)
+    with pytest.raises(RuntimeError, match="exactly its one executable"):
+        run_knowledge_review._freeze_runtime_manifest(codex)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink alias test")
@@ -549,7 +1047,7 @@ def test_review_rejects_raw_cache_junction_alias(tmp_path: Path) -> None:
         pytest.skip("Windows junction creation is unavailable")
     cache = real / "semantic.cache"
     raw = alias / "semantic.cache" / "semantic.codex.jsonl"
-    with pytest.raises(RuntimeError, match="linked path component"):
+    with pytest.raises(RuntimeError, match="Windows is NO-GO"):
         run_knowledge_review.run_review(
             ROOT, run_knowledge_review.SEMANTIC_PROTOCOL, raw, cache,
             codex_command="codex", timeout_seconds=1,
@@ -561,6 +1059,68 @@ def test_review_snapshot_binds_release_auditor() -> None:
         ROOT, run_knowledge_review.SEMANTIC_PROTOCOL,
     )
     assert run_knowledge_review.RELEASE_AUDITOR_PATH in snapshot.file_map
+
+
+def test_public_amd_mapping_accepts_real_khub_opaque_ids() -> None:
+    value = json.loads(
+        (ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    citation_bytes = (ROOT / run_knowledge_review.CITATION_AUDIT_PATH).read_bytes()
+    assert value["citation_audit_sha256"] == hashlib.sha256(
+        citation_bytes,
+    ).hexdigest()
+    assert [row["citation_url"] for row in value["entries"]] == sorted({
+        row["citation_url"] for row in value["entries"]
+    })
+    amd = [
+        row for row in value["entries"]
+        if row["resolver_id"].startswith("amd.docs.khub.")
+    ]
+    assert amd
+    assert any(
+        "~" in str(row["identity"].get(key, ""))
+        for row in amd
+        for key in ("publication_id", "toc_id", "content_id")
+    )
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        ROOT, run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    assert len(run_knowledge_review._citation_evidence_rows(snapshot)) == 46
+
+
+def test_amd_map_and_pages_are_fetched_once_per_publication(
+    reviewed_release_root: Path,
+) -> None:
+    mapping = json.loads(
+        (reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_PATH)
+        .read_text(encoding="utf-8")
+    )
+    delegated = _evidence_fetcher(mapping)
+    calls: dict[str, int] = {}
+
+    def counted(url: str, timeout: float, max_bytes: int):
+        calls[url] = calls.get(url, 0) + 1
+        return delegated(url, timeout, max_bytes)
+
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        reviewed_release_root, run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    run_knowledge_review.create_review_cache(
+        reviewed_release_root, snapshot,
+        reviewed_release_root.parent / "resolver-reuse.cache",
+        fetcher=counted, pdf_text_extractor=_fixture_pdf_text,
+    )
+    publications = {
+        row["identity"]["publication_id"]
+        for row in mapping["entries"]
+        if row["resolver_id"].startswith("amd.docs.khub.")
+    }
+    for publication_id in publications:
+        map_url = f"https://docs.amd.com/api/khub/maps/{publication_id}"
+        assert calls[map_url] == 1
+        assert calls[map_url + "/pages"] == 1
     assert snapshot.file_map[
         run_knowledge_review.RELEASE_AUDITOR_PATH
     ].sha256 == hashlib.sha256(
@@ -589,7 +1149,7 @@ def test_final_review_gate_rejects_substitute_locator_in_trace(
 ) -> None:
     path = reviewed_release_root / ADVERSARIAL_REVIEW_TRACE_PATH
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    fetch = next(item for item in rows if item["kind"] == "citation_inspect")
+    fetch = next(item for item in rows if item["kind"] == "citation_chunk_read")
     fetch["requested_url"] = "https://example.invalid/search?q=substitute"
     _write_jsonl(path, rows)
     issues = _audit(reviewed_release_root)
@@ -600,7 +1160,7 @@ def test_final_review_gate_rejects_substitute_locator_in_trace(
 def test_final_review_gate_replays_and_rejects_unknown_raw_tool(
     reviewed_release_root: Path,
 ) -> None:
-    path = reviewed_release_root.parent / "semantic.raw.jsonl"
+    path = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     rows[2] = {
         "type": "item.completed",
@@ -614,7 +1174,7 @@ def test_final_review_gate_replays_and_rejects_unknown_raw_tool(
 def test_final_review_gate_replays_and_rejects_executable_raw_command(
     reviewed_release_root: Path,
 ) -> None:
-    path = reviewed_release_root.parent / "adversarial.raw.jsonl"
+    path = _raw_evidence_path(reviewed_release_root, "adversarial.raw.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     command = next(
         item for item in rows
@@ -633,7 +1193,7 @@ def test_final_review_gate_replays_and_rejects_executable_raw_command(
 def test_final_review_gate_rejects_raw_result_not_equal_to_committed_result(
     reviewed_release_root: Path,
 ) -> None:
-    path = reviewed_release_root.parent / "semantic.raw.jsonl"
+    path = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     message = next(
         item for item in reversed(rows)
@@ -642,6 +1202,7 @@ def test_final_review_gate_rejects_raw_result_not_equal_to_committed_result(
     )
     value = json.loads(message["item"]["text"])
     value["approved"] = False
+    value["summary"] = "rejected_with_controlled_issues"
     message["item"]["text"] = json.dumps(value, sort_keys=True)
     _write_jsonl(path, rows)
     issues = _audit(reviewed_release_root)
@@ -732,7 +1293,7 @@ def test_cache_rejects_cross_host_redirect_chain(
     assert all(entry["error_code"] == "ValueError" for entry in cache.manifest["citations"])
 
 
-def test_cache_retains_full_valid_same_host_redirect_chain(
+def test_cache_rejects_same_host_redirect_that_changes_locator(
     reviewed_release_root: Path,
 ) -> None:
     snapshot = run_knowledge_review.freeze_review_snapshot(
@@ -755,8 +1316,37 @@ def test_cache_retains_full_valid_same_host_redirect_chain(
         reviewed_release_root.parent / "same-host.cache", fetcher=same_host,
     )
     cache = run_knowledge_review.load_review_cache(cache.root, snapshot)
-    assert all(len(entry["redirect_chain"]) == 2 for entry in cache.manifest["citations"])
-    assert all(entry["redirect_chain"][-1] == entry["final_url"] for entry in cache.manifest["citations"])
+    assert all(entry["available"] is False for entry in cache.manifest["citations"])
+    assert all(entry["error_code"] == "ValueError" for entry in cache.manifest["citations"])
+
+
+def test_cache_allows_only_identical_same_host_redirect_chain(
+    reviewed_release_root: Path,
+) -> None:
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        reviewed_release_root, SEMANTIC_REVIEW_PROTOCOL,
+    )
+
+    mapping = json.loads(
+        (reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_PATH)
+        .read_text(encoding="utf-8")
+    )
+    delegated = _evidence_fetcher(mapping)
+
+    def identical(url: str, timeout: float, max_bytes: int):
+        fetched = delegated(url, timeout, max_bytes)
+        return run_knowledge_review.TrustedFetch(
+            fetched.status, url, (url, url), fetched.content_type, fetched.body,
+            charset=fetched.charset,
+        )
+
+    cache = run_knowledge_review.create_review_cache(
+        reviewed_release_root, snapshot,
+        reviewed_release_root.parent / "identical-redirect.cache", fetcher=identical,
+        pdf_text_extractor=_fixture_pdf_text,
+    )
+    cache = run_knowledge_review.load_review_cache(cache.root, snapshot)
+    assert all(entry["available"] is True for entry in cache.manifest["citations"])
 
 
 def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
@@ -765,10 +1355,26 @@ def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
     snapshot = run_knowledge_review.freeze_review_snapshot(
         reviewed_release_root, SEMANTIC_REVIEW_PROTOCOL,
     )
+    mapping = json.loads(
+        (reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_PATH)
+        .read_text(encoding="utf-8")
+    )
+    delegated = _evidence_fetcher(mapping)
+
+    def with_unparsed_pdf(url: str, timeout: float, max_bytes: int):
+        if "documentation-service.arm.com/static/" not in url:
+            return delegated(url, timeout, max_bytes)
+        body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + hashlib.sha256(
+            url.encode("utf-8")
+        ).hexdigest().encode("ascii")
+        return run_knowledge_review.TrustedFetch(
+            200, url, (url,), "application/pdf", body, charset=None,
+        )
+
     cache = run_knowledge_review.create_review_cache(
         reviewed_release_root, snapshot,
         reviewed_release_root.parent / "no-pdf-parser.cache",
-        fetcher=_trusted_fetch,
+        fetcher=with_unparsed_pdf,
     )
     cache = run_knowledge_review.load_review_cache(cache.root, snapshot)
     pdf_entries = [
@@ -793,11 +1399,25 @@ def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
         )
 
 
+def test_portal_javascript_shell_is_not_inspectable_evidence() -> None:
+    body = b"""<!doctype html><html><body><div id=\"root\"></div>
+    <noscript>JavaScript is required.</noscript><script src=\"app.js\"></script>
+    </body></html>"""
+    fetched = run_knowledge_review.TrustedFetch(
+        200, "https://docs.amd.com/r/example",
+        ("https://docs.amd.com/r/example",), "text/html", body,
+        charset="utf-8",
+    )
+    assert run_knowledge_review._text_derivation(fetched) is None
+
+
 def test_sanitized_raw_contains_no_cached_citation_body_or_text(
     reviewed_release_root: Path,
 ) -> None:
     _snapshot, cache = _snapshot_cache(reviewed_release_root)
-    raw = (reviewed_release_root.parent / "semantic.raw.jsonl").read_bytes()
+    raw = _raw_evidence_path(
+        reviewed_release_root, "semantic.raw.jsonl",
+    ).read_bytes()
     for entry in cache.manifest["citations"]:
         for key in ("body_path", "inspection_path"):
             relative = entry.get(key)
@@ -832,21 +1452,30 @@ def test_cache_rejects_unmanifested_extra_file(
     reviewed_release_root: Path,
 ) -> None:
     snapshot, cache = _snapshot_cache(reviewed_release_root)
-    run_knowledge_review._write_private(cache.root / "extra.txt", b"extra")
+    # Inject an unmanifested file without weakening the independently checked
+    # frozen-tree mode.  The ordinary private writer intentionally prepares
+    # parent directories as 0700, which would make this test exercise the mode
+    # guard before it reaches the closed filesystem inventory.
+    cache.root.chmod(0o700)
+    extra = cache.root / "extra.txt"
+    extra.write_bytes(b"extra")
+    if os.name != "nt":
+        extra.chmod(run_knowledge_review.CACHE_FILE_MODE)
+        cache.root.chmod(run_knowledge_review.CACHE_DIRECTORY_MODE)
     with pytest.raises(ValueError, match="unmanifested"):
         run_knowledge_review.load_review_cache(cache.root, snapshot)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
-def test_cache_tree_uses_0700_directories_and_0600_files(
+def test_cache_tree_is_frozen_0500_directories_and_0400_files(
     reviewed_release_root: Path,
 ) -> None:
     _snapshot, cache = _snapshot_cache(reviewed_release_root)
     for current, _directories, files in os.walk(cache.root):
-        assert Path(current).stat().st_mode & 0o777 == 0o700
+        assert Path(current).stat().st_mode & 0o777 == 0o500
         for name in files:
-            assert (Path(current) / name).stat().st_mode & 0o777 == 0o600
-    raw = reviewed_release_root.parent / "semantic.raw.jsonl"
+            assert (Path(current) / name).stat().st_mode & 0o777 == 0o400
+    raw = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
     assert raw.stat().st_mode & 0o777 == 0o600
 
 
@@ -855,7 +1484,7 @@ def test_raw_replay_rejects_incomplete_lifecycle_and_output(
     reviewed_release_root: Path, mutation: str,
 ) -> None:
     snapshot, cache = _snapshot_cache(reviewed_release_root)
-    raw_path = reviewed_release_root.parent / "semantic.raw.jsonl"
+    raw_path = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
     rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
     if mutation == "empty":
         raw = b""
@@ -899,8 +1528,12 @@ def test_seal_is_deterministic_and_preserves_semantic_surfaces(
     }
     run_knowledge_review.seal_review_attestations(
         reviewed_release_root,
-        semantic_raw=reviewed_release_root.parent / "semantic.raw.jsonl",
-        adversarial_raw=reviewed_release_root.parent / "adversarial.raw.jsonl",
+        semantic_raw=_raw_evidence_path(
+            reviewed_release_root, "semantic.raw.jsonl",
+        ),
+        adversarial_raw=_raw_evidence_path(
+            reviewed_release_root, "adversarial.raw.jsonl",
+        ),
         semantic_cache=reviewed_release_root.parent / "semantic.cache",
         adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
     )
@@ -916,17 +1549,39 @@ def test_seal_tamper_does_not_partially_update_packs(
 ) -> None:
     pack_root = reviewed_release_root / "src" / "hlsgraph" / "knowledge" / "packs"
     before = {path.name: path.read_bytes() for path in pack_root.glob("*.json")}
-    raw = reviewed_release_root.parent / "semantic.raw.jsonl"
+    raw = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
     raw.write_bytes(raw.read_bytes() + b"\n")
     with pytest.raises(ValueError):
         run_knowledge_review.seal_review_attestations(
             reviewed_release_root,
             semantic_raw=raw,
-            adversarial_raw=reviewed_release_root.parent / "adversarial.raw.jsonl",
+            adversarial_raw=_raw_evidence_path(
+                reviewed_release_root, "adversarial.raw.jsonl",
+            ),
             semantic_cache=reviewed_release_root.parent / "semantic.cache",
             adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
         )
     assert {path.name: path.read_bytes() for path in pack_root.glob("*.json")} == before
+
+
+def test_sealer_rejects_hardlinked_raw_evidence(
+    reviewed_release_root: Path,
+) -> None:
+    semantic = _raw_evidence_path(
+        reviewed_release_root, "semantic.raw.jsonl",
+    )
+    alias = semantic.parent / "semantic.alias.jsonl"
+    os.link(semantic, alias)
+    with pytest.raises(ValueError, match="hard-link aliases"):
+        run_knowledge_review.seal_review_attestations(
+            reviewed_release_root,
+            semantic_raw=semantic,
+            adversarial_raw=_raw_evidence_path(
+                reviewed_release_root, "adversarial.raw.jsonl",
+            ),
+            semantic_cache=reviewed_release_root.parent / "semantic.cache",
+            adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
+        )
 
 
 def test_staged_publish_rolls_back_on_replace_failure(
@@ -963,6 +1618,160 @@ def test_result_schema_protocol_is_closed_enum() -> None:
     assert set(schema["properties"]["protocol_id"]) == {"enum"}
 
 
+def test_utf8_chunk_contract_reconstructs_large_unicode_without_splitting() -> None:
+    payload = (("数据流-PIPELINE-🙂\n" * 900) + "尾").encode("utf-8")
+    assert len(payload) > 10_000
+    chunks = run_knowledge_review._utf8_chunks(payload)
+    assert b"".join(chunk for _start, _end, chunk in chunks) == payload
+    assert all(len(chunk) <= run_knowledge_review.MAX_REVIEW_CHUNK_BYTES for _, _, chunk in chunks)
+    assert all(chunk.decode("utf-8") for _, _, chunk in chunks)
+    assert [start for start, _end, _chunk in chunks] == [
+        0, *[end for _start, end, _chunk in chunks[:-1]],
+    ]
+
+
+def test_integrity_only_sources_have_no_model_visible_chunks(
+    reviewed_release_root: Path,
+) -> None:
+    _snapshot, cache = _snapshot_cache(reviewed_release_root)
+    integrity_only = [
+        item for item in cache.manifest["files"]
+        if item["model_inspection_required"] is False
+    ]
+    assert integrity_only
+    assert all(item["chunks"] == [] for item in integrity_only)
+    assert cache.manifest["inspection_contract"]["integrity_bound_only"] == sorted(
+        item["path"] for item in integrity_only
+    )
+
+
+def test_model_inspection_scope_covers_activation_tcb() -> None:
+    required_activation_tcb = {
+        "src/hlsgraph/bundle.py",
+        "src/hlsgraph/graph.py",
+        "src/hlsgraph/manifest.py",
+        "src/hlsgraph/knowledge/core.py",
+        "src/hlsgraph/retrieval.py",
+        "src/hlsgraph/runner/core.py",
+        "src/hlsgraph/runner/staging.py",
+        "src/hlsgraph/store/migrations.py",
+        "src/hlsgraph/store/sqlite.py",
+        "src/hlsgraph/extract/base.py",
+        "src/hlsgraph/extract/directives.py",
+        "src/hlsgraph/extract/llvm.py",
+        "src/hlsgraph/extract/mlir.py",
+        "src/hlsgraph/extract/source.py",
+        "src/hlsgraph/extract/static_features.py",
+    }
+    assert required_activation_tcb <= run_knowledge_review.MODEL_INSPECTION_EXACT_PATHS
+
+
+def test_approved_replay_rejects_one_skipped_required_chunk(
+    reviewed_release_root: Path,
+) -> None:
+    snapshot, cache = _snapshot_cache(reviewed_release_root)
+    raw_path = _raw_evidence_path(reviewed_release_root, "semantic.raw.jsonl")
+    rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    required = next(
+        item for item in cache.manifest["files"]
+        if item["model_inspection_required"] and len(item["chunks"]) > 1
+    )
+    command = f"head -n 100000000 {required['chunks'][1]['path']}"
+    rows = [
+        row for row in rows
+        if not (isinstance(row.get("item"), dict)
+                and row["item"].get("command") == command)
+    ]
+    with pytest.raises(ValueError, match="uninspected evidence"):
+        run_knowledge_review.replay_raw_review(
+            reviewed_release_root, SEMANTIC_REVIEW_PROTOCOL,
+            run_knowledge_review._canonical_jsonl(rows),
+            snapshot=snapshot, cache=cache,
+        )
+
+
+def test_public_result_schema_contains_no_model_authored_prose_fields() -> None:
+    schema = json.loads((ROOT / REVIEW_SCHEMA_PATH).read_text(encoding="utf-8"))
+    encoded = json.dumps(schema, sort_keys=True)
+    for forbidden in ('"finding"', '"evidence"', '"required_fix"'):
+        assert forbidden not in encoded
+    assert schema["properties"]["summary"] == {
+        "enum": ["approved_no_issues", "rejected_with_controlled_issues"],
+    }
+
+
+def test_prompt_visibility_budget_fails_closed(
+    reviewed_release_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, cache = _snapshot_cache(reviewed_release_root)
+    monkeypatch.setattr(run_knowledge_review, "MAX_INITIAL_PROMPT_BYTES", 128)
+    with pytest.raises(RuntimeError, match="visibility budget"):
+        run_knowledge_review.build_review_prompt(
+            reviewed_release_root, SEMANTIC_REVIEW_PROTOCOL,
+            snapshot=snapshot, cache=cache,
+        )
+
+
+def test_pdftotext_contract_rejects_nonabsolute_or_unhashed_binary(
+    tmp_path: Path,
+) -> None:
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        ROOT, SEMANTIC_REVIEW_PROTOCOL,
+    )
+    with pytest.raises(ValueError, match="/usr/bin/pdftotext"):
+        run_knowledge_review.create_review_cache(
+            ROOT, snapshot, tmp_path / "bad-pdf.cache",
+            fetcher=_trusted_fetch, pdftotext_command="pdftotext",
+            pdftotext_sha256="a" * 64,
+        )
+
+
+def test_bounded_parser_output_kills_compressed_bomb_style_stream() -> None:
+    script = (
+        "import os\n"
+        "while True:\n"
+        " os.write(1, b'PRIVATE-PDF-BODY-' * 4096)\n"
+    )
+    with pytest.raises(
+        ValueError, match=r"^controlled parser output exceeded its fixed byte limit$",
+    ) as caught:
+        run_knowledge_review._bounded_process_output(
+            [sys.executable, "-c", script], env=dict(os.environ), timeout=10,
+            stdout_limit=1024, stderr_limit=1024,
+        )
+    assert "PRIVATE-PDF-BODY" not in str(caught.value)
+
+
+@pytest.mark.parametrize("bad_title", ["line one\nline two", "x" * 257])
+def test_evidence_identity_strings_are_bounded_and_control_free(
+    bad_title: str,
+) -> None:
+    value = json.loads(
+        (ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    amd = next(row for row in value["entries"] if row["identity"] is not None)
+    amd["identity"]["title"] = bad_title
+    with pytest.raises(ValueError, match="identity does not close"):
+        run_knowledge_review._validate_citation_evidence_mapping(
+            value,
+            citation_audit_sha256=value["citation_audit_sha256"],
+            exact_urls=[row["citation_url"] for row in value["entries"]],
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link count contract")
+def test_cache_load_rejects_hard_linked_input(
+    reviewed_release_root: Path, tmp_path: Path,
+) -> None:
+    snapshot, cache = _snapshot_cache(reviewed_release_root)
+    alias = tmp_path / "manifest-alias.json"
+    os.link(cache.root / run_knowledge_review.CACHE_MANIFEST_NAME, alias)
+    with pytest.raises(ValueError, match="aliases"):
+        run_knowledge_review.load_review_cache(cache.root, snapshot)
+
+
 def test_review_runner_refuses_formal_windows_execution(
     reviewed_release_root: Path,
 ) -> None:
@@ -970,3 +1779,19 @@ def test_review_runner_refuses_formal_windows_execution(
         pytest.skip("Windows-only NO-GO assertion")
     with pytest.raises(RuntimeError, match="Windows is NO-GO"):
         run_knowledge_review._official_boundary(reviewed_release_root)
+
+
+def test_release_auditor_refuses_formal_windows_execution(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows-only NO-GO assertion")
+    issues = audit_release._audit_knowledge_review_release_gate(
+        tmp_path, semantic_review=tmp_path / "semantic.json",
+        adversarial_review=tmp_path / "adversarial.json",
+        semantic_raw=tmp_path / "semantic.raw",
+        adversarial_raw=tmp_path / "adversarial.raw",
+        semantic_cache=tmp_path / "semantic.cache",
+        adversarial_cache=tmp_path / "adversarial.cache",
+    )
+    assert issues == [
+        "formal knowledge-review release audit is Linux/WSL2-only; Windows is NO-GO"
+    ]

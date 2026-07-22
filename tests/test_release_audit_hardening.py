@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -39,6 +40,179 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def _review_contract_digest(value: dict[str, object], hash_field: str) -> str:
+    payload = dict(value)
+    payload.pop(hash_field, None)
+    encoded = (json.dumps(
+        payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False,
+    ) + "\n").encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _valid_review_boundary_contract(cache_sha256: str = "a" * 64) -> dict[str, object]:
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    runtime: dict[str, object] = {
+        "schema_version": "hlsgraph.knowledge-review.runtime-manifest.v2",
+        "ownership_policy": "caller_owned_frozen_0500_no_links_v1",
+        "executable_relative_path": "codex",
+        "executable_sha256": release_audit.REVIEW_OFFICIAL_CODEX_ELF_SHA256,
+        "entries": [
+            {
+                "relative_path": ".", "kind": "dir", "size": 0,
+                "mode": "0500", "sha256": empty_sha256,
+            },
+            {
+                "relative_path": "codex", "kind": "file", "size": 5,
+                "mode": "0500", "sha256": release_audit.REVIEW_OFFICIAL_CODEX_ELF_SHA256,
+            },
+        ],
+    }
+    runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+    contract: dict[str, object] = {
+        "schema_version": "hlsgraph.knowledge-review.boundary-contract.v2",
+        "policy": "default_deny_minimal_allowlist_v1",
+        "filesystem_allowlist": [
+            {"token": ":minimal", "access": "read"},
+            {"token": "$CACHE", "access": "read"},
+            {"token": "$CODEX_RUNTIME", "access": "read"},
+        ],
+        "network_enabled": False,
+        "runtime_manifest": runtime,
+        "cache_manifest_sha256": cache_sha256,
+        "cache_parent_policy": "caller_owned_0700_single_cache_v1",
+        "evidence_parent_policy": "caller_owned_0700_dedicated_evidence_v1",
+        "canary_results": {
+            "cache_read": True,
+            "runtime_read": True,
+            "checkout_denied": True,
+            "auth_denied": True,
+            "external_denied": True,
+            "peer_sibling_denied": True,
+            "evidence_denied": True,
+            "cache_write_denied": True,
+        },
+    }
+    contract["contract_sha256"] = _review_contract_digest(
+        contract, "contract_sha256",
+    )
+    return contract
+
+
+def test_review_receipt_v4_schema_is_exactly_closed() -> None:
+    value = json.loads(
+        (ROOT / "tools" / "knowledge_review_receipt.schema.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    assert release_audit._receipt_schema_contract_issues(value) == []
+    weakened = copy.deepcopy(value)
+    weakened["properties"]["boundary_contract"]["properties"][
+        "canary_results"
+    ]["additionalProperties"] = True
+    assert any(
+        "weakens boundary_contract" in item
+        for item in release_audit._receipt_schema_contract_issues(weakened)
+    )
+
+
+def test_review_boundary_contract_validates_hashes_and_projection() -> None:
+    cache_sha256 = "a" * 64
+    contract = _valid_review_boundary_contract(cache_sha256)
+    assert release_audit._boundary_contract_issues(
+        contract, label="receipt",
+        expected_cache_manifest_sha256=cache_sha256,
+    ) == []
+    projection = release_audit._receipt_invocation_projection(
+        {"boundary_contract": contract}, b'{"boundary_contract":{}}\n',
+    )
+    assert projection["boundary_contract_sha256"] == contract["contract_sha256"]
+    runtime = contract["runtime_manifest"]
+    assert isinstance(runtime, dict)
+    assert projection["runtime_manifest_sha256"] == runtime["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_issue"),
+    [
+        ("extra-field", "not a closed contract"),
+        ("cache-mismatch", "invalid cache_manifest_sha256"),
+        ("runtime-hash", "runtime_manifest has an invalid sha256"),
+        ("contract-hash", "invalid contract_sha256"),
+        ("false-canary", "invalid canary_results"),
+        ("unsafe-runtime-path", "unsafe relative_path"),
+        ("missing-executable", "lacks its exact executable identity"),
+        ("orphan-runtime-file", "incomplete directory tree"),
+        ("group-writable-runtime", "writable"),
+    ],
+)
+def test_review_boundary_contract_rejects_tampering(
+    mutation: str, expected_issue: str,
+) -> None:
+    cache_sha256 = "a" * 64
+    contract = _valid_review_boundary_contract(cache_sha256)
+    runtime = contract["runtime_manifest"]
+    assert isinstance(runtime, dict)
+    entries = runtime["entries"]
+    assert isinstance(entries, list)
+    if mutation == "extra-field":
+        contract["unexpected"] = True
+    elif mutation == "cache-mismatch":
+        contract["cache_manifest_sha256"] = "b" * 64
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "runtime-hash":
+        runtime["sha256"] = "b" * 64
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "contract-hash":
+        contract["contract_sha256"] = "b" * 64
+    elif mutation == "false-canary":
+        canaries = contract["canary_results"]
+        assert isinstance(canaries, dict)
+        canaries["auth_denied"] = False
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "unsafe-runtime-path":
+        entry = entries[-1]
+        assert isinstance(entry, dict)
+        entry["relative_path"] = "../codex"
+        runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "missing-executable":
+        runtime["executable_relative_path"] = "missing-codex"
+        runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "orphan-runtime-file":
+        entry = entries[-1]
+        assert isinstance(entry, dict)
+        entry["relative_path"] = "orphan/codex"
+        runtime["executable_relative_path"] = "orphan/codex"
+        runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "group-writable-runtime":
+        entry = entries[-1]
+        assert isinstance(entry, dict)
+        entry["mode"] = "0775"
+        runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    issues = release_audit._boundary_contract_issues(
+        contract, label="receipt",
+        expected_cache_manifest_sha256=cache_sha256,
+    )
+    assert any(expected_issue in item for item in issues), issues
 
 
 @pytest.mark.parametrize(
@@ -231,6 +405,57 @@ def test_strict_release_read_rejects_file_changed_during_read(
     monkeypatch.setattr(release_audit.os, "read", racing_read)
     with pytest.raises(ValueError, match="changed while it was read"):
         _strict_file_bytes(path, "racing review input", root=tmp_path)
+
+
+def test_strict_external_read_rejects_hard_link_alias(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "evidence"
+    parent.mkdir(mode=0o700)
+    path = parent / "review.raw.jsonl"
+    path.write_bytes(b"{}\n")
+    alias = parent / "review.alias.jsonl"
+    os.link(path, alias)
+    if os.name != "nt":
+        path.chmod(0o600)
+        parent.chmod(0o700)
+    with pytest.raises(ValueError, match="hard-link aliases"):
+        _strict_file_bytes(
+            path, "raw review stream", required_file_mode=0o600,
+            required_parent_mode=0o700, require_current_owner=True,
+            require_single_link=True, max_bytes=1024,
+        )
+
+
+def test_strict_external_read_rejects_parent_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "evidence"
+    parent.mkdir(mode=0o700)
+    path = parent / "review.raw.jsonl"
+    path.write_bytes(b"{}\n")
+    if os.name != "nt":
+        path.chmod(0o600)
+        parent.chmod(0o700)
+    real_identity = release_audit._stat_identity
+    identity_calls = 0
+
+    def replaced_parent_identity(value):
+        nonlocal identity_calls
+        identity_calls += 1
+        identity = real_identity(value)
+        # The fifth/sixth identities are the immediate parent before/after.
+        if identity_calls == 6:
+            return (identity[0], identity[1] + 1, *identity[2:])
+        return identity
+
+    monkeypatch.setattr(release_audit, "_stat_identity", replaced_parent_identity)
+    with pytest.raises(ValueError, match="changed while it was read"):
+        _strict_file_bytes(
+            path, "raw review stream", required_file_mode=0o600,
+            required_parent_mode=0o700, require_current_owner=True,
+            require_single_link=True, max_bytes=1024,
+        )
 
 
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-32"])

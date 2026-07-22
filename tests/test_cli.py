@@ -376,14 +376,33 @@ def test_knowledge_local_index_parser_is_explicit_and_receives_key_value_config(
     assert code == 0
 
     loaded = []
+
+    class _LocalParser:
+        name = "test.pdf"
+        version = "1"
+        fingerprint = "a" * 64
+
+        @staticmethod
+        def capabilities():
+            return {
+                "protocol_version": "hlsgraph.knowledge_parser.v1",
+                "local_only": True, "network_access": False,
+                "media_types": ["application/pdf"],
+            }
+
+        @staticmethod
+        def parse(data, metadata):
+            raise AssertionError("Markdown must use the built-in parser")
+
     monkeypatch.setattr(
         plugins, "load_knowledge_parser",
-        lambda name, config: loaded.append((name, config)) or None,
+        lambda name, config: loaded.append((name, config)) or _LocalParser(),
     )
     code, _ = _invoke(
         capsys, "knowledge", "build-local-index", "--project", str(root),
         "--metadata-index", str(metadata_index), "--parser", "test.pdf",
         "--parser-config", "pages=12", "--parser-config", "language=en",
+        "--parser-timeout-s", "12", "--max-parsed-chars", "123456",
     )
     assert code == 0
     assert loaded == [("test.pdf", {"pages": 12, "language": "en"})]
@@ -394,6 +413,63 @@ def test_knowledge_local_index_parser_is_explicit_and_receives_key_value_config(
     )
     assert code == 1
     assert error["error"] == "--parser-config requires --parser"
+
+    code, error = _invoke(
+        capsys, "knowledge", "build-local-index", "--project", str(root),
+        "--metadata-index", str(metadata_index), "--parser-timeout-s", "12",
+    )
+    assert code == 1
+    assert error["error"] == (
+        "--parser-timeout-s and --max-parsed-chars require --parser"
+    )
+
+
+def test_knowledge_cli_embedder_failure_cannot_leak_private_text(
+    tmp_path: Path, capfd, monkeypatch,
+) -> None:
+    import hlsgraph.plugins as plugins
+
+    root = _indexed_project(tmp_path, capfd)
+    sentinel = "PRIVATE_CLI_EMBEDDER_SENTINEL_715a37"
+    guide = root / "private-embed-guide.md"
+    guide.write_text(f"# Pipeline\n{sentinel}\n", encoding="utf-8")
+    metadata_index = root / "local-embed-index.json"
+    code, _ = _invoke(
+        capfd, "knowledge", "index", "--project", str(root),
+        "--path", str(guide), "--document-id", "local.embed.guide",
+        "--document-version", "1", "--output", str(metadata_index),
+    )
+    assert code == 0
+
+    class NoisyFailingEmbedder:
+        name = "test.noisy_cli"
+        version = "1"
+        fingerprint = "b" * 64
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": True, "network_access": False}
+
+        @staticmethod
+        def embed(texts):
+            assert sentinel in texts[0]
+            os.write(1, sentinel.encode("ascii"))
+            os.write(2, sentinel.encode("ascii"))
+            raise RuntimeError(f"failed on {sentinel}")
+
+    monkeypatch.setattr(
+        plugins, "load_embedder",
+        lambda name, config: NoisyFailingEmbedder(),
+    )
+    code, result = _invoke(
+        capfd, "knowledge", "build-local-index", "--project", str(root),
+        "--metadata-index", str(metadata_index), "--embedder", "test.noisy_cli",
+    )
+
+    assert code == 1
+    assert result["error"] == "local embedder raised RuntimeError"
+    assert sentinel not in json.dumps(result, ensure_ascii=False)
 
 
 def test_status_before_first_index_is_supported(tmp_path: Path, capsys) -> None:

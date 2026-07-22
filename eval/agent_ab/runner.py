@@ -19,21 +19,26 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from queue import Empty, Queue
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .common import (
-    ARM_IDS, CODEGRAPH_OFFLINE_ENV, HERE, asset_digest,
+    ARM_IDS, CODEGRAPH_OFFLINE_ENV, HERE, SANDBOX_FILESYSTEM_POLICY,
+    SANDBOX_MINIMAL_TOKEN, SANDBOX_ALLOW_TREE_ALGORITHM,
+    RETRIEVAL_ACCESS_RELATIVE, RETRIEVAL_AUDIT_SCHEMA_VERSION, asset_digest,
     capture_codegraph_build_identity, canonical_json, harness_digest,
     load_corpus_lock, load_environment_lock, load_manifest, load_questions,
     resolve_command_argv,
     official_process_environment, require_official_linux_wsl2,
     require_official_ext4_directory, safe_relative_path,
-    sha256_bytes, sha256_file,
+    sandbox_allow_tree_identity, sha256_bytes, sha256_file,
     verify_evaluation_checkout, verify_official_runtime_identity,
     verify_prepared_workspace,
 )
+from .parse_trace import _private_snippet_access_id, _private_snippet_output_receipts
 
 
 DISABLED_CODEX_FEATURES = (
@@ -58,6 +63,7 @@ DISABLED_CODEX_FEATURES = (
 PERMISSION_PROFILE = "hlsgraph_eval"
 PUBLIC_REPOSITORY = HERE.parents[1].resolve()
 CODEGRAPH_ENV = CODEGRAPH_OFFLINE_ENV
+AuditOverlay = tuple[Path, Path, tuple[dict[str, Any], ...]]
 
 
 def build_run_plan(
@@ -170,29 +176,29 @@ def _linked_directory(path: Path) -> bool:
     return path.is_symlink() or bool(callable(is_junction) and is_junction())
 
 
-def _work_root_directory_denies(
+def _validate_workspace_inventory(
     *, root: Path, workspace: Path, sandbox_boundary: dict[str, Any],
-) -> list[Path]:
-    """Validate the frozen matrix inventory and return directory-only denies."""
+) -> str:
+    """Validate the frozen matrix inventory and return the current arm."""
 
-    if sandbox_boundary.get("work_root_policy") != "explicit_sibling_directory_deny_v1":
-        raise RuntimeError("official sandbox boundary has the wrong matrix policy")
-    catalog = sandbox_boundary.get("work_root_deny_catalog")
+    if sandbox_boundary.get("filesystem_policy") != SANDBOX_FILESYSTEM_POLICY:
+        raise RuntimeError("official sandbox boundary has the wrong filesystem policy")
+    catalog = sandbox_boundary.get("workspace_catalog")
     if not isinstance(catalog, dict):
-        raise RuntimeError("official sandbox boundary lacks the deny catalog")
+        raise RuntimeError("official sandbox boundary lacks the workspace catalog")
     arm_roots = catalog.get("arm_roots")
     workspace_roots = catalog.get("workspace_roots")
     control_roots = catalog.get("control_roots")
     if (not isinstance(arm_roots, dict) or set(arm_roots) != set(ARM_IDS)
             or not isinstance(workspace_roots, dict)
             or not isinstance(control_roots, list) or len(control_roots) != 2):
-        raise RuntimeError("official sandbox deny catalog is malformed")
+        raise RuntimeError("official sandbox workspace catalog is malformed")
     expected_corpora = {item["id"] for item in load_corpus_lock()["corpora"]}
     expected_workspace_keys = {
         f"{arm}/{corpus_id}" for arm in ARM_IDS for corpus_id in expected_corpora
     }
     if set(workspace_roots) != expected_workspace_keys:
-        raise RuntimeError("official sandbox deny catalog has an incomplete matrix")
+        raise RuntimeError("official sandbox workspace catalog has an incomplete matrix")
     expected_arms = {arm: root / arm for arm in ARM_IDS}
     expected_workspaces = {
         f"{arm}/{corpus_id}": root / arm / corpus_id
@@ -207,7 +213,7 @@ def _work_root_directory_denies(
                    for key, value in expected_workspaces.items())
             or {Path(str(item)).resolve() for item in control_roots}
             != {item.resolve() for item in expected_controls}):
-        raise RuntimeError("official sandbox deny catalog points outside the work root")
+        raise RuntimeError("official sandbox workspace catalog points outside the work root")
 
     allowed_top = {
         *ARM_IDS, "_cache", ".hlsgraph-eval-boundary",
@@ -250,14 +256,7 @@ def _work_root_directory_denies(
     arm, corpus_id = relative.parts
     if corpus_id not in expected_corpora:
         raise RuntimeError("current workspace is not in the frozen corpus matrix")
-    return [
-        *[expected_arms[item] for item in ARM_IDS if item != arm],
-        *[
-            expected_workspaces[f"{arm}/{item}"]
-            for item in sorted(expected_corpora) if item != corpus_id
-        ],
-        *sorted(expected_controls, key=lambda item: item.as_posix()),
-    ]
+    return arm
 
 
 def _permission_overrides(
@@ -291,44 +290,46 @@ def _permission_overrides(
         raise RuntimeError(
             "runs root must be disjoint from every sandbox boundary root"
         )
-    official_matrix = sandbox_boundary.get("work_root_policy") is not None
-    matrix_denies = (
-        _work_root_directory_denies(
+    official_matrix = sandbox_boundary.get("filesystem_policy") is not None
+    arm = (
+        _validate_workspace_inventory(
             root=root, workspace=current, sandbox_boundary=sandbox_boundary,
-        ) if official_matrix else []
+        ) if official_matrix else current.relative_to(root).parts[0]
     )
-    deny_paths = sorted(
-        {
-            Path(str(path)).resolve() for path in deny_roots
-            if Path(str(path)).resolve() != root
-        } | {path.resolve() for path in matrix_denies},
-        key=lambda path: (len(path.parts), path.as_posix()),
-    )
-    effective_denies: list[Path] = []
-    for candidate in deny_paths:
-        if any(
-            candidate == parent or candidate.is_relative_to(parent)
-            for parent in effective_denies
+    if official_matrix and (
+        sandbox_boundary.get("filesystem_base_token") != SANDBOX_MINIMAL_TOKEN
+        or sandbox_boundary.get("filesystem_base_mode") != "read"
+        or sandbox_boundary.get("workspace_mode") != "read"
+    ):
+        raise RuntimeError("official sandbox boundary changes the minimal allowlist")
+    runtime_allowlists = sandbox_boundary.get("runtime_allow_roots", {})
+    entries = runtime_allowlists.get(arm, []) if isinstance(runtime_allowlists, dict) else []
+    if official_matrix and (not isinstance(entries, list) or not entries):
+        raise RuntimeError("official sandbox boundary lacks the arm runtime allowlist")
+    rules = {SANDBOX_MINIMAL_TOKEN: "read"}
+    runtime_root = Path(str(sandbox_boundary.get("runtime_root", ""))).resolve()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or entry.get("kind") not in {"file", "tree"}
+            or entry.get("algorithm") not in {
+                "sha256", "hlsgraph.runtime_tree.v1",
+                "hlsgraph.sandbox_allow_tree.v1",
+            }
+            or re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))) is None
         ):
-            continue
-        effective_denies.append(candidate)
-    # Avoid redundant nested bind mounts: once /mnt/d is denied, a second
-    # mount for /mnt/d/<public-repo> can fail while constructing the sandbox.
-    # The broader rule already enforces the narrower declared boundary.
-    rules = {path.as_posix(): "deny" for path in effective_denies}
-    # Results are written by the harness outside the model sandbox.  Keep this
-    # exact rule even when another deny would appear sufficient: the frozen
-    # per-cell argv and the permission canary both bind this specific root.
-    rules[result_root.as_posix()] = "deny"
-    # The base profile is read-only; explicit directory rules remove every
-    # sibling/control subtree while retaining the current workspace.
+            raise RuntimeError("official sandbox runtime allowlist is malformed")
+        path = Path(entry["path"]).resolve()
+        if path == runtime_root or not path.is_relative_to(runtime_root):
+            raise RuntimeError("official sandbox runtime allowlist is broader than one runtime")
+        rules[path.as_posix()] = "read"
     rules[current.as_posix()] = "read"
     filesystem = "{" + ",".join(
         f"{_toml(path)}={_toml(mode)}" for path, mode in rules.items()
     ) + "}"
     values = [
         f"default_permissions={_toml(PERMISSION_PROFILE)}",
-        f"permissions.{PERMISSION_PROFILE}.extends={_toml(':read-only')}",
         f"permissions.{PERMISSION_PROFILE}.network.enabled=false",
         f"permissions.{PERMISSION_PROFILE}.filesystem={filesystem}",
         'web_search="disabled"',
@@ -349,18 +350,281 @@ def _codegraph_parts(command_text: str) -> list[str]:
     return parts
 
 
+def _linked(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(
+        callable(is_junction) and is_junction()
+    )
+
+
+def _verify_audit_placeholder(workspace: Path) -> Path:
+    root = Path(os.path.abspath(os.fspath(workspace)))
+    target = root / RETRIEVAL_ACCESS_RELATIVE
+    for path in (root, root / ".hlsgraph", target.parent):
+        if _linked(path) or not path.is_dir():
+            raise RuntimeError("retrieval audit placeholder parent is missing or linked")
+    if _linked(target) or not target.is_file():
+        raise RuntimeError("retrieval audit placeholder is missing or linked")
+    info = target.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_size != 0
+            or int(getattr(info, "st_nlink", 1)) != 1):
+        raise RuntimeError("retrieval audit placeholder must be one zero-byte regular file")
+    if os.name != "nt":
+        private_mode = stat.S_IMODE(target.parent.lstat().st_mode)
+        if private_mode != 0o700:
+            raise RuntimeError("retrieval audit private directory must have mode 0700")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise RuntimeError("retrieval audit placeholder must have mode 0600")
+    return target
+
+
+def _audit_parent_chain(path: Path) -> list[dict[str, Any]]:
+    """Capture every lexical parent from the filesystem anchor to the file."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    parent = lexical.parent
+    anchor = Path(lexical.anchor)
+    paths = [anchor]
+    current = anchor
+    for part in parent.parts[1:]:
+        current /= part
+        paths.append(current)
+    records: list[dict[str, Any]] = []
+    for item in paths:
+        if _linked(item) or not item.is_dir():
+            raise RuntimeError("retrieval audit parent chain is missing or linked")
+        info = item.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("retrieval audit parent chain contains a non-directory")
+        records.append({
+            "path": item.as_posix(),
+            "dev": int(info.st_dev), "ino": int(info.st_ino),
+            "mode": int(info.st_mode),
+            "uid": int(getattr(info, "st_uid", 0)),
+            "gid": int(getattr(info, "st_gid", 0)),
+        })
+    return records
+
+
+def _verify_audit_parent_chain(
+    path: Path, expected: Sequence[dict[str, Any]],
+) -> None:
+    if not isinstance(expected, (list, tuple)) or not expected:
+        raise RuntimeError("retrieval audit parent identity is missing")
+    current = _audit_parent_chain(path)
+    if current != list(expected):
+        raise RuntimeError("retrieval audit parent chain changed after preparation")
+
+
+def _stable_audit_bytes(
+    path: Path, *, parent_chain: Sequence[dict[str, Any]] | None = None,
+    max_bytes: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read one unlinked, single-link 0600 audit file without a TOCTOU gap."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    expected_parents = list(parent_chain or _audit_parent_chain(lexical))
+    _verify_audit_parent_chain(lexical, expected_parents)
+    if _linked(lexical) or not lexical.is_file():
+        raise RuntimeError("retrieval audit overlay is missing or linked")
+    descriptor = -1
+    parent_descriptor = -1
+    try:
+        before = lexical.lstat()
+        flags = (os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+                 | int(getattr(os, "O_NOFOLLOW", 0)))
+        parent_flags = (os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+                        | int(getattr(os, "O_NOFOLLOW", 0)))
+        parent_descriptor = (
+            os.open(lexical.parent, parent_flags) if os.name != "nt" else -1
+        )
+        parent_opened = (
+            os.fstat(parent_descriptor) if parent_descriptor >= 0
+            else lexical.parent.lstat()
+        )
+        expected_parent = expected_parents[-1]
+        if (int(parent_opened.st_dev), int(parent_opened.st_ino)) != (
+            expected_parent["dev"], expected_parent["ino"],
+        ):
+            raise RuntimeError("retrieval audit parent changed while opened")
+        if parent_descriptor >= 0 and os.open in os.supports_dir_fd:
+            descriptor = os.open(lexical.name, flags, dir_fd=parent_descriptor)
+        else:
+            descriptor = os.open(lexical, flags)
+        opened = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        closed = os.fstat(descriptor)
+        current = (
+            os.stat(lexical.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            if parent_descriptor >= 0 and os.stat in os.supports_dir_fd
+            else lexical.lstat()
+        )
+        parent_closed = (
+            os.fstat(parent_descriptor) if parent_descriptor >= 0
+            else lexical.parent.lstat()
+        )
+    except OSError as exc:
+        raise RuntimeError("cannot read retrieval audit overlay safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    identity = lambda item: (
+        int(item.st_dev), int(item.st_ino), int(item.st_mode),
+        int(item.st_size), int(item.st_mtime_ns), int(getattr(item, "st_nlink", 1)),
+    )
+    data = b"".join(chunks)
+    if (len(data) > max_bytes or not stat.S_ISREG(before.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(closed)
+            or identity(closed) != identity(current)
+            or (int(parent_opened.st_dev), int(parent_opened.st_ino),
+                int(parent_opened.st_mode), int(parent_opened.st_ctime_ns))
+            != (int(parent_closed.st_dev), int(parent_closed.st_ino),
+                int(parent_closed.st_mode), int(parent_closed.st_ctime_ns))
+            or int(getattr(current, "st_nlink", 1)) != 1
+            or (os.name != "nt" and stat.S_IMODE(current.st_mode) != 0o600)):
+        raise RuntimeError("retrieval audit overlay changed or has unsafe metadata")
+    _verify_audit_parent_chain(lexical, expected_parents)
+    return data
+
+
+def _verify_audit_overlay_file(
+    path: Path, *, require_empty: bool,
+    parent_chain: Sequence[dict[str, Any]] | None = None,
+) -> bytes:
+    data = _stable_audit_bytes(path, parent_chain=parent_chain)
+    if require_empty and data:
+        raise RuntimeError("retrieval audit overlay is not empty before execution")
+    return data
+
+
+def _parse_retrieval_audit(data: bytes) -> list[dict[str, Any]]:
+    """Validate the product's body-free retrieval audit schema."""
+
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("retrieval audit must be ASCII JSONL") from exc
+    if text and not text.endswith("\n"):
+        raise RuntimeError("retrieval audit must end with a newline")
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line:
+            raise RuntimeError("retrieval audit contains a blank record")
+
+        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise RuntimeError(
+                        f"retrieval audit record {line_number} has duplicate keys"
+                    )
+                value[key] = item
+            return value
+
+        try:
+            record = json.loads(line, object_pairs_hook=reject_duplicates)
+        except (json.JSONDecodeError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"retrieval audit record {line_number} is malformed"
+            ) from exc
+        if not isinstance(record, dict) or set(record) != {
+            "content_sha256", "anchor", "result", "byte_count",
+        }:
+            raise RuntimeError("retrieval audit exposes fields outside the allowed metadata")
+        anchor = record.get("anchor")
+        if (not isinstance(record.get("content_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", record["content_sha256"]) is None
+                or not isinstance(record.get("result"), str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", record["result"]) is None
+                or isinstance(record.get("byte_count"), bool)
+                or not isinstance(record.get("byte_count"), int)
+                or not 0 <= record["byte_count"] <= 16_000
+                or not isinstance(anchor, dict)
+                or set(anchor) - {"kind", "start_line", "end_line", "chunk_id"}):
+            raise RuntimeError("retrieval audit record violates its metadata schema")
+        for key, value in anchor.items():
+            if key in {"start_line", "end_line"}:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise RuntimeError("retrieval audit has an invalid line anchor")
+            elif (not isinstance(value, str) or not value or len(value) > 128
+                  or "\x00" in value):
+                raise RuntimeError("retrieval audit has an invalid string anchor")
+        if len(records) >= 10_000:
+            raise RuntimeError("retrieval audit exceeds the record limit")
+        records.append(record)
+    return records
+
+
+def _retrieval_audit_receipt(data: bytes) -> dict[str, Any]:
+    records = _parse_retrieval_audit(data)
+    returned = [item for item in records if item["result"] == "returned"]
+    value = {
+        "schema_version": RETRIEVAL_AUDIT_SCHEMA_VERSION,
+        "status": "verified",
+        "sha256": sha256_bytes(data),
+        "record_count": len(records),
+        "returned_count": len(returned),
+        "returned_bytes": sum(int(item["byte_count"]) for item in returned),
+    }
+    value["receipt_sha256"] = sha256_bytes(canonical_json(value))
+    return value
+
+
+def _match_private_receipts_to_audit(
+    receipts: Sequence[dict[str, Any]], records: Sequence[dict[str, Any]],
+) -> None:
+    returned = [item for item in records if item.get("result") == "returned"]
+    if not receipts or not returned:
+        raise RuntimeError("v0.3 explore did not prove an authorized source snippet")
+    audit_ids: list[str] = []
+    for item in returned:
+        anchor = item.get("anchor")
+        if not isinstance(anchor, dict):
+            raise RuntimeError("v0.3 returned audit has no line anchor")
+        audit_ids.append(_private_snippet_access_id(
+            str(item.get("content_sha256")), anchor.get("start_line"),
+            anchor.get("end_line"), item.get("byte_count"),
+        ))
+    receipt_ids = [str(item.get("access_id", "")) for item in receipts]
+    if (any(re.fullmatch(r"[0-9a-f]{64}", item) is None for item in receipt_ids)
+            or len(audit_ids) != len(set(audit_ids))
+            or len(receipt_ids) != len(set(receipt_ids))
+            or set(audit_ids) != set(receipt_ids)):
+        raise RuntimeError(
+            "v0.3 source snippets and returned audit records are not one-to-one"
+        )
+
+
 def _mcp_overrides(
     arm: str, *, workspace: Path, v02_python: str, v03_python: str,
-    codegraph_command: str,
+    codegraph_command: str, sandbox_boundary: dict[str, Any] | None = None,
+    audit_overlay: AuditOverlay | None = None,
 ) -> list[str]:
     if arm == "native":
         return []
+    if (arm == "hlsgraph-v03" and sandbox_boundary is not None
+            and sandbox_boundary.get("filesystem_policy") == SANDBOX_FILESYSTEM_POLICY
+            and audit_overlay is None):
+        raise RuntimeError("v0.3 MCP requires its per-cell retrieval audit overlay")
+    if arm != "hlsgraph-v03" and audit_overlay is not None:
+        raise RuntimeError("only the v0.3 MCP may receive a retrieval audit overlay")
     if arm == "codegraph":
         parts = _codegraph_parts(codegraph_command)
-        command, args = parts[0], [*parts[1:], "serve", "--mcp"]
+        server_command, server_args = parts[0], [*parts[1:], "serve", "--mcp"]
+        server_env = dict(CODEGRAPH_ENV)
         values = {
-            "mcp_servers.codegraph.command": command,
-            "mcp_servers.codegraph.args": args,
+            "mcp_servers.codegraph.command": server_command,
+            "mcp_servers.codegraph.args": server_args,
             **{
                 f"mcp_servers.codegraph.env.{key}": value
                 for key, value in CODEGRAPH_ENV.items()
@@ -369,17 +633,185 @@ def _mcp_overrides(
     else:
         python = v02_python if arm == "hlsgraph-v02" else v03_python
         mode = "all" if arm == "hlsgraph-v02" else "explore"
+        server_command = python
+        server_args = ["-m", "hlsgraph.mcp.server", str(workspace.resolve())]
+        server_env = {"HLSGRAPH_MCP_TOOLS": mode}
         values = {
-            "mcp_servers.hlsgraph.command": python,
-            "mcp_servers.hlsgraph.args": [
-                "-m", "hlsgraph.mcp.server", str(workspace.resolve()),
-            ],
+            "mcp_servers.hlsgraph.command": server_command,
+            "mcp_servers.hlsgraph.args": server_args,
             "mcp_servers.hlsgraph.env.HLSGRAPH_MCP_TOOLS": mode,
         }
+    if sandbox_boundary is not None and sandbox_boundary.get("filesystem_policy") is not None:
+        command, args = _contained_mcp_command(
+            arm=arm, workspace=workspace, server_command=server_command,
+            server_args=server_args, server_env=server_env,
+            sandbox_boundary=sandbox_boundary,
+            audit_overlay=audit_overlay,
+        )
+        server_name = "codegraph" if arm == "codegraph" else "hlsgraph"
+        values[f"mcp_servers.{server_name}.command"] = command
+        values[f"mcp_servers.{server_name}.args"] = args
+        # Bubblewrap receives a deliberately empty environment.  Keeping the
+        # server-specific variables here would expose them to the unsandboxed
+        # launcher before the namespace exists, so they are set only by bwrap.
+        for key in tuple(values):
+            if key.startswith(f"mcp_servers.{server_name}.env."):
+                del values[key]
     output: list[str] = []
     for key, value in values.items():
         output.extend(["-c", f"{key}={_toml(value)}"])
     return output
+
+
+def _contained_mcp_command(
+    *, arm: str, workspace: Path, server_command: str,
+    server_args: list[str], server_env: dict[str, str],
+    sandbox_boundary: dict[str, Any],
+    extra_bindings: Sequence[tuple[Path, Path]] = (),
+    audit_overlay: AuditOverlay | None = None,
+    audit_overlay_require_empty: bool = True,
+    allow_system_command: bool = False,
+) -> tuple[str, list[str]]:
+    """Build the sole OS boundary for one local treatment MCP server.
+
+    Codex 0.144 launches local stdio MCP servers directly from its orchestrator;
+    the model shell permission profile does not contain those children.  The
+    configured MCP command is therefore bubblewrap itself, not the product
+    server.  No host root, HOME, proxy, CODEX_HOME, or network namespace is
+    inherited into the server.
+    """
+
+    if arm not in {"codegraph", "hlsgraph-v02", "hlsgraph-v03"}:
+        raise RuntimeError("native arm has no MCP containment command")
+    contract = sandbox_boundary.get("mcp_containment")
+    if not isinstance(contract, dict):
+        raise RuntimeError("official sandbox boundary lacks MCP containment")
+    launcher = contract.get("launcher")
+    if not isinstance(launcher, dict) or not isinstance(launcher.get("path"), str):
+        raise RuntimeError("official MCP containment lacks its launcher")
+    if contract.get("network_mode") != "unshare_all_no_share_net":
+        raise RuntimeError("official MCP containment changes the network policy")
+    runtime_entries = sandbox_boundary.get("runtime_allow_roots", {}).get(arm)
+    exclusions = contract.get("shared_runtime_exclusions")
+    if not isinstance(runtime_entries, list) or not isinstance(exclusions, list):
+        raise RuntimeError("official MCP containment lacks exact runtime roots")
+    excluded = {Path(os.path.abspath(str(item))) for item in exclusions}
+    mounted_entries = [
+        entry for entry in runtime_entries
+        if Path(os.path.abspath(str(entry["path"]))) not in excluded
+    ]
+    mounts = [Path(os.path.abspath(str(entry["path"]))) for entry in mounted_entries]
+    server_path = Path(os.path.abspath(server_command))
+    owner = next((
+        entry for entry in mounted_entries
+        if server_path == Path(os.path.abspath(str(entry["path"])))
+        or server_path.is_relative_to(Path(os.path.abspath(str(entry["path"]))))
+    ), None)
+    if allow_system_command:
+        try:
+            server_path.relative_to(Path("/usr"))
+        except ValueError as exc:
+            raise RuntimeError(
+                "treatment MCP system executable is outside the fixed /usr root"
+            ) from exc
+    elif owner is None:
+        raise RuntimeError("treatment MCP executable is outside its exact runtime roots")
+    if not server_path.is_file():
+        raise RuntimeError("treatment MCP executable is not a regular-file target")
+    if server_path.is_symlink():
+        owner_root = Path(os.path.abspath(str(owner["path"]))) if owner else None
+        usr_root = Path("/usr").resolve(strict=True)
+        resolved_in_usr = server_path.resolve(strict=True).is_relative_to(usr_root)
+        locked_venv_link = (
+            owner_root is not None and owner.get("kind") == "tree"
+            and owner.get("algorithm") == SANDBOX_ALLOW_TREE_ALGORITHM
+            and sandbox_allow_tree_identity(owner_root) == owner.get("sha256")
+        )
+        if (server_path.parent.resolve(strict=True) != server_path.parent
+                or not resolved_in_usr
+                or (not allow_system_command and not locked_venv_link)):
+            raise RuntimeError(
+                "treatment MCP launcher symlink is not locked to the fixed /usr system root"
+            )
+        current = server_path
+        for _hop in range(32):
+            if not current.is_symlink():
+                break
+            target = Path(os.readlink(current))
+            current = Path(os.path.abspath(os.fspath(
+                target if target.is_absolute() else current.parent / target
+            )))
+            in_owner = owner_root is not None and current.is_relative_to(owner_root)
+            in_usr = current.is_relative_to(usr_root)
+            if not (in_owner or in_usr):
+                raise RuntimeError(
+                    "treatment MCP launcher symlink hop escapes its locked tree and /usr"
+                )
+        else:
+            raise RuntimeError("treatment MCP launcher symlink chain is too deep")
+        if current.is_symlink() or not current.is_file() or not current.is_relative_to(usr_root):
+            raise RuntimeError(
+                "treatment MCP launcher symlink chain does not terminate in /usr"
+            )
+    elif not stat.S_ISREG(server_path.lstat().st_mode):
+        raise RuntimeError("treatment MCP executable is not a regular file")
+    workspace = workspace.resolve()
+    destination_parents: set[Path] = set()
+    bindings = [(path, path) for path in mounts]
+    bindings.extend((Path(source).resolve(), Path(destination))
+                    for source, destination in extra_bindings)
+    writable_bindings: list[tuple[Path, Path]] = []
+    if audit_overlay is not None:
+        source, destination, audit_parent_chain = audit_overlay
+        source = Path(os.path.abspath(os.fspath(source)))
+        destination = Path(os.path.abspath(os.fspath(destination)))
+        expected_destination = workspace / RETRIEVAL_ACCESS_RELATIVE
+        if arm != "hlsgraph-v03" or destination != expected_destination:
+            raise RuntimeError("retrieval audit overlay has the wrong arm or destination")
+        _verify_audit_overlay_file(
+            source, require_empty=audit_overlay_require_empty,
+            parent_chain=audit_parent_chain,
+        )
+        _verify_audit_placeholder(workspace)
+        writable_bindings.append((source, destination))
+    for path in [
+        workspace,
+        *(destination for _source, destination in bindings),
+        *(destination for _source, destination in writable_bindings),
+    ]:
+        current = path.parent
+        while current != Path(current.anchor):
+            if current.as_posix() not in {"/usr", "/proc", "/dev", "/tmp"}:
+                destination_parents.add(current)
+            current = current.parent
+    args = [
+        "--die-with-parent", "--new-session", "--unshare-all",
+        "--clearenv", "--cap-drop", "ALL",
+        "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/bin", "/bin",
+        "--symlink", "usr/lib", "/lib",
+        "--symlink", "usr/lib64", "/lib64",
+        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        "--dir", "/tmp/home",
+    ]
+    for parent in sorted(destination_parents, key=lambda item: (len(item.parts), item.as_posix())):
+        args.extend(["--dir", parent.as_posix()])
+    args.extend(["--ro-bind", workspace.as_posix(), workspace.as_posix()])
+    for source, destination in sorted(
+        set(bindings), key=lambda item: (item[1].as_posix(), item[0].as_posix())
+    ):
+        args.extend(["--ro-bind", source.as_posix(), destination.as_posix()])
+    for source, destination in writable_bindings:
+        args.extend(["--bind", source.as_posix(), destination.as_posix()])
+    safe_environment = {
+        "HOME": "/tmp/home", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8", "TMPDIR": "/tmp", "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1", **server_env,
+    }
+    for key, value in sorted(safe_environment.items()):
+        args.extend(["--setenv", key, value])
+    args.extend(["--chdir", workspace.as_posix(), "--", str(server_path), *server_args])
+    return str(Path(launcher["path"]).resolve()), args
 
 
 def build_codex_command(
@@ -387,6 +819,7 @@ def build_codex_command(
     codex_command: str,
     v02_python: str, v03_python: str, codegraph_command: str,
     sandbox_boundary: dict[str, Any] | None = None,
+    audit_overlay: AuditOverlay | None = None,
 ) -> list[str]:
     manifest = load_manifest()
     workspace = work_root / record["arm"] / record["corpus_id"]
@@ -423,6 +856,8 @@ def build_codex_command(
     command.extend(_mcp_overrides(
         record["arm"], workspace=workspace, v02_python=v02_python,
         v03_python=v03_python, codegraph_command=codegraph_command,
+        sandbox_boundary=sandbox_boundary,
+        audit_overlay=audit_overlay,
     ))
     command.append("-")
     return command
@@ -515,7 +950,9 @@ def _sandbox_canary_prefix(
     ]
 
 
-def _run_canary_command(command: list[str], *, timeout_seconds: int = 15) -> subprocess.CompletedProcess[str]:
+def _run_canary_command(
+    command: list[str], *, timeout_seconds: int = 15,
+) -> subprocess.CompletedProcess[str]:
     environment = official_process_environment()
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -531,16 +968,453 @@ def _run_canary_command(command: list[str], *, timeout_seconds: int = 15) -> sub
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def _run_stdio_mcp_exchange(
+    command: list[str], requests: list[dict[str, Any]], *, cwd: Path,
+    timeout_seconds: int = 30, raw_replies: dict[int, bytes] | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Run one isolated stdio MCP handshake and return its identified replies."""
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", cwd=str(cwd), env={}, start_new_session=True,
+        bufsize=1,
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        _terminate_process_tree(process)
+        raise RuntimeError("contained MCP did not expose stdio pipes")
+    stdout_lines: Queue[str | None] = Queue()
+    stderr_lines: list[str] = []
+
+    def read_stdout() -> None:
+        try:
+            for line in process.stdout:
+                stdout_lines.put(line)
+        finally:
+            stdout_lines.put(None)
+
+    def read_stderr() -> None:
+        stderr_lines.extend(process.stderr.readlines())
+
+    threading.Thread(target=read_stdout, daemon=True).start()
+    threading.Thread(target=read_stderr, daemon=True).start()
+    replies: dict[int, dict[str, Any]] = {}
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        for request in requests:
+            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+            identifier = request.get("id")
+            if not isinstance(identifier, int):
+                continue
+            while identifier not in replies:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                try:
+                    raw = stdout_lines.get(timeout=remaining)
+                except Empty as exc:
+                    raise TimeoutError from exc
+                if raw is None:
+                    raise RuntimeError("contained MCP closed stdout before replying")
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and isinstance(value.get("id"), int):
+                    replies[value["id"]] = value
+                    if raw_replies is not None:
+                        raw_replies[value["id"]] = raw.encode("utf-8")
+        process.stdin.close()
+        process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+        _terminate_process_tree(process)
+        raise RuntimeError("contained MCP canary timed out") from exc
+    except Exception:
+        _terminate_process_tree(process)
+        raise
+    stderr = "".join(stderr_lines)
+    if process.returncode not in {0, None} or any(
+        identifier not in replies or "result" not in replies[identifier]
+        for identifier in (1, 2, 3)
+    ):
+        raise RuntimeError(
+            "contained MCP failed initialize/tools-list/tool-call: " + stderr.strip()
+        )
+    return replies
+
+
+def probe_contained_mcp_boundary(
+    *, arm: str, workspace: Path, allowed: Sequence[Path], denied: Sequence[Path],
+    port: int, sandbox_boundary: dict[str, Any],
+) -> dict[str, Any]:
+    """Exercise file, environment, and network denial from inside an MCP tool."""
+
+    probe = (HERE / "mcp_boundary_probe.py").resolve()
+    contained_probe = Path("/hlsgraph-eval-mcp-boundary-probe.py")
+    launcher, args = _contained_mcp_command(
+        arm=arm, workspace=workspace, server_command="/usr/bin/python3",
+        server_args=[str(contained_probe)], server_env={},
+        sandbox_boundary=sandbox_boundary,
+        extra_bindings=[(probe, contained_probe)], allow_system_command=True,
+    )
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "hlsgraph-eval-canary", "version": "1"},
+        }},
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "boundary_probe", "arguments": {
+                "allowed": [str(item) for item in allowed],
+                "denied": [str(item) for item in denied], "port": port,
+            },
+        }},
+    ]
+    replies = _run_stdio_mcp_exchange([launcher, *args], requests, cwd=workspace)
+    result = replies[3]["result"].get("structuredContent")
+    if not isinstance(result, dict):
+        raise RuntimeError("contained MCP boundary probe returned no structured result")
+    if (result.get("allowed") != [True] * len(allowed)
+            or result.get("denied") != [False] * len(denied)
+            or result.get("network") is not False
+            or result.get("home") != "/tmp/home"
+            or result.get("proxy_present") is not False
+            or result.get("codex_home_present") is not False):
+        raise RuntimeError("contained MCP escaped its exact filesystem/environment/network boundary")
+    return result
+
+
+def probe_real_treatment_mcp(
+    *, arm: str, workspace: Path, v02_python: str, v03_python: str,
+    codegraph_command: str, sandbox_boundary: dict[str, Any],
+    audit_overlay: AuditOverlay | None = None,
+    audit_descriptor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Start the real treatment server inside bwrap and make one fixed read call."""
+
+    if arm == "codegraph":
+        parts = _codegraph_parts(codegraph_command)
+        server_command, server_args = parts[0], [*parts[1:], "serve", "--mcp"]
+        server_env = dict(CODEGRAPH_ENV)
+        tool_name, tool_arguments = "codegraph_explore", {"query": "dataflow"}
+    else:
+        server_command = v02_python if arm == "hlsgraph-v02" else v03_python
+        server_args = ["-m", "hlsgraph.mcp.server", str(workspace.resolve())]
+        mode = "all" if arm == "hlsgraph-v02" else "explore"
+        server_env = {"HLSGRAPH_MCP_TOOLS": mode}
+        tool_name = "overview" if arm == "hlsgraph-v02" else "explore"
+        tool_arguments = {} if arm == "hlsgraph-v02" else {
+            "query": "load",
+            "include_private_snippets": True,
+            "include_predictions": False,
+        }
+    launcher, args = _contained_mcp_command(
+        arm=arm, workspace=workspace, server_command=server_command,
+        server_args=server_args, server_env=server_env,
+        sandbox_boundary=sandbox_boundary, audit_overlay=audit_overlay,
+    )
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "hlsgraph-eval-real-mcp-canary", "version": "1"},
+        }},
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": tool_name, "arguments": tool_arguments,
+        }},
+    ]
+    raw_replies: dict[int, bytes] = {}
+    replies = _run_stdio_mcp_exchange(
+        [launcher, *args], requests, cwd=workspace, raw_replies=raw_replies,
+    )
+    tools = replies[2]["result"].get("tools", [])
+    names = [item.get("name") for item in tools if isinstance(item, dict)]
+    call = replies[3]["result"]
+    if tool_name not in names or call.get("isError") is True:
+        raise RuntimeError(f"contained real {arm} MCP did not complete its fixed read call")
+    request_bytes = json.dumps(
+        requests[-1], separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    result = {
+        "arm": arm, "tool": tool_name, "tool_count": len(names), "status": "pass",
+        "tool_call_request_sha256": sha256_bytes(request_bytes),
+        "raw_tool_response_sha256": sha256_bytes(raw_replies[3]),
+    }
+    if arm == "hlsgraph-v03":
+        if audit_overlay is None:
+            raise RuntimeError("v0.3 real MCP canary lacks its retrieval audit overlay")
+        if not isinstance(audit_descriptor, dict):
+            raise RuntimeError("v0.3 real MCP canary lacks its audit descriptor")
+        receipts = _private_snippet_output_receipts({
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "result": call},
+        })
+        audit_data = _verify_audit_overlay_file(
+            audit_overlay[0], require_empty=False,
+            parent_chain=audit_overlay[2],
+        )
+        records = _parse_retrieval_audit(audit_data)
+        _match_private_receipts_to_audit(receipts, records)
+        audit_receipt = _retrieval_audit_receipt(audit_data)
+        response_descriptor = _materialize_canary_response_artifact(
+            Path(str(sandbox_boundary["work_root"])), audit_overlay, raw_replies[3],
+        )
+        result.update({
+            "private_snippets_returned": True,
+            "source_snippet_receipt_count": len(receipts),
+            "source_access_ids": sorted(item["access_id"] for item in receipts),
+            "retrieval_audit_sha256": audit_receipt["sha256"],
+            "retrieval_audit_record_count": audit_receipt["record_count"],
+            "retrieval_audit_returned_count": audit_receipt["returned_count"],
+            "retrieval_audit_descriptor": audit_descriptor,
+            "retrieval_audit_descriptor_sha256": sha256_bytes(
+                canonical_json(audit_descriptor)
+            ),
+            "raw_tool_response_descriptor": response_descriptor,
+            "raw_tool_response_descriptor_sha256": sha256_bytes(
+                canonical_json(response_descriptor)
+            ),
+        })
+    result["response_receipt_sha256"] = sha256_bytes(canonical_json(result))
+    return result
+
+
+def run_treatment_mcp_canaries(
+    *, work_root: Path, runs_root: Path, environment: dict[str, Any],
+    v02_python: str, v03_python: str, codegraph_command: str,
+) -> dict[str, Any]:
+    """Prove containment and usability for each real treatment MCP server."""
+
+    root = _require_isolated_work_root(work_root)
+    boundary = environment["runtime_identity"]["sandbox_boundary"]
+    runtime_paths = {
+        arm: [Path(str(entry["path"])) for entry in boundary["runtime_allow_roots"][arm]]
+        for arm in ARM_IDS
+    }
+    runtime_sentinel = Path(boundary["runtime_root"]) / (
+        ".hlsgraph-mcp-containment-" + secrets.token_hex(16)
+    )
+    runtime_sentinel.write_bytes(secrets.token_bytes(32))
+    results: list[dict[str, Any]] = []
+    canary_batch_id = secrets.token_hex(16)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = int(listener.getsockname()[1])
+        for arm, other in (
+            ("codegraph", "hlsgraph-v02"),
+            ("hlsgraph-v02", "hlsgraph-v03"),
+            ("hlsgraph-v03", "hlsgraph-v02"),
+        ):
+            workspace = root / arm / "dataflow_gemm"
+            allowed = [
+                workspace / "EVAL_PROVENANCE.json",
+                *[
+                    path for path in runtime_paths[arm]
+                    if path.resolve() != Path(boundary["mcp_containment"]
+                                               ["shared_runtime_exclusions"][0]).resolve()
+                ],
+            ]
+            denied = [
+                root / arm / "cordic" / "EVAL_PROVENANCE.json",
+                root / "native" / "dataflow_gemm" / "EVAL_PROVENANCE.json",
+                root / "environment.lock.json", PUBLIC_REPOSITORY,
+                Path(runs_root), Path(boundary["codex_home"]),
+                Path(boundary["home_canary_root"]), runtime_sentinel,
+                next(path for path in runtime_paths[other]
+                     if path not in runtime_paths[arm]),
+            ]
+            boundary_result = probe_contained_mcp_boundary(
+                arm=arm, workspace=workspace, allowed=allowed, denied=denied,
+                port=port, sandbox_boundary=boundary,
+            )
+            audit_overlay = None
+            descriptor = None
+            if arm == "hlsgraph-v03":
+                descriptor = _materialize_retrieval_audit_overlay(
+                    root, batch_id=canary_batch_id,
+                    run_id="real-mcp-canary-hlsgraph-v03",
+                )
+                audit_overlay = _audit_overlay_from_descriptor(
+                    root, workspace, descriptor, batch_id=canary_batch_id,
+                    run_id="real-mcp-canary-hlsgraph-v03", require_empty=True,
+                )
+            real_result = probe_real_treatment_mcp(
+                arm=arm, workspace=workspace, v02_python=v02_python,
+                v03_python=v03_python, codegraph_command=codegraph_command,
+                sandbox_boundary=boundary, audit_overlay=audit_overlay,
+                audit_descriptor=descriptor,
+            )
+            results.append({
+                "arm": arm, "boundary": "pass", "real_server": real_result,
+                "safe_home": boundary_result["home"],
+            })
+    finally:
+        listener.close()
+        runtime_sentinel.unlink(missing_ok=True)
+    value = {
+        "schema_version": "hlsgraph.agent_eval.mcp_containment_canary.v1",
+        "native": "not_applicable_no_mcp",
+        "treatments": results,
+        "sandbox_boundary_sha256": boundary["identity_sha256"],
+    }
+    value["canary_sha256"] = sha256_bytes(canonical_json(value))
+    return value
+
+
+def _validate_treatment_mcp_canary(
+    value: Any, sandbox_boundary: dict[str, Any],
+) -> dict[str, Any]:
+    message = "treatment MCP canary is stale, incomplete, or relabelled"
+    if not isinstance(value, dict):
+        raise RuntimeError("official run set lacks the treatment MCP canary")
+    unhashed = {key: item for key, item in value.items() if key != "canary_sha256"}
+    treatments = value.get("treatments")
+    if (value.get("schema_version")
+            != "hlsgraph.agent_eval.mcp_containment_canary.v1"
+            or value.get("native") != "not_applicable_no_mcp"
+            or value.get("sandbox_boundary_sha256") != sandbox_boundary["identity_sha256"]
+            or not isinstance(treatments, list)
+            or [item.get("arm") for item in treatments] != [
+                "codegraph", "hlsgraph-v02", "hlsgraph-v03",
+            ]
+            or value.get("canary_sha256") != sha256_bytes(canonical_json(unhashed))):
+        raise RuntimeError(message)
+    expected_calls = {
+        "codegraph": ("codegraph_explore", {"query": "dataflow"}),
+        "hlsgraph-v02": ("overview", {}),
+        "hlsgraph-v03": ("explore", {
+            "query": "load", "include_private_snippets": True,
+            "include_predictions": False,
+        }),
+    }
+    by_arm: dict[str, dict[str, Any]] = {}
+    for treatment in treatments:
+        if (not isinstance(treatment, dict) or treatment.get("boundary") != "pass"
+                or treatment.get("safe_home") != "/tmp/home"
+                or not isinstance(treatment.get("real_server"), dict)):
+            raise RuntimeError(message)
+        arm = treatment.get("arm")
+        result = treatment["real_server"]
+        if arm not in expected_calls or result.get("arm") != arm or result.get("status") != "pass":
+            raise RuntimeError(message)
+        tool_name, arguments = expected_calls[arm]
+        request = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": tool_name, "arguments": arguments,
+        }}
+        request_hash = sha256_bytes(json.dumps(
+            request, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii"))
+        receipt_body = {
+            key: item for key, item in result.items()
+            if key != "response_receipt_sha256"
+        }
+        if (result.get("tool") != tool_name
+                or result.get("tool_call_request_sha256") != request_hash
+                or re.fullmatch(r"[0-9a-f]{64}", str(
+                    result.get("raw_tool_response_sha256", "")
+                )) is None
+                or result.get("response_receipt_sha256")
+                != sha256_bytes(canonical_json(receipt_body))):
+            raise RuntimeError(message)
+        by_arm[str(arm)] = result
+    v03 = by_arm["hlsgraph-v03"]
+    descriptor = v03.get("retrieval_audit_descriptor")
+    if (not isinstance(descriptor, dict)
+            or v03.get("retrieval_audit_descriptor_sha256")
+            != sha256_bytes(canonical_json(descriptor))):
+        raise RuntimeError(message)
+    relative = safe_relative_path(str(descriptor.get("path", "")))
+    parts = relative.parts
+    if (len(parts) != 4 or parts[0] != ".hlsgraph-eval-boundary"
+            or re.fullmatch(r"[0-9a-f]{32}", parts[1]) is None
+            or parts[2] != "retrieval-audit"
+            or parts[3] != "real-mcp-canary-hlsgraph-v03.jsonl"):
+        raise RuntimeError(message)
+    root = Path(str(sandbox_boundary.get("work_root", "")))
+    overlay = _audit_overlay_from_descriptor(
+        root, root / "hlsgraph-v03" / "dataflow_gemm", descriptor,
+        batch_id=parts[1], run_id="real-mcp-canary-hlsgraph-v03",
+        require_empty=False,
+    )
+    if overlay is None:
+        raise RuntimeError(message)
+    audit_data = _verify_audit_overlay_file(
+        overlay[0], require_empty=False, parent_chain=overlay[2],
+    )
+    records = _parse_retrieval_audit(audit_data)
+    response_descriptor = v03.get("raw_tool_response_descriptor")
+    expected_response_relative = (
+        Path(".hlsgraph-eval-boundary") / parts[1] / "retrieval-audit"
+        / "real-mcp-canary-hlsgraph-v03.response.json"
+    )
+    if (not isinstance(response_descriptor, dict)
+            or set(response_descriptor) != {
+                "schema_version", "path", "size", "sha256", "parent_chain",
+                "parent_chain_sha256",
+            }
+            or response_descriptor.get("schema_version")
+            != "hlsgraph.agent_eval.raw_mcp_response.v1"
+            or response_descriptor.get("path") != expected_response_relative.as_posix()
+            or not isinstance(response_descriptor.get("parent_chain"), list)
+            or response_descriptor.get("parent_chain_sha256")
+            != sha256_bytes(canonical_json(response_descriptor.get("parent_chain")))
+            or v03.get("raw_tool_response_descriptor_sha256")
+            != sha256_bytes(canonical_json(response_descriptor))):
+        raise RuntimeError(message)
+    response_path = root / expected_response_relative
+    raw_response = _stable_audit_bytes(
+        response_path, parent_chain=response_descriptor["parent_chain"],
+        max_bytes=8 * 1024 * 1024,
+    )
+    if (response_descriptor.get("size") != len(raw_response)
+            or response_descriptor.get("sha256") != sha256_bytes(raw_response)
+            or v03.get("raw_tool_response_sha256") != sha256_bytes(raw_response)):
+        raise RuntimeError(message)
+    try:
+        raw_reply = json.loads(raw_response)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(message) from exc
+    if (not isinstance(raw_reply, dict) or raw_reply.get("id") != 3
+            or not isinstance(raw_reply.get("result"), dict)):
+        raise RuntimeError(message)
+    raw_receipts = _private_snippet_output_receipts({
+        "type": "item.completed",
+        "item": {"type": "mcp_tool_call", "result": raw_reply["result"]},
+    })
+    _match_private_receipts_to_audit(raw_receipts, records)
+    returned = [item for item in records if item["result"] == "returned"]
+    audit_ids = [
+        _private_snippet_access_id(
+            item["content_sha256"], item["anchor"].get("start_line"),
+            item["anchor"].get("end_line"), item["byte_count"],
+        )
+        for item in returned
+    ]
+    reported_ids = v03.get("source_access_ids")
+    raw_ids = sorted(item["access_id"] for item in raw_receipts)
+    receipt = _retrieval_audit_receipt(audit_data)
+    if (v03.get("private_snippets_returned") is not True
+            or not isinstance(reported_ids, list) or not reported_ids
+            or len(reported_ids) != len(set(reported_ids))
+            or len(audit_ids) != len(set(audit_ids))
+            or sorted(reported_ids) != sorted(audit_ids)
+            or sorted(reported_ids) != raw_ids
+            or v03.get("source_snippet_receipt_count") != len(reported_ids)
+            or v03.get("retrieval_audit_sha256") != receipt["sha256"]
+            or v03.get("retrieval_audit_record_count") != receipt["record_count"]
+            or v03.get("retrieval_audit_returned_count") != receipt["returned_count"]):
+        raise RuntimeError(message)
+    return value
+
+
 def run_permission_canaries(
     *, codex_command: str, work_root: Path, runs_root: Path,
     environment: dict[str, Any],
 ) -> dict[str, Any]:
-    """Exercise every frozen filesystem boundary and socket deny before calls.
-
-    A platform that accepts the profile syntax but cannot enforce deny-read is
-    not an official evaluation platform.  This deliberately makes the suite a
-    NO-GO instead of silently falling back to prompt-only isolation.
-    """
+    """Prove each arm's minimal exact allowlist before any model call."""
 
     root = _require_isolated_work_root(work_root)
     runtime = environment.get("runtime_identity")
@@ -554,35 +1428,22 @@ def run_permission_canaries(
         raise RuntimeError("permission canary work root differs from the environment lock")
     if Path(str(boundary.get("public_repository", ""))).resolve() != PUBLIC_REPOSITORY:
         raise RuntimeError("permission canary public repository differs from the lock")
-    workspace = root / "native" / "dataflow_gemm"
-    allowed = workspace / "EVAL_PROVENANCE.json"
     same_arm_corpus = next(
         item["id"] for item in load_corpus_lock()["corpora"]
         if item["id"] != "dataflow_gemm"
     )
-    same_arm_sibling = root / "native" / same_arm_corpus / "EVAL_PROVENANCE.json"
-    other_arm_sibling = (
-        root / "codegraph" / "dataflow_gemm" / "EVAL_PROVENANCE.json"
-    )
     public_gold = HERE / "questions.jsonl"
-    if (not allowed.is_file() or not same_arm_sibling.is_file()
-            or not other_arm_sibling.is_file() or not public_gold.is_file()):
+    if not public_gold.is_file():
         raise RuntimeError("permission canary inputs are missing")
-    prefix = _sandbox_canary_prefix(
-        codex_command, workspace, work_root=root, runs_root=result_root,
-        sandbox_boundary=boundary,
+    python = "/usr/bin/python3" if os.name == "posix" else str(Path(sys.executable).resolve())
+    if not Path(python).is_file():
+        raise RuntimeError("official permission canary requires /usr/bin/python3")
+    access_script = (
+        "import os,pathlib,sys;"
+        "p=pathlib.Path(sys.argv[1]);"
+        "next(os.scandir(p),None) if p.is_dir() else p.open('rb').read(1);"
+        "sys.exit(0)"
     )
-    python = str(Path(sys.executable).resolve())
-    read_script = "import pathlib,sys;pathlib.Path(sys.argv[1]).read_bytes();sys.exit(0)"
-
-    def require_denied(path: Path, label: str) -> None:
-        result = _run_canary_command([
-            *prefix, python, "-c", read_script, str(path),
-        ])
-        if result.returncode == 0:
-            raise RuntimeError(
-                f"Codex permission profile allowed {label}; official suite is NO-GO"
-            )
 
     token = secrets.token_hex(16)
     codex_home = Path(str(boundary["codex_home"]))
@@ -596,11 +1457,15 @@ def run_permission_canaries(
         raise RuntimeError("current user home is absent from the sandbox boundary")
     boundary_root = root / ".hlsgraph-eval-boundary"
     boundary_root_created = not boundary_root.exists()
+    cache_root = root / "_cache"
     codex_sentinel = codex_home / f".hlsgraph-eval-canary-{token}"
     home_sentinel = home_root / f".hlsgraph-eval-home-canary-{token}"
     boundary_sentinel = boundary_root / f"permission-canary-{token}.bin"
+    cache_sentinel = cache_root / f"permission-canary-{token}.bin"
     runs_sentinel = result_root / f".hlsgraph-eval-runs-canary-{token}.bin"
     external_sentinel = external_root / "private-like-sentinel.bin"
+    runtime_root = Path(str(boundary["runtime_root"]))
+    runtime_sentinel = runtime_root / f".hlsgraph-eval-runtime-canary-{token}.bin"
     drvfs_directories: list[Path] = []
     drvfs_sentinels: list[Path] = []
     try:
@@ -608,7 +1473,9 @@ def run_permission_canaries(
         home_sentinel.write_bytes(secrets.token_bytes(32))
         boundary_root.mkdir(parents=False, exist_ok=True)
         boundary_sentinel.write_bytes(secrets.token_bytes(32))
+        cache_sentinel.write_bytes(secrets.token_bytes(32))
         runs_sentinel.write_bytes(secrets.token_bytes(32))
+        runtime_sentinel.write_bytes(secrets.token_bytes(32))
         external_root.mkdir(parents=False, exist_ok=False)
         external_sentinel.write_bytes(secrets.token_bytes(32))
         for drvfs_root_text in boundary["drvfs_roots"]:
@@ -621,24 +1488,71 @@ def run_permission_canaries(
             drvfs_directories.append(directory)
             drvfs_sentinels.append(sentinel)
 
-        allowed_result = _run_canary_command([
-            *prefix, python, "-c", read_script, str(allowed),
-        ])
-        if allowed_result.returncode != 0:
-            raise RuntimeError(
-                "Codex permission profile cannot read the isolated corpus workspace: "
-                + (allowed_result.stderr.strip() or allowed_result.stdout.strip())
+        all_runtime_paths = {
+            arm: [Path(str(entry["path"])) for entry in boundary["runtime_allow_roots"][arm]]
+            for arm in ARM_IDS
+        }
+        for arm_index, arm in enumerate(ARM_IDS):
+            workspace = root / arm / "dataflow_gemm"
+            allowed = workspace / "EVAL_PROVENANCE.json"
+            same_arm_sibling = (
+                root / arm / same_arm_corpus / "EVAL_PROVENANCE.json"
             )
-        require_denied(same_arm_sibling, "a same-arm sibling workspace read")
-        require_denied(other_arm_sibling, "an other-arm sibling workspace read")
-        require_denied(boundary_sentinel, "the boundary-control directory")
-        require_denied(runs_sentinel, "the runs root")
-        require_denied(public_gold, "a public gold-file read")
-        require_denied(codex_sentinel, "a dedicated CODEX_HOME read")
-        require_denied(home_sentinel, "a user-home read")
-        require_denied(external_sentinel, "an external private-like read")
-        for sentinel in drvfs_sentinels:
-            require_denied(sentinel, f"a drvfs read at {sentinel.parent.parent}")
+            other_arm = ARM_IDS[(arm_index + 1) % len(ARM_IDS)]
+            other_arm_sibling = (
+                root / other_arm / "dataflow_gemm" / "EVAL_PROVENANCE.json"
+            )
+            if not all(
+                path.is_file()
+                for path in (allowed, same_arm_sibling, other_arm_sibling)
+            ):
+                raise RuntimeError("permission canary workspace inputs are missing")
+            prefix = _sandbox_canary_prefix(
+                codex_command, workspace, work_root=root, runs_root=result_root,
+                sandbox_boundary=boundary,
+            )
+
+            def require_allowed(path: Path, label: str) -> None:
+                result = _run_canary_command([
+                    *prefix, python, "-c", access_script, str(path),
+                ])
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Codex permission profile cannot read {label}: "
+                        + (result.stderr.strip() or result.stdout.strip())
+                    )
+
+            def require_denied(path: Path, label: str) -> None:
+                result = _run_canary_command([
+                    *prefix, python, "-c", access_script, str(path),
+                ])
+                if result.returncode == 0:
+                    raise RuntimeError(
+                        f"Codex permission profile allowed {label}; official suite is NO-GO"
+                    )
+
+            require_allowed(allowed, f"the {arm} isolated corpus workspace")
+            for runtime_path in all_runtime_paths[arm]:
+                require_allowed(runtime_path, f"the exact {arm} runtime allow root")
+            other_runtime = next(
+                path for candidate_arm in ARM_IDS if candidate_arm != arm
+                for path in all_runtime_paths[candidate_arm]
+                if path not in all_runtime_paths[arm]
+            )
+            require_denied(same_arm_sibling, f"a {arm} same-arm sibling workspace")
+            require_denied(other_arm_sibling, f"a {arm} cross-arm workspace")
+            require_denied(boundary_sentinel, f"the {arm} boundary control")
+            require_denied(cache_sentinel, f"the {arm} cache control")
+            require_denied(root / "environment.lock.json", f"the {arm} lock control")
+            require_denied(runs_sentinel, f"the {arm} runs root")
+            require_denied(public_gold, f"the {arm} public gold repository")
+            require_denied(codex_sentinel, f"the {arm} dedicated CODEX_HOME")
+            require_denied(home_sentinel, f"the {arm} user home")
+            require_denied(external_sentinel, f"the {arm} external private-like root")
+            require_denied(runtime_sentinel, f"the {arm} undeclared runtime content")
+            require_denied(other_runtime, f"the {arm} other-arm runtime")
+            for sentinel in drvfs_sentinels:
+                require_denied(sentinel, f"a {arm} drvfs read at {sentinel.parent.parent}")
     finally:
         try:
             codex_sentinel.unlink(missing_ok=True)
@@ -655,7 +1569,15 @@ def run_permission_canaries(
         except OSError:
             pass
         try:
+            cache_sentinel.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
             runs_sentinel.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            runtime_sentinel.unlink(missing_ok=True)
         except OSError:
             pass
         for directory in drvfs_directories:
@@ -673,23 +1595,34 @@ def run_permission_canaries(
             "s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),1);"
             "s.close();sys.exit(0)"
         )
-        network_result = _run_canary_command([
-            *prefix, python, "-c", network_script, str(port),
-        ])
+        network_results = []
+        for arm in ARM_IDS:
+            workspace = root / arm / "dataflow_gemm"
+            prefix = _sandbox_canary_prefix(
+                codex_command, workspace, work_root=root, runs_root=result_root,
+                sandbox_boundary=boundary,
+            )
+            network_results.append(_run_canary_command([
+                *prefix, python, "-c", network_script, str(port),
+            ]))
     finally:
         listener.close()
-    if network_result.returncode == 0:
+    if any(result.returncode == 0 for result in network_results):
         raise RuntimeError(
             "Codex permission profile allowed a TCP connection; official suite is NO-GO"
         )
     value = {
-        "schema_version": "hlsgraph.agent_eval.permission_canary.v3",
+        "schema_version": "hlsgraph.agent_eval.permission_canary.v4",
         "profile": PERMISSION_PROFILE,
+        "filesystem_policy": SANDBOX_FILESYSTEM_POLICY,
+        "filesystem_base_token": SANDBOX_MINIMAL_TOKEN,
+        "arms_tested": list(ARM_IDS),
         "workspace_read": "pass",
+        "runtime_allow_roots_read": "pass",
         "sibling_workspace_read": "denied",
         "same_arm_sibling_read": "denied",
         "other_arm_sibling_read": "denied",
-        "boundary_control_read": "denied",
+        "control_roots_read": "denied",
         "runs_root_read": "denied",
         "runs_root_sha256": hashlib.sha256(
             result_root.as_posix().encode("utf-8")
@@ -698,11 +1631,14 @@ def run_permission_canaries(
         "codex_home_read": "denied",
         "user_home_read": "denied",
         "external_private_read": "denied",
+        "undeclared_runtime_read": "denied",
+        "other_arm_runtime_read": "denied",
         "drvfs_mount_reads": "denied",
         "drvfs_mount_count": len(boundary["drvfs_roots"]),
         "drvfs_roots_sha256": sha256_bytes(canonical_json(boundary["drvfs_roots"])),
         "network_socket": "denied",
         "sandbox_boundary_sha256": boundary["identity_sha256"],
+        "runtime_allow_roots_sha256": boundary["runtime_allow_roots_sha256"],
         "public_repository_sha256": hashlib.sha256(
             str(PUBLIC_REPOSITORY).encode("utf-8")
         ).hexdigest(),
@@ -718,13 +1654,17 @@ def _validate_permission_canary(
         raise RuntimeError("official run set lacks a permission-canary result")
     unhashed = {key: item for key, item in value.items() if key != "canary_sha256"}
     expected = {
-        "schema_version": "hlsgraph.agent_eval.permission_canary.v3",
+        "schema_version": "hlsgraph.agent_eval.permission_canary.v4",
         "profile": PERMISSION_PROFILE,
+        "filesystem_policy": SANDBOX_FILESYSTEM_POLICY,
+        "filesystem_base_token": SANDBOX_MINIMAL_TOKEN,
+        "arms_tested": list(ARM_IDS),
         "workspace_read": "pass",
+        "runtime_allow_roots_read": "pass",
         "sibling_workspace_read": "denied",
         "same_arm_sibling_read": "denied",
         "other_arm_sibling_read": "denied",
-        "boundary_control_read": "denied",
+        "control_roots_read": "denied",
         "runs_root_read": "denied",
         "runs_root_sha256": hashlib.sha256(
             Path(os.path.abspath(os.fspath(runs_root))).as_posix().encode("utf-8")
@@ -733,6 +1673,8 @@ def _validate_permission_canary(
         "codex_home_read": "denied",
         "user_home_read": "denied",
         "external_private_read": "denied",
+        "undeclared_runtime_read": "denied",
+        "other_arm_runtime_read": "denied",
         "drvfs_mount_reads": "denied",
         "drvfs_mount_count": len(sandbox_boundary["drvfs_roots"]),
         "drvfs_roots_sha256": sha256_bytes(canonical_json(
@@ -740,6 +1682,7 @@ def _validate_permission_canary(
         )),
         "network_socket": "denied",
         "sandbox_boundary_sha256": sandbox_boundary["identity_sha256"],
+        "runtime_allow_roots_sha256": sandbox_boundary["runtime_allow_roots_sha256"],
         "public_repository_sha256": hashlib.sha256(
             str(PUBLIC_REPOSITORY).encode("utf-8")
         ).hexdigest(),
@@ -829,26 +1772,153 @@ def _materialize_boundary_canary(
     return {"path": relative, "sha256": hashlib.sha256(token).hexdigest()}
 
 
-def _clear_mutable_access_log(workspace: Path) -> None:
-    """Remove the body-free retrieval audit log before each isolated cell.
-
-    That log is the sole intentionally mutable workspace byte.  Clearing it
-    prevents an earlier cell (or a pre-populated file) from becoming readable
-    context for a later arm while preserving the product's normal append-only
-    audit behavior during the cell itself.
-    """
-    ledger = workspace / ".hlsgraph"
-    private = ledger / "private"
-    path = private / "retrieval-access.jsonl"
-    is_link = lambda item: item.is_symlink() or bool(
-        callable(getattr(item, "is_junction", None)) and item.is_junction()
+def _materialize_retrieval_audit_overlay(
+    work_root: Path, *, batch_id: str, run_id: str,
+) -> dict[str, Any]:
+    root = _require_isolated_work_root(work_root)
+    if (re.fullmatch(r"[0-9a-f]{32}", batch_id) is None
+            or re.fullmatch(r"[A-Za-z0-9_.-]+", run_id) is None):
+        raise RuntimeError("retrieval audit overlay has an invalid cell identity")
+    directory = root / ".hlsgraph-eval-boundary" / batch_id / "retrieval-audit"
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    current = root
+    for part in directory.relative_to(root).parts:
+        current /= part
+        if _linked(current) or not current.is_dir():
+            raise RuntimeError("retrieval audit overlay directory is linked")
+    if os.name != "nt":
+        os.chmod(directory, 0o700)
+    path = directory / f"{run_id}.jsonl"
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | int(getattr(os, "O_BINARY", 0))
+             | int(getattr(os, "O_NOFOLLOW", 0)))
+    parent_flags = (os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+                    | int(getattr(os, "O_NOFOLLOW", 0)))
+    parent_descriptor = os.open(directory, parent_flags) if os.name != "nt" else -1
+    try:
+        parent_before = (
+            os.fstat(parent_descriptor) if parent_descriptor >= 0 else directory.lstat()
+        )
+        descriptor = (os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+                      if parent_descriptor >= 0 and os.open in os.supports_dir_fd
+                      else os.open(path, flags, 0o600))
+        try:
+            opened = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        parent_after = (
+            os.fstat(parent_descriptor) if parent_descriptor >= 0 else directory.lstat()
+        )
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    if ((int(parent_before.st_dev), int(parent_before.st_ino), int(parent_before.st_mode))
+            != (int(parent_after.st_dev), int(parent_after.st_ino),
+                int(parent_after.st_mode))):
+        raise RuntimeError("retrieval audit parent changed during creation")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    parent_chain = _audit_parent_chain(path)
+    _verify_audit_overlay_file(
+        path, require_empty=True, parent_chain=parent_chain,
     )
-    if any(item.exists() and is_link(item) for item in (workspace, ledger, private, path)):
-        raise RuntimeError("evaluation access-log path contains a link or junction")
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError("evaluation access log is not a regular file")
-        path.unlink()
+    if not stat.S_ISREG(opened.st_mode) or int(getattr(opened, "st_nlink", 1)) != 1:
+        raise RuntimeError("retrieval audit overlay was not created as a regular file")
+    return {
+        "schema_version": RETRIEVAL_AUDIT_SCHEMA_VERSION,
+        "status": "required",
+        "path": path.relative_to(root).as_posix(),
+        "destination": RETRIEVAL_ACCESS_RELATIVE.as_posix(),
+        "initial_sha256": sha256_bytes(b""),
+        "parent_chain": parent_chain,
+        "parent_chain_sha256": sha256_bytes(canonical_json(parent_chain)),
+    }
+
+
+def _materialize_canary_response_artifact(
+    work_root: Path, audit_overlay: AuditOverlay, data: bytes,
+) -> dict[str, Any]:
+    """Freeze the exact v0.3 canary reply outside the read-only workspace."""
+
+    root = _require_isolated_work_root(work_root)
+    audit_path, _destination, audit_parents = audit_overlay
+    _verify_audit_parent_chain(audit_path, audit_parents)
+    path = audit_path.with_name("real-mcp-canary-hlsgraph-v03.response.json")
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | int(getattr(os, "O_BINARY", 0))
+             | int(getattr(os, "O_NOFOLLOW", 0)))
+    parent_flags = (os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+                    | int(getattr(os, "O_NOFOLLOW", 0)))
+    parent_descriptor = os.open(path.parent, parent_flags) if os.name != "nt" else -1
+    descriptor = -1
+    try:
+        descriptor = (os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
+                      if parent_descriptor >= 0 and os.open in os.supports_dir_fd
+                      else os.open(path, flags, 0o600))
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("cannot freeze the raw treatment MCP response")
+            view = view[written:]
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    parent_chain = _audit_parent_chain(path)
+    frozen = _stable_audit_bytes(
+        path, parent_chain=parent_chain, max_bytes=8 * 1024 * 1024,
+    )
+    if frozen != data:
+        raise RuntimeError("raw treatment MCP response changed while frozen")
+    return {
+        "schema_version": "hlsgraph.agent_eval.raw_mcp_response.v1",
+        "path": path.relative_to(root).as_posix(),
+        "size": len(data), "sha256": sha256_bytes(data),
+        "parent_chain": parent_chain,
+        "parent_chain_sha256": sha256_bytes(canonical_json(parent_chain)),
+    }
+
+
+def _audit_overlay_from_descriptor(
+    work_root: Path, workspace: Path, descriptor: Any, *,
+    batch_id: str, run_id: str, require_empty: bool,
+) -> AuditOverlay | None:
+    if not isinstance(descriptor, dict):
+        raise RuntimeError("run-set cell lacks its retrieval audit contract")
+    if descriptor.get("status") == "not_applicable":
+        if set(descriptor) != {"schema_version", "status"}:
+            raise RuntimeError("not-applicable retrieval audit contract has extra fields")
+        return None
+    expected_relative = (
+        Path(".hlsgraph-eval-boundary") / batch_id / "retrieval-audit"
+        / f"{run_id}.jsonl"
+    )
+    if (set(descriptor) != {
+            "schema_version", "status", "path", "destination", "initial_sha256",
+            "parent_chain", "parent_chain_sha256",
+        }
+            or descriptor.get("schema_version") != RETRIEVAL_AUDIT_SCHEMA_VERSION
+            or descriptor.get("status") != "required"
+            or descriptor.get("path") != expected_relative.as_posix()
+            or descriptor.get("destination") != RETRIEVAL_ACCESS_RELATIVE.as_posix()
+            or descriptor.get("initial_sha256") != sha256_bytes(b"")
+            or not isinstance(descriptor.get("parent_chain"), list)
+            or descriptor.get("parent_chain_sha256")
+            != sha256_bytes(canonical_json(descriptor.get("parent_chain")))):
+        raise RuntimeError("run-set retrieval audit contract is invalid or relabelled")
+    root = _require_isolated_work_root(work_root)
+    source = root / expected_relative
+    destination = Path(os.path.abspath(os.fspath(workspace))) / RETRIEVAL_ACCESS_RELATIVE
+    parent_chain = tuple(descriptor["parent_chain"])
+    _verify_audit_overlay_file(
+        source, require_empty=require_empty, parent_chain=parent_chain,
+    )
+    _verify_audit_placeholder(workspace)
+    return source, destination, parent_chain
 
 
 def build_run_set(
@@ -857,6 +1927,7 @@ def build_run_set(
     environment_lock_sha256: str, codex_command: str, v02_python: str,
     v03_python: str, codegraph_command: str,
     permission_canary: dict[str, Any] | None = None,
+    mcp_containment_canary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze each expected cell independently of its eventual run metadata."""
     timeout_seconds = load_manifest()["codex_cli"]["timeout_seconds"]
@@ -870,12 +1941,30 @@ def build_run_set(
     permission_canary = _validate_permission_canary(
         permission_canary, boundary, runs_root=runs_root,
     )
+    mcp_containment_canary = _validate_treatment_mcp_canary(
+        mcp_containment_canary, boundary,
+    )
     cells: list[dict[str, Any]] = []
     questions = _question_map()
     batch_id = secrets.token_hex(16)
     for record in sorted(plan, key=lambda item: item["run_id"]):
         workspace = verify_prepared_workspace(
             environment, work_root, record["arm"], record["corpus_id"],
+        )
+        retrieval_audit = (
+            _materialize_retrieval_audit_overlay(
+                work_root, batch_id=batch_id, run_id=record["run_id"],
+            )
+            if record["arm"] == "hlsgraph-v03"
+            else {
+                "schema_version": RETRIEVAL_AUDIT_SCHEMA_VERSION,
+                "status": "not_applicable",
+            }
+        )
+        audit_overlay = _audit_overlay_from_descriptor(
+            work_root, work_root / record["arm"] / record["corpus_id"],
+            retrieval_audit, batch_id=batch_id, run_id=record["run_id"],
+            require_empty=True,
         )
         trace_challenge = sha256_bytes(canonical_json({
             "domain": "hlsgraph.agent_eval.trace_challenge.v1",
@@ -892,6 +1981,7 @@ def build_run_set(
             codex_command=codex_command,
             v02_python=v02_python, v03_python=v03_python,
             codegraph_command=codegraph_command, sandbox_boundary=boundary,
+            audit_overlay=audit_overlay,
         )
         boundary_canary = _materialize_boundary_canary(
             work_root, batch_id=batch_id, run_id=record["run_id"],
@@ -903,6 +1993,7 @@ def build_run_set(
             "command_argv": command,
             "workspace_identity_sha256": workspace["workspace_identity_sha256"],
             "boundary_canary": boundary_canary,
+            "retrieval_audit": retrieval_audit,
         }
         contract["run_contract_sha256"] = sha256_bytes(canonical_json(contract))
         cells.append(contract)
@@ -915,6 +2006,7 @@ def build_run_set(
         "runs_root": runs_root.as_posix(),
         "timeout_seconds": timeout_seconds,
         "permission_canary": permission_canary,
+        "mcp_containment_canary": mcp_containment_canary,
         "cells": cells,
     }
     value["run_set_sha256"] = sha256_bytes(canonical_json(value))
@@ -1109,6 +2201,9 @@ def execute_record(
     _validate_permission_canary(
         run_set.get("permission_canary"), boundary, runs_root=runs_root,
     )
+    _validate_treatment_mcp_canary(
+        run_set.get("mcp_containment_canary"), boundary,
+    )
     expected = next(
         (item for item in run_set["cells"] if item["run_id"] == record["run_id"]),
         None,
@@ -1121,6 +2216,7 @@ def execute_record(
         work_root, expected.get("boundary_canary"),
         batch_id=run_set["batch_id"], run_id=record["run_id"],
     )
+    workspace_path = _preflight(record, work_root)
     prepared_workspace = verify_prepared_workspace(
         environment_identity, work_root, record["arm"], record["corpus_id"],
     )
@@ -1128,9 +2224,10 @@ def execute_record(
         "workspace_identity_sha256"
     ):
         raise RuntimeError("run-set workspace differs from the prepared environment")
-    _clear_mutable_access_log(_preflight(record, work_root))
-    verify_prepared_workspace(
-        environment_identity, work_root, record["arm"], record["corpus_id"],
+    audit_overlay = _audit_overlay_from_descriptor(
+        work_root, workspace_path, expected.get("retrieval_audit"),
+        batch_id=run_set["batch_id"], run_id=record["run_id"],
+        require_empty=True,
     )
     question = _question_map()[record["question_id"]]
     prompt = build_prompt(
@@ -1141,6 +2238,7 @@ def execute_record(
         codex_command=codex_command,
         v02_python=v02_python, v03_python=v03_python,
         codegraph_command=codegraph_command, sandbox_boundary=boundary,
+        audit_overlay=audit_overlay,
     )
     if (command != expected.get("command_argv")
             or hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -1169,6 +2267,24 @@ def execute_record(
             timed_out = True
             _terminate_process_tree(process)
     elapsed = time.perf_counter() - started
+    if audit_overlay is None:
+        audit_data = b""
+        audit_receipt = {
+            "schema_version": RETRIEVAL_AUDIT_SCHEMA_VERSION,
+            "status": "not_applicable",
+            "sha256": sha256_bytes(audit_data),
+            "record_count": 0,
+            "returned_count": 0,
+            "returned_bytes": 0,
+        }
+        audit_receipt["receipt_sha256"] = sha256_bytes(canonical_json(audit_receipt))
+    else:
+        audit_data = _verify_audit_overlay_file(
+            audit_overlay[0], require_empty=False,
+            parent_chain=audit_overlay[2],
+        )
+        audit_receipt = _retrieval_audit_receipt(audit_data)
+    (run_dir / "retrieval-access.jsonl").write_bytes(audit_data)
     _verify_all_arm_runtime_payloads(
         environment_identity, v02_python=v02_python,
         v03_python=v03_python, codegraph_command=codegraph_command,
@@ -1178,7 +2294,7 @@ def execute_record(
         batch_id=run_set["batch_id"], run_id=record["run_id"],
     ) != boundary_canary:
         raise RuntimeError("boundary canary changed during the model cell")
-    _work_root_directory_denies(
+    _validate_workspace_inventory(
         root=work_root.resolve(), workspace=_preflight(record, work_root),
         sandbox_boundary=boundary,
     )
@@ -1198,7 +2314,11 @@ def execute_record(
         "trace_challenge": expected["trace_challenge"],
         "boundary_canary": expected["boundary_canary"],
         "permission_canary_sha256": run_set["permission_canary"]["canary_sha256"],
+        "mcp_containment_canary_sha256": run_set["mcp_containment_canary"][
+            "canary_sha256"
+        ],
         "workspace_identity_sha256": prepared_workspace["workspace_identity_sha256"],
+        "retrieval_audit": audit_receipt,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "workspace": f"$WORK_ROOT/{record['arm']}/{record['corpus_id']}",
         "command_argv": command,
@@ -1279,6 +2399,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         codex_command=args.codex_command, work_root=args.work_root,
         runs_root=args.runs_root, environment=environment,
     )
+    mcp_containment_canary = run_treatment_mcp_canaries(
+        work_root=args.work_root, runs_root=args.runs_root,
+        environment=environment, v02_python=args.v02_python,
+        v03_python=args.v03_python, codegraph_command=args.codegraph_command,
+    )
     run_set = build_run_set(
         plan, work_root=args.work_root, runs_root=args.runs_root,
         environment=environment,
@@ -1286,6 +2411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         codex_command=args.codex_command, v02_python=args.v02_python,
         v03_python=args.v03_python, codegraph_command=args.codegraph_command,
         permission_canary=permission_canary,
+        mcp_containment_canary=mcp_containment_canary,
     )
     _write_json(args.runs_root / "run-set.json", run_set)
     for record in plan:

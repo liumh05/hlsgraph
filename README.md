@@ -149,10 +149,39 @@ Built-in packs contain only versioned document metadata, section references,
 official URLs, applicability selectors, and short project-authored paraphrases.
 They do not include UG PDFs or extracted vendor text. Users may explicitly build
 a private, rebuildable FTS sidecar from documents they lawfully possess. Its
-chunks and optional local-only embeddings stay under
-`.hlsgraph/private/knowledge/` and never enter the canonical bundle, REST, ML
-export, wheel, or release. Search returns metadata by default; bounded excerpts
-require both a project policy switch and an explicit request.
+private `chunks.sqlite` stores extracted chunks and optional local-only
+embeddings under `.hlsgraph/private/knowledge/`; those bodies never enter the
+canonical SQLite database, GraphBundle, export, generated report, wheel, or
+release. REST never returns them, and other local query surfaces return metadata
+by default; bounded excerpts require both a project policy switch and an
+explicit request.
+
+User-owned PDFs can be read directly through the optional local parser; a
+Markdown conversion is not required:
+
+```bash
+python -m pip install "hlsgraph[pdf]"
+hlsgraph knowledge index --project /path/to/project \
+  --path /private/docs/ug1399-vitis-hls-en-us-2024.2.pdf \
+  --document-id local.amd.ug1399 --document-version 2024.2
+hlsgraph knowledge build-local-index --project /path/to/project \
+  --parser pdf --parser-timeout-s 60
+```
+
+The parser emits a stable `PDF page N` anchor for each text-bearing page. The
+original PDF bytes remain at the user-selected file location; only extracted
+`local_unreviewed` chunks are stored in the private sidecar. Neither is promoted
+to a reviewed rule or design fact. Parser and embedder plugins are explicitly
+selected trusted installed code: a parser reads verified document bytes and an
+embedder reads private chunk plaintext. Neither is a filesystem/network/memory
+sandbox. HLSGraph suppresses process stdout/stderr and sanitizes errors only
+during each `parse`/`embed` call. Parser output is limited to 8,388,608 Unicode
+characters (about 32 MiB in worst-case UTF-8); see
+[SECURITY.md](https://github.com/liumh05/hlsgraph/blob/main/SECURITY.md) for the
+complete input, page, timeout, output, and isolation limits.
+Direct extraction is best for text PDFs. MinerU or another explicitly selected
+local preprocessing/plugin path remains useful for scanned pages, equations,
+multi-column tables, or other layouts that need OCR and structure recovery.
 
 See [the knowledge pack policy](https://github.com/liumh05/hlsgraph/blob/main/docs/governance/KNOWLEDGE_PACK_POLICY.md).
 

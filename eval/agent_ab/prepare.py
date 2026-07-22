@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -37,6 +38,47 @@ def _redirects_resolution(path: Path) -> bool:
         return True
     is_junction = getattr(path, "is_junction", None)
     return bool(callable(is_junction) and is_junction())
+
+
+def _prepare_v03_retrieval_audit_placeholders(work_root: Path) -> None:
+    """Create the immutable workspace-side target for each audit overlay.
+
+    The workspace remains read-only during every model cell.  A distinct
+    external file is mounted over this zero-byte target for the v0.3 MCP only;
+    consequently neither the product nor the model can mutate the prepared
+    workspace identity.
+    """
+
+    for corpus in load_corpus_lock()["corpora"]:
+        workspace = work_root / "hlsgraph-v03" / corpus["id"]
+        ledger = workspace / ".hlsgraph"
+        private = ledger / "private"
+        target = private / "retrieval-access.jsonl"
+        for path, label in ((workspace, "workspace"), (ledger, "ledger")):
+            if _redirects_resolution(path) or not path.is_dir():
+                raise RuntimeError(f"v0.3 retrieval audit {label} is missing or linked")
+        private.mkdir(mode=0o700, exist_ok=True)
+        if _redirects_resolution(private) or not private.is_dir():
+            raise RuntimeError("v0.3 retrieval audit private directory is linked")
+        if target.exists() or target.is_symlink():
+            raise RuntimeError("v0.3 retrieval audit placeholder already exists")
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | int(getattr(os, "O_BINARY", 0))
+                 | int(getattr(os, "O_NOFOLLOW", 0)))
+        descriptor = os.open(target, flags, 0o600)
+        try:
+            opened = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        current = target.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode)
+                or opened.st_size != 0 or current.st_size != 0
+                or opened.st_nlink != 1 or current.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+            raise RuntimeError("v0.3 retrieval audit placeholder is unsafe")
+        if os.name != "nt":
+            os.chmod(private, 0o700)
+            os.chmod(target, 0o600)
 
 
 def _cold_start_absence_proof(
@@ -471,6 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if current_runtime_identity != runtime_identity:
             raise RuntimeError("official runtime changed during preparation")
+        _prepare_v03_retrieval_audit_placeholders(args.work_root)
         source_identities: dict[str, tuple[str, dict[str, Any]]] = {}
         for arm, label in (("hlsgraph-v02", "v02"), ("hlsgraph-v03", "v03")):
             recorded_revision = next(

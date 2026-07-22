@@ -12,7 +12,17 @@
     "prompt_sha256",
     "output_schema_sha256",
     "review_snapshot_sha256",
+    "citation_evidence_sha256",
     "cache_manifest_sha256",
+    "chunk_contract_sha256",
+    "model_inspection_contract_sha256",
+    "parser_contract_sha256s",
+    "tool_output_token_limit",
+    "initial_prompt_bytes",
+    "initial_prompt_token_upper_bound",
+    "initial_prompt_max_bytes",
+    "official_codex_elf_sha256",
+    "boundary_contract",
     "result_sha256",
     "command_sha256",
     "raw_event_stream_sha256",
@@ -24,7 +34,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "hlsgraph.knowledge-review.cli-receipt.v2"
+      "const": "hlsgraph.knowledge-review.cli-receipt.v4"
     },
     "protocol_id": {
       "enum": [
@@ -58,9 +68,217 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "citation_evidence_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "cache_manifest_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "chunk_contract_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "model_inspection_contract_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "parser_contract_sha256s": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "tool_output_token_limit": {
+      "const": 50000
+    },
+    "initial_prompt_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 524288
+    },
+    "initial_prompt_token_upper_bound": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 524288
+    },
+    "initial_prompt_max_bytes": {
+      "const": 524288
+    },
+    "official_codex_elf_sha256": {
+      "const": "901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429"
+    },
+    "boundary_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy",
+        "filesystem_allowlist",
+        "network_enabled",
+        "runtime_manifest",
+        "cache_manifest_sha256",
+        "cache_parent_policy",
+        "evidence_parent_policy",
+        "canary_results",
+        "contract_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "hlsgraph.knowledge-review.boundary-contract.v2"
+        },
+        "policy": {
+          "const": "default_deny_minimal_allowlist_v1"
+        },
+        "filesystem_allowlist": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["token", "access"],
+              "properties": {
+                "token": {"const": ":minimal"},
+                "access": {"const": "read"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["token", "access"],
+              "properties": {
+                "token": {"const": "$CACHE"},
+                "access": {"const": "read"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["token", "access"],
+              "properties": {
+                "token": {"const": "$CODEX_RUNTIME"},
+                "access": {"const": "read"}
+              }
+            }
+          ],
+          "items": false
+        },
+        "network_enabled": {
+          "const": false
+        },
+        "runtime_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "ownership_policy",
+            "executable_relative_path",
+            "executable_sha256",
+            "entries",
+            "sha256"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "hlsgraph.knowledge-review.runtime-manifest.v2"
+            },
+            "ownership_policy": {
+              "const": "caller_owned_frozen_0500_no_links_v1"
+            },
+            "executable_relative_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "executable_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "entries": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "relative_path",
+                  "kind",
+                  "size",
+                  "mode",
+                  "sha256"
+                ],
+                "properties": {
+                  "relative_path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "enum": ["file", "dir"]
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "mode": {
+                    "type": "string",
+                    "pattern": "^[0-7]{4}$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "cache_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cache_parent_policy": {
+          "const": "caller_owned_0700_single_cache_v1"
+        },
+        "evidence_parent_policy": {
+          "const": "caller_owned_0700_dedicated_evidence_v1"
+        },
+        "canary_results": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cache_read",
+            "runtime_read",
+            "checkout_denied",
+            "auth_denied",
+            "external_denied",
+            "peer_sibling_denied",
+            "evidence_denied",
+            "cache_write_denied"
+          ],
+          "properties": {
+            "cache_read": {"const": true},
+            "runtime_read": {"const": true},
+            "checkout_denied": {"const": true},
+            "auth_denied": {"const": true},
+            "external_denied": {"const": true},
+            "peer_sibling_denied": {"const": true},
+            "evidence_denied": {"const": true},
+            "cache_write_denied": {"const": true}
+          }
+        },
+        "contract_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
     },
     "result_sha256": {
       "type": "string",

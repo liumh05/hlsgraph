@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -1290,7 +1291,7 @@ def test_sidecar_manifest_and_database_tampering_fail_closed(tmp_path: Path) -> 
     value = json.loads(sidecar.manifest_path.read_text(encoding="utf-8"))
     value["index_sha256"] = "0" * 64
     sidecar.manifest_path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(KnowledgePackError, match="stable id|hash"):
+    with pytest.raises(KnowledgePackError, match="local_sidecar_manifest.contract_invalid"):
         sidecar.search("pipeline")
     sidecar.manifest_path.write_text(
         json.dumps(json_ready(manifest), sort_keys=True), encoding="utf-8",
@@ -1505,6 +1506,145 @@ def test_sidecar_embedder_must_be_local_and_vectors_stay_private(tmp_path: Path)
 
     with pytest.raises(KnowledgePackError, match="local-only"):
         sidecar.build("test.knowledge.v03", [metadata], embedder=RemoteEmbedder())
+
+
+def test_embedder_stdio_and_exception_body_are_suppressed(
+    tmp_path: Path, capfd,
+) -> None:
+    _bundle(tmp_path)
+    sentinel = "PRIVATE_EMBEDDER_SENTINEL_7cce0f"
+    document = tmp_path / "private-guide.md"
+    document.write_text(f"# II\n{sentinel}\n", encoding="utf-8")
+    metadata = index_local_document(
+        document, document_id="test.local.noisy_embed", document_version="1",
+    )
+
+    class NoisyFailingEmbedder:
+        name = "test.noisy"
+        version = "1"
+        fingerprint = hashlib.sha256(b"test.noisy.v1").hexdigest()
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": True, "network_access": False}
+
+        @staticmethod
+        def embed(texts):
+            assert sentinel in texts[0]
+            os.write(1, sentinel.encode("ascii"))
+            os.write(2, sentinel.encode("ascii"))
+            raise RuntimeError(f"embedding failed for {sentinel}")
+
+    with pytest.raises(
+        KnowledgePackError, match=r"^local embedder raised RuntimeError$",
+    ) as caught:
+        LocalKnowledgeSidecar(tmp_path).build(
+            "test.knowledge.v03", [metadata], embedder=NoisyFailingEmbedder(),
+        )
+
+    captured = capfd.readouterr()
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert sentinel not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_noisy_successful_embedder_still_publishes_vectors(
+    tmp_path: Path, capfd,
+) -> None:
+    _bundle(tmp_path)
+    sentinel = "PRIVATE_SUCCESS_EMBEDDER_SENTINEL_408b4a"
+    document = tmp_path / "private-guide.md"
+    document.write_text(f"# Pipeline\n{sentinel}\n", encoding="utf-8")
+    metadata = index_local_document(
+        document, document_id="test.local.success_embed", document_version="1",
+    )
+
+    class NoisySuccessfulEmbedder:
+        name = "test.noisy_success"
+        version = "1"
+        fingerprint = hashlib.sha256(b"test.noisy_success.v1").hexdigest()
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": True, "network_access": False}
+
+        @staticmethod
+        def embed(texts):
+            assert sentinel in texts[0]
+            os.write(1, sentinel.encode("ascii"))
+            os.write(2, sentinel.encode("ascii"))
+            return [[float(len(text)), 1.0] for text in texts]
+
+    sidecar = LocalKnowledgeSidecar(tmp_path)
+    manifest = sidecar.build(
+        "test.knowledge.v03", [metadata], embedder=NoisySuccessfulEmbedder(),
+    )
+    captured = capfd.readouterr()
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert manifest.embedder_id == "test.noisy_success"
+    with sqlite3.connect(sidecar.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM vectors").fetchone()[0] == 1
+
+
+def test_embedder_identity_is_frozen_across_every_call(tmp_path: Path) -> None:
+    document = tmp_path / "guide.md"
+    document.write_text("# Pipeline\nprivate evidence\n", encoding="utf-8")
+    metadata = index_local_document(
+        document, document_id="test.local.mutable_embedder", document_version="1",
+    )
+
+    class MutableEmbedder:
+        name = "test.mutable"
+        version = "1"
+        fingerprint = hashlib.sha256(b"test.mutable.v1").hexdigest()
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": True, "network_access": False}
+
+        def embed(self, texts):
+            self.fingerprint = hashlib.sha256(b"changed").hexdigest()
+            return [[1.0] for _text in texts]
+
+    sidecar = LocalKnowledgeSidecar(tmp_path)
+    with pytest.raises(
+        KnowledgePackError, match=r"^embedder_identity.changed_after_call$",
+    ):
+        sidecar.build(
+            "test.knowledge.mutable_embedder", [metadata],
+            embedder=MutableEmbedder(),
+        )
+    assert not sidecar.manifest_path.exists()
+
+
+def test_sidecar_decode_error_is_fixed_and_body_free(tmp_path: Path) -> None:
+    sidecar = LocalKnowledgeSidecar(tmp_path)
+    sidecar.prepare()
+    sidecar.manifest_path.write_bytes(b"\xffPRIVATE-MANIFEST-BODY")
+    with pytest.raises(
+        KnowledgePackError,
+        match=r"^local_sidecar_manifest.utf8_decode_failed$",
+    ) as caught:
+        sidecar.manifest()
+    assert "PRIVATE-MANIFEST-BODY" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_parser_exception_type_name_is_strictly_whitelisted() -> None:
+    class UnsafeNameError(Exception):
+        pass
+
+    UnsafeNameError.__name__ = "Unsafe\nPRIVATE"
+    assert sidecar_module._safe_external_type_name(UnsafeNameError()) == (
+        "external_error"
+    )
 
 
 def test_pdf_is_metadata_only_without_explicit_local_parser(tmp_path: Path) -> None:

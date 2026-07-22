@@ -842,6 +842,11 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
         parser = None
         if args.parser_config and not args.parser:
             raise CliError("--parser-config requires --parser")
+        if ((args.parser_timeout_s is not None or args.max_parsed_chars is not None)
+                and not args.parser):
+            raise CliError(
+                "--parser-timeout-s and --max-parsed-chars require --parser"
+            )
         if args.parser:
             from .plugins import load_knowledge_parser
 
@@ -865,6 +870,10 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
             options["chunk_chars"] = args.chunk_chars
         if args.chunk_overlap is not None:
             options["overlap"] = args.chunk_overlap
+        if args.parser_timeout_s is not None:
+            options["parser_timeout_s"] = args.parser_timeout_s
+        if args.max_parsed_chars is not None:
+            options["max_parsed_chars"] = args.max_parsed_chars
         manifest = LocalKnowledgeSidecar(root).build(
             project.bundle.manifest.project_id, documents,
             parser=parser, embedder=embedder, **options,
@@ -1091,6 +1100,14 @@ def build_parser() -> argparse.ArgumentParser:
                            help="JSON object passed to the selected local embedder")
     knowledge.add_argument("--chunk-chars", type=int)
     knowledge.add_argument("--chunk-overlap", type=int)
+    knowledge.add_argument(
+        "--parser-timeout-s", type=float,
+        help="local parser timeout in seconds (0.1..60; build-local-index only)",
+    )
+    knowledge.add_argument(
+        "--max-parsed-chars", type=int,
+        help="maximum local parser output characters (build-local-index only)",
+    )
     knowledge.set_defaults(func=_cmd_knowledge)
 
     serve = sub.add_parser("serve", help="serve the versioned read-only REST API")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -18,7 +19,7 @@ READ_COMMAND = re.compile(
 # is one source-access call too.  This avoids granting either graph arm a free
 # "zero reads" merely because source arrived inside a tool result.
 SOURCE_BEARING_MCP_TOOLS = {
-    "codegraph_explore", "explore", "context", "module_or_region", "evidence",
+    "codegraph_explore", "context", "module_or_region", "evidence",
     "search",
 }
 
@@ -174,6 +175,111 @@ def _tool_output_text(event: dict[str, Any]) -> str:
     return "\n".join(pieces)
 
 
+def _tool_result_values(event: dict[str, Any]) -> list[Any]:
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    return [
+        item.get("aggregated_output"), item.get("output"), item.get("result"),
+        item.get("content"), event.get("tool_output"), event.get("result"),
+    ]
+
+
+def _walk_result_values(value: Any, *, depth: int = 0) -> Iterable[Any]:
+    if depth > 12:
+        return
+    yield value
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_result_values(item, depth=depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_result_values(item, depth=depth + 1)
+    elif isinstance(value, str) and len(value) <= 8 * 1024 * 1024:
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return
+            yield from _walk_result_values(decoded, depth=depth + 1)
+
+
+def _private_snippet_output_receipts(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return body-free receipts only when the MCP result proves a snippet."""
+
+    values = [
+        nested
+        for root in _tool_result_values(event) if root is not None
+        for nested in _walk_result_values(root)
+    ]
+    trace_confirmed = any(
+        isinstance(value, dict)
+        and value.get("private_snippets_requested") is True
+        and value.get("private_snippets_returned") is True
+        for value in values
+    )
+    if not trace_confirmed:
+        return []
+    receipts: dict[tuple[str, int, int, str], dict[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, dict) or value.get("record_kind") != "source_snippet":
+            continue
+        data = value.get("data")
+        if not isinstance(data, dict):
+            continue
+        excerpt = data.get("private_excerpt")
+        anchor = data.get("anchor")
+        content_sha256 = data.get("artifact_sha256")
+        excerpt_sha256 = data.get("excerpt_sha256")
+        if (not isinstance(excerpt, str) or not excerpt or len(excerpt) > 4_000
+                or len(excerpt.splitlines()) > 80
+                or not isinstance(anchor, dict)
+                or isinstance(anchor.get("start_line"), bool)
+                or not isinstance(anchor.get("start_line"), int)
+                or isinstance(anchor.get("end_line"), bool)
+                or not isinstance(anchor.get("end_line"), int)
+                or anchor["start_line"] < 1 or anchor["end_line"] < anchor["start_line"]
+                or not isinstance(content_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None
+                or data.get("authorization") != "project_bounded"):
+            continue
+        encoded = excerpt.encode("utf-8")
+        actual_excerpt_sha256 = hashlib.sha256(encoded).hexdigest()
+        if excerpt_sha256 != actual_excerpt_sha256:
+            continue
+        key = (
+            content_sha256, anchor["start_line"], anchor["end_line"],
+            actual_excerpt_sha256,
+        )
+        receipts[key] = {
+            "access_id": _private_snippet_access_id(
+                content_sha256, anchor["start_line"], anchor["end_line"], len(encoded),
+            ),
+            "content_sha256": content_sha256,
+            "start_line": anchor["start_line"],
+            "end_line": anchor["end_line"],
+            "byte_count": len(encoded),
+            "excerpt_sha256": actual_excerpt_sha256,
+        }
+    return [receipts[key] for key in sorted(receipts)]
+
+
+def _private_snippet_access_id(
+    content_sha256: str, start_line: int, end_line: int, byte_count: int,
+) -> str:
+    """Return the body-free identity shared by MCP output and access audit."""
+
+    payload = {
+        "domain": "hlsgraph.agent_eval.private_access.v1",
+        "content_sha256": content_sha256,
+        "start_line": start_line,
+        "end_line": end_line,
+        "byte_count": byte_count,
+    }
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")).hexdigest()
+
+
 def _tool_leaf(name: str) -> str:
     lowered = name.casefold().replace("-", "_")
     for separator in ("__", ".", "/", ":"):
@@ -291,7 +397,7 @@ def validate_trace_policy(
         if logical is None:
             logical = {
                 "name": tool_name, "item_type": tool_type, "server": server,
-                "outcome": _tool_outcome(event),
+                "outcome": _tool_outcome(event), "command": command,
             }
             logical_by_id[logical_id] = logical
             logical_tools.append(logical)
@@ -299,6 +405,8 @@ def validate_trace_policy(
             outcome = _tool_outcome(event)
             if outcome != "incomplete":
                 logical["outcome"] = outcome
+            if command:
+                logical["command"] = command
         if not str(event.get("type", "")).endswith(".started"):
             completed_tools += 1
         if _is_mcp_tool(tool_type, tool_name, server):
@@ -331,6 +439,18 @@ def validate_trace_policy(
         violations.append("missing-treatment-mcp")
     if graph_arm and not first_is_treatment:
         violations.append("first-call-not-treatment-mcp")
+    if arm == "hlsgraph-v03":
+        for item in treatment_calls:
+            try:
+                arguments = json.loads(item.get("command", ""))
+            except json.JSONDecodeError:
+                arguments = None
+            if (not isinstance(arguments, dict)
+                    or not isinstance(arguments.get("query"), str)
+                    or not arguments["query"].strip()
+                    or arguments.get("include_private_snippets") is not True
+                    or arguments.get("include_predictions") is not False):
+                violations.append("v03-explore-private-contract")
     if violations:
         raise ValueError("trace policy violation: " + ", ".join(sorted(set(violations))))
     return {
@@ -383,6 +503,7 @@ def normalize_trace(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         and event.get("thread_id")
     })
     tools: list[dict[str, str]] = []
+    private_receipts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     seen: set[tuple[str, str, str]] = set()
     for ordinal, event in enumerate(event_list):
         identity = _tool_identity(event)
@@ -390,13 +511,32 @@ def normalize_trace(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
             continue
         call_id, name, command, item_type, server = identity
         dedupe = (call_id, name, command) if call_id else (f"event-{ordinal}", name, command)
+        receipts = _private_snippet_output_receipts(event)
+        if receipts:
+            existing = private_receipts.setdefault(dedupe, [])
+            by_key = {
+                (item["content_sha256"], item["start_line"], item["end_line"],
+                 item["excerpt_sha256"]): item
+                for item in (*existing, *receipts)
+            }
+            private_receipts[dedupe] = [by_key[key] for key in sorted(by_key)]
         if dedupe in seen:
             continue
         seen.add(dedupe)
         tools.append({
             "call_id": call_id, "name": name, "command": command,
             "item_type": item_type, "server": server,
+            "_dedupe": dedupe,
         })
+    private_snippet_calls: list[dict[str, Any]] = []
+    for item in tools:
+        dedupe = item.pop("_dedupe")
+        receipts = private_receipts.get(dedupe, [])
+        if receipts:
+            private_snippet_calls.append({
+                "call_id": item["call_id"], "name": item["name"],
+                "server": item["server"], "receipts": receipts,
+            })
     reads = sum(
         1 for item in tools
         if READ_COMMAND.search(item["command"])
@@ -414,6 +554,7 @@ def normalize_trace(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "file_reads": reads,
         "file_read_semantics": "source_access_tool_calls",
         "tools": tools,
+        "private_snippet_calls": private_snippet_calls,
         "usage": _last_usage(event_list),
         "thread_ids": thread_ids,
     }

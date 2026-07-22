@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import shutil
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -30,13 +32,23 @@ from eval.agent_ab.runner import (
     run_permission_canaries,
 )
 from eval.agent_ab.score import (
-    _validate_execution_contract, _validate_terminal_usage, canonical_answer,
-    public_criterion_ids, score_answer,
+    _score_retrieval_audit, _validate_execution_contract,
+    _validate_terminal_usage, canonical_answer, public_criterion_ids, score_answer,
 )
-from tests.agent_eval_runtime_support import synthetic_runtime_identity
+from tests.agent_eval_runtime_support import (
+    synthetic_retrieval_audit_placeholder, synthetic_runtime_identity,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_execute_record_uses_the_live_post_cell_workspace_validator() -> None:
+    """Keep the success path from calling a removed boundary helper."""
+
+    source = inspect.getsource(eval_runner.execute_record)
+    assert "_work_root_directory_denies" not in source
+    assert "_validate_workspace_inventory(" in source
 
 
 def _message_event(answer: dict[str, object]) -> dict[str, object]:
@@ -96,10 +108,11 @@ def test_codex_command_uses_strict_named_permissions_and_no_sandbox_mode(
     joined = "\n".join(command)
     assert 'web_search="disabled"' in joined
     assert 'default_permissions="hlsgraph_eval"' in joined
-    assert 'permissions.hlsgraph_eval.extends=":read-only"' in joined
+    assert 'permissions.hlsgraph_eval.extends=' not in joined
     assert "permissions.hlsgraph_eval.network.enabled=false" in joined
     assert "permissions.hlsgraph_eval.filesystem={" in joined
-    assert f'"{runs_root.resolve().as_posix()}"="deny"' in joined
+    assert '":minimal"="read"' in joined
+    assert runs_root.resolve().as_posix() not in joined
     assert "--sandbox" not in joined
     with pytest.raises(RuntimeError, match="runs root must be disjoint"):
         build_codex_command(
@@ -128,7 +141,7 @@ def test_run_plan_is_blocked_counterbalanced_and_binds_execution_order() -> None
     )
 
 
-def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inventory(
+def test_permission_profile_is_default_deny_and_rejects_unknown_inventory(
     tmp_path: Path,
 ) -> None:
     work_root = tmp_path / "isolated-work"
@@ -156,13 +169,15 @@ def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inven
         item for item in command
         if item.startswith("permissions.hlsgraph_eval.filesystem=")
     )
-    assert f'"{(work_root / "codegraph").as_posix()}"="deny"' in filesystem
-    assert (
-        f'"{(work_root / "native" / "cordic").as_posix()}"="deny"'
-        in filesystem
-    )
+    assert '":minimal"="read"' in filesystem
+    assert (work_root / "codegraph").as_posix() not in filesystem
+    assert (work_root / "native" / "cordic").as_posix() not in filesystem
     assert f'"{(work_root / "native" / "dataflow_gemm").as_posix()}"="read"' in filesystem
-    assert f'"{runs_root.resolve().as_posix()}"="deny"' in filesystem
+    assert f'"{runtime["codex"]["path"]}"="read"' in filesystem
+    assert runs_root.resolve().as_posix() not in filesystem
+    assert '="deny"' not in filesystem
+    assert ROOT.as_posix() not in filesystem
+    assert runtime["sandbox_boundary"]["codex_home"] not in filesystem
     codegraph_record = {**record, "arm": "codegraph"}
     codegraph_command = build_codex_command(
         codegraph_record, work_root=work_root,
@@ -175,7 +190,20 @@ def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inven
         ),
         sandbox_boundary=runtime["sandbox_boundary"],
     )
-    cell = {**codegraph_record, "command_argv": codegraph_command}
+    codegraph_filesystem = next(
+        item for item in codegraph_command
+        if item.startswith("permissions.hlsgraph_eval.filesystem=")
+    )
+    for entry in runtime["sandbox_boundary"]["runtime_allow_roots"]["codegraph"]:
+        assert f'"{entry["path"]}"="read"' in codegraph_filesystem
+    assert runtime["python"]["hlsgraph_v03"]["path"] not in codegraph_filesystem
+    cell = {
+        **codegraph_record, "command_argv": codegraph_command,
+        "retrieval_audit": {
+            "schema_version": "hlsgraph.agent_eval.retrieval_audit.v1",
+            "status": "not_applicable",
+        },
+    }
     cell["run_contract_sha256"] = eval_runner.sha256_bytes(
         eval_runner.canonical_json(cell)
     )
@@ -183,10 +211,9 @@ def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inven
     _validate_execution_contract(
         cell, work_root, environment, runs_root=runs_root,
     )
-    with pytest.raises(ValueError, match="permission profile"):
-        _validate_execution_contract(
-            cell, work_root, environment, runs_root=tmp_path / "other-runs",
-        )
+    _validate_execution_contract(
+        cell, work_root, environment, runs_root=tmp_path / "other-runs",
+    )
 
     def rehash(changed_cell: dict[str, object]) -> None:
         changed_cell["run_contract_sha256"] = eval_runner.sha256_bytes(
@@ -229,35 +256,49 @@ def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inven
     changed = copy.deepcopy(cell)
     telemetry_index = next(
         index for index, value in enumerate(changed["command_argv"])
-        if value.startswith("mcp_servers.codegraph.env.CODEGRAPH_TELEMETRY=")
+        if value.startswith("mcp_servers.codegraph.args=")
     )
+    telemetry_args = json.loads(
+        changed["command_argv"][telemetry_index].split("=", 1)[1]
+    )
+    value_index = telemetry_args.index("CODEGRAPH_TELEMETRY") + 1
+    telemetry_args[value_index] = "1"
     changed["command_argv"][telemetry_index] = (
-        "mcp_servers.codegraph.env.CODEGRAPH_TELEMETRY=\"1\""
+        "mcp_servers.codegraph.args=" + json.dumps(telemetry_args)
     )
     rehash(changed)
-    with pytest.raises(ValueError, match="offline environment"):
+    with pytest.raises(ValueError, match="runtime or args"):
         _validate_execution_contract(
             changed, work_root, environment, runs_root=runs_root,
         )
 
-    changed_runs_rule = copy.deepcopy(cell)
+    changed_minimal_rule = copy.deepcopy(cell)
     filesystem_index = next(
-        index for index, value in enumerate(changed_runs_rule["command_argv"])
+        index for index, value in enumerate(changed_minimal_rule["command_argv"])
         if value.startswith("permissions.hlsgraph_eval.filesystem=")
     )
-    exact_deny = f'"{runs_root.resolve().as_posix()}"="deny"'
-    changed_runs_rule["command_argv"][filesystem_index] = (
-        changed_runs_rule["command_argv"][filesystem_index].replace(
-            exact_deny, f'"{runs_root.resolve().as_posix()}"="read"',
+    changed_minimal_rule["command_argv"][filesystem_index] = (
+        changed_minimal_rule["command_argv"][filesystem_index].replace(
+            '":minimal"="read"', '":minimal"="deny"',
         )
     )
-    rehash(changed_runs_rule)
+    rehash(changed_minimal_rule)
     with pytest.raises(ValueError, match="permission profile"):
         _validate_execution_contract(
-            changed_runs_rule, work_root, environment, runs_root=runs_root,
+            changed_minimal_rule, work_root, environment, runs_root=runs_root,
         )
 
     v03_record = {**record, "arm": "hlsgraph-v03"}
+    v03_workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    synthetic_retrieval_audit_placeholder(v03_workspace)
+    audit_batch = "a" * 32
+    audit_descriptor = eval_runner._materialize_retrieval_audit_overlay(
+        work_root, batch_id=audit_batch, run_id=v03_record["run_id"],
+    )
+    audit_overlay = eval_runner._audit_overlay_from_descriptor(
+        work_root, v03_workspace, audit_descriptor,
+        batch_id=audit_batch, run_id=v03_record["run_id"], require_empty=True,
+    )
     v03_command = build_codex_command(
         v03_record, work_root=work_root,
         runs_root=runs_root,
@@ -266,8 +307,21 @@ def test_permission_profile_denies_sibling_directories_and_rejects_unknown_inven
         v03_python=runtime["python"]["hlsgraph_v03"]["path"],
         codegraph_command="codegraph",
         sandbox_boundary=runtime["sandbox_boundary"],
+        audit_overlay=audit_overlay,
     )
-    v03_cell = {**v03_record, "command_argv": v03_command}
+    v03_cell = {
+        **v03_record, "command_argv": v03_command,
+        "retrieval_audit": audit_descriptor,
+    }
+    v03_filesystem = next(
+        item for item in v03_command
+        if item.startswith("permissions.hlsgraph_eval.filesystem=")
+    )
+    for entry in runtime["sandbox_boundary"]["runtime_allow_roots"]["hlsgraph-v03"]:
+        assert f'"{entry["path"]}"="read"' in v03_filesystem
+    for entry in runtime["sandbox_boundary"]["runtime_allow_roots"]["hlsgraph-v02"]:
+        if entry["path"] != runtime["codex"]["path"]:
+            assert entry["path"] not in v03_filesystem
     rehash(v03_cell)
     _validate_execution_contract(
         v03_cell, work_root, environment, runs_root=runs_root,
@@ -402,6 +456,10 @@ def test_graph_trace_requires_exact_treatment_mcp_as_first_call(tmp_path: Path) 
         "item": {
             "id": "mcp", "type": "mcp_tool_call", "server": "hlsgraph",
             "name": "explore", "status": "failed", "error": "index unavailable",
+            "arguments": {
+                "query": "flow", "include_private_snippets": True,
+                "include_predictions": False,
+            },
         },
     }]
     report = validate_trace_policy(
@@ -492,7 +550,7 @@ def test_terminal_usage_rejects_conflicting_objects_in_one_event() -> None:
         ])
 
 
-def test_mcp_source_retrieval_counts_as_file_read() -> None:
+def test_mcp_source_request_without_bound_output_does_not_count_as_file_read() -> None:
     events = [
         {
             "type": "item.completed",
@@ -500,15 +558,109 @@ def test_mcp_source_retrieval_counts_as_file_read() -> None:
                 "id": "mcp-1",
                 "type": "mcp_tool_call",
                 "name": "hlsgraph.explore",
-                "arguments": {"query": "flow", "include_private_snippets": True},
+                "arguments": {
+                    "query": "flow", "include_private_snippets": True,
+                    "include_predictions": False,
+                },
             },
         },
         _message_event(_minimal_answer()),
     ]
     normalized = normalize_trace(events)
     assert normalized["tool_calls"] == 1
-    assert normalized["file_reads"] == 1
+    assert normalized["file_reads"] == 0
+    assert normalized["private_snippet_calls"] == []
     assert normalized["file_read_semantics"] == "source_access_tool_calls"
+
+
+def test_private_source_read_requires_matching_tool_output_and_audit_record() -> None:
+    workspace = ROOT / "examples/dataflow_gemm"
+    source = (workspace / "kernel.cpp").read_text(encoding="utf-8").splitlines()
+    excerpt = source[6]
+    excerpt_sha256 = eval_runner.sha256_bytes(excerpt.encode("utf-8"))
+    content_sha256 = next(
+        item["sha256"] for corpus in load_corpus_lock()["corpora"]
+        if corpus["id"] == "dataflow_gemm" for item in corpus["files"]
+        if item["destination"] == "kernel.cpp"
+    )
+    event = {
+        "type": "item.completed",
+        "item": {
+            "id": "mcp-1", "type": "mcp_tool_call", "server": "hlsgraph",
+            "name": "explore",
+            "arguments": {
+                "query": "values", "include_private_snippets": True,
+                "include_predictions": False,
+            },
+            "result": {"structuredContent": {
+                "trace": {
+                    "private_snippets_requested": True,
+                    "private_snippets_returned": True,
+                },
+                "facts": [{
+                    "record_kind": "source_snippet",
+                    "data": {
+                        "artifact_sha256": content_sha256,
+                        "anchor": {"start_line": 7, "end_line": 7},
+                        "private_excerpt": excerpt,
+                        "excerpt_sha256": excerpt_sha256,
+                        "authorization": "project_bounded",
+                    },
+                }],
+            }},
+        },
+    }
+    normalized = normalize_trace([event, _message_event(_minimal_answer())])
+    assert normalized["file_reads"] == 0
+    assert len(normalized["private_snippet_calls"]) == 1
+    audit_record = {
+        "content_sha256": content_sha256,
+        "anchor": {"kind": "source_line", "start_line": 7, "end_line": 7},
+        "result": "returned", "byte_count": len(excerpt.encode("utf-8")),
+    }
+    audit = (
+        json.dumps(audit_record, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+    receipt = eval_runner._retrieval_audit_receipt(audit)
+    scored = _score_retrieval_audit(
+        audit, {"retrieval_audit": receipt}, normalized, arm="hlsgraph-v03",
+        workspace=workspace, corpus_id="dataflow_gemm",
+    )
+    assert scored["source_access_calls"] == 1
+    mismatched = audit.replace(content_sha256.encode("ascii"), b"b" * 64)
+    mismatched_receipt = eval_runner._retrieval_audit_receipt(mismatched)
+    with pytest.raises(ValueError, match="not one-to-one"):
+        _score_retrieval_audit(
+            mismatched, {"retrieval_audit": mismatched_receipt}, normalized,
+            arm="hlsgraph-v03", workspace=workspace, corpus_id="dataflow_gemm",
+        )
+    no_output = copy.deepcopy(normalized)
+    no_output["private_snippet_calls"] = []
+    with pytest.raises(ValueError, match="not one-to-one"):
+        _score_retrieval_audit(
+            audit, {"retrieval_audit": receipt}, no_output, arm="hlsgraph-v03",
+            workspace=workspace, corpus_id="dataflow_gemm",
+        )
+    empty_receipt = eval_runner._retrieval_audit_receipt(b"")
+    with pytest.raises(ValueError, match="not one-to-one"):
+        _score_retrieval_audit(
+            b"", {"retrieval_audit": empty_receipt}, normalized,
+            arm="hlsgraph-v03", workspace=workspace, corpus_id="dataflow_gemm",
+        )
+    duplicate = audit + audit
+    with pytest.raises(ValueError, match="duplicate access identities"):
+        _score_retrieval_audit(
+            duplicate, {"retrieval_audit": eval_runner._retrieval_audit_receipt(duplicate)},
+            normalized, arm="hlsgraph-v03", workspace=workspace,
+            corpus_id="dataflow_gemm",
+        )
+    forged = copy.deepcopy(normalized)
+    forged["private_snippet_calls"][0]["receipts"][0]["excerpt_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="frozen corpus bytes"):
+        _score_retrieval_audit(
+            audit, {"retrieval_audit": receipt}, forged, arm="hlsgraph-v03",
+            workspace=workspace, corpus_id="dataflow_gemm",
+        )
 
 
 def _bound_architecture_answer(question: dict[str, object]) -> dict[str, object]:
@@ -612,6 +764,63 @@ def test_work_root_must_be_disjoint_from_public_repository(tmp_path: Path) -> No
     ).resolve()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX audit parent-chain contract")
+def test_retrieval_audit_descriptor_rejects_parent_replacement_and_symlink(
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "isolated-work"
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    workspace.mkdir(parents=True)
+    synthetic_retrieval_audit_placeholder(workspace)
+    batch_id = "b" * 32
+    descriptor = eval_runner._materialize_retrieval_audit_overlay(
+        work_root, batch_id=batch_id, run_id="fixture",
+    )
+    original = work_root / descriptor["path"]
+    parent = original.parent
+    moved = parent.with_name("retrieval-audit-original")
+    parent.rename(moved)
+    parent.mkdir(mode=0o700)
+    replacement = parent / original.name
+    replacement.write_bytes(b"")
+    replacement.chmod(0o600)
+    with pytest.raises(RuntimeError, match="parent chain changed"):
+        eval_runner._audit_overlay_from_descriptor(
+            work_root, workspace, descriptor, batch_id=batch_id,
+            run_id="fixture", require_empty=True,
+        )
+    shutil.rmtree(parent)
+    outside = tmp_path / "outside-audit"
+    outside.mkdir(mode=0o700)
+    outside_file = outside / original.name
+    outside_file.write_bytes(b"")
+    outside_file.chmod(0o600)
+    parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="missing or linked"):
+        eval_runner._audit_overlay_from_descriptor(
+            work_root, workspace, descriptor, batch_id=batch_id,
+            run_id="fixture", require_empty=True,
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX workspace-mode identity contract")
+def test_workspace_identity_binds_private_directory_and_placeholder_modes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    placeholder = synthetic_retrieval_audit_placeholder(workspace)
+    baseline = eval_common._tree_identity(workspace)
+    placeholder.parent.chmod(0o755)
+    assert eval_common._tree_identity(workspace) != baseline
+    placeholder.parent.chmod(0o700)
+    assert eval_common._tree_identity(workspace) == baseline
+    placeholder.chmod(0o644)
+    assert eval_common._tree_identity(workspace) != baseline
+    with pytest.raises(RuntimeError, match="placeholder must have mode 0600"):
+        eval_runner._verify_audit_placeholder(workspace)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX venv symlink contract")
 def test_posix_venv_python_symlink_keeps_lexical_path(tmp_path: Path) -> None:
     target = tmp_path / "python-target"
@@ -624,6 +833,53 @@ def test_posix_venv_python_symlink_keeps_lexical_path(tmp_path: Path) -> None:
     launcher.symlink_to(tmp_path / "missing-target")
     with pytest.raises(EvalManifestError, match="existing file"):
         resolve_local_executable(str(launcher))
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bwrap") is None,
+    reason="POSIX locked launcher symlink-hop contract",
+)
+def test_contained_mcp_rejects_absolute_intermediate_venv_symlink(
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "isolated-work"
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    workspace.mkdir(parents=True)
+    placeholder = synthetic_retrieval_audit_placeholder(workspace)
+    (work_root / "_cache").mkdir()
+    (work_root / "environment.lock.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "materialization.json").write_text("{}\n", encoding="utf-8")
+    runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=work_root)
+    boundary = runtime["sandbox_boundary"]
+    outside = tmp_path / "outer-venv" / "bin"
+    outside.mkdir(parents=True)
+    (outside / "python").symlink_to("/usr/bin/python3")
+    locked_bin = tmp_path / "locked-runtime" / "bin"
+    locked_bin.mkdir(parents=True)
+    launcher_path = locked_bin / "python"
+    launcher_path.symlink_to(outside / "python")
+    boundary["runtime_allow_roots"]["hlsgraph-v03"] = [{
+        "path": locked_bin.as_posix(), "kind": "tree",
+        "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+        "sha256": eval_common.sandbox_allow_tree_identity(locked_bin),
+    }]
+    bwrap = Path(shutil.which("bwrap") or "")
+    boundary["mcp_containment"]["launcher"] = {
+        "path": bwrap.as_posix(), "filename": bwrap.name,
+        "sha256": sha256_file(bwrap),
+    }
+    audit = tmp_path / "audit.jsonl"
+    audit.write_bytes(b"")
+    audit.chmod(0o600)
+    with pytest.raises(RuntimeError, match="symlink hop escapes"):
+        eval_runner._contained_mcp_command(
+            arm="hlsgraph-v03", workspace=workspace,
+            server_command=launcher_path.as_posix(), server_args=[], server_env={},
+            sandbox_boundary=boundary,
+            audit_overlay=(
+                audit, placeholder, tuple(eval_runner._audit_parent_chain(audit)),
+            ),
+        )
 
 
 def test_runs_root_requires_ext4_and_disjoint_boundary(
@@ -792,6 +1048,73 @@ def test_runtime_identity_validator_rejects_overlapping_and_external_runtime_roo
     }))
     with pytest.raises(EvalManifestError, match="inconsistent with runtime"):
         eval_common._validate_runtime_identity(external)
+
+
+def test_runtime_identity_rejects_broadened_or_relabelled_sandbox_allowlist(
+    tmp_path: Path,
+) -> None:
+    runtime = synthetic_runtime_identity(
+        public_repository=ROOT, work_root=tmp_path / "work",
+    )
+
+    def rehash(value: dict[str, object]) -> None:
+        boundary = value["sandbox_boundary"]
+        assert isinstance(boundary, dict)
+        boundary["runtime_allow_roots_sha256"] = eval_runner.sha256_bytes(
+            eval_runner.canonical_json(boundary["runtime_allow_roots"])
+        )
+        boundary["identity_sha256"] = eval_runner.sha256_bytes(
+            eval_runner.canonical_json({
+                key: item for key, item in boundary.items()
+                if key != "identity_sha256"
+            })
+        )
+        value["identity_sha256"] = eval_runner.sha256_bytes(
+            eval_runner.canonical_json({
+                key: item for key, item in value.items()
+                if key != "identity_sha256"
+            })
+        )
+
+    broadened = copy.deepcopy(runtime)
+    boundary = broadened["sandbox_boundary"]
+    boundary["runtime_allow_roots"]["native"].append({
+        "path": boundary["runtime_root"], "kind": "tree",
+        "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+        "sha256": "a" * 64,
+    })
+    boundary["runtime_allow_roots"]["native"].sort(key=lambda item: item["path"])
+    rehash(broadened)
+    with pytest.raises(EvalManifestError, match="broader than the exact locked runtimes"):
+        eval_common._validate_runtime_identity(broadened)
+
+    relabelled = copy.deepcopy(runtime)
+    relabelled_boundary = relabelled["sandbox_boundary"]
+    relabelled_boundary["runtime_allow_roots"]["native"][0]["sha256"] = "b" * 64
+    rehash(relabelled)
+    with pytest.raises(EvalManifestError, match="broader than the exact locked runtimes"):
+        eval_common._validate_runtime_identity(relabelled)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX venv-link allowlist contract")
+def test_sandbox_allow_tree_hashes_venv_links_but_rejects_external_links(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "venv"
+    (root / "bin").mkdir(parents=True)
+    (root / "lib").mkdir()
+    (root / "pyvenv.cfg").write_text("version = 3.10\n", encoding="utf-8")
+    (root / "bin" / "python").symlink_to("/usr/bin/python3")
+    (root / "lib64").symlink_to("lib", target_is_directory=True)
+    first = eval_common.sandbox_allow_tree_identity(root)
+    (root / "pyvenv.cfg").write_text("version = 3.10.1\n", encoding="utf-8")
+    assert eval_common.sandbox_allow_tree_identity(root) != first
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    (root / "external").symlink_to(outside)
+    with pytest.raises(EvalManifestError, match="escapes the declared minimal roots"):
+        eval_common.sandbox_allow_tree_identity(root)
 
 
 def test_codegraph_capture_rejects_untracked_and_unhashed_ignored_files(
@@ -1031,6 +1354,13 @@ def test_official_process_environment_uses_codex_home_but_never_auth_env(
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-test-token")
     with pytest.raises(EvalManifestError, match="forbids auth"):
         official_process_environment()
+    monkeypatch.delenv("OPENAI_API_KEY")
+    # Assemble the deliberately hostile credential form at runtime so the
+    # public source tree itself never contains a credential-bearing URL.
+    credential_proxy = "http://" + "user" + ":" + "secret" + "@proxy.invalid:8080"
+    monkeypatch.setenv("HTTPS_PROXY", credential_proxy)
+    with pytest.raises(EvalManifestError, match="credentials in forwarded proxy"):
+        official_process_environment()
 
 
 @pytest.mark.parametrize("module", [eval_prepare, eval_runner])
@@ -1082,22 +1412,35 @@ def test_permission_canaries_pass_only_when_gold_and_socket_are_denied(
     Path(boundary["drvfs_roots"][0]).mkdir()
     Path(boundary["home_canary_root"]).mkdir()
     environment = {"runtime_identity": runtime}
-    monkeypatch.setattr(eval_runner, "_sandbox_canary_prefix", lambda *_args, **_kwargs: ["canary"])
+    monkeypatch.setattr(
+        eval_runner, "_sandbox_canary_prefix",
+        lambda _codex, workspace, **_kwargs: ["canary", str(workspace)],
+    )
+    escaped_kind = {"value": ""}
 
-    results = iter([
-        subprocess.CompletedProcess([], 0, "", ""),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-    ])
-    monkeypatch.setattr(eval_runner, "_run_canary_command", lambda *_args, **_kwargs: next(results))
+    def fake_canary(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        workspace = Path(command[1])
+        arm = workspace.parent.name
+        target_text = command[-1]
+        if target_text.isdigit():
+            return subprocess.CompletedProcess(command, 1, "", "network denied")
+        target = Path(target_text)
+        allowed = {
+            workspace / "EVAL_PROVENANCE.json",
+            *(Path(entry["path"]) for entry in boundary["runtime_allow_roots"][arm]),
+        }
+        escaped = (
+            escaped_kind["value"] == "runs" and target.parent == runs_root
+        ) or (
+            escaped_kind["value"] == "gold" and target == eval_runner.HERE / "questions.jsonl"
+        )
+        return subprocess.CompletedProcess(
+            command, 0 if target in allowed or escaped else 1,
+            "allowed" if target in allowed or escaped else "",
+            "" if target in allowed or escaped else "denied",
+        )
+
+    monkeypatch.setattr(eval_runner, "_run_canary_command", fake_canary)
     report = run_permission_canaries(
         codex_command="codex", work_root=work_root, runs_root=runs_root,
         environment=environment,
@@ -1106,7 +1449,10 @@ def test_permission_canaries_pass_only_when_gold_and_socket_are_denied(
     assert report["sibling_workspace_read"] == "denied"
     assert report["same_arm_sibling_read"] == "denied"
     assert report["other_arm_sibling_read"] == "denied"
-    assert report["boundary_control_read"] == "denied"
+    assert report["control_roots_read"] == "denied"
+    assert report["runtime_allow_roots_read"] == "pass"
+    assert report["undeclared_runtime_read"] == "denied"
+    assert report["other_arm_runtime_read"] == "denied"
     assert report["runs_root_read"] == "denied"
     assert report["codex_home_read"] == "denied"
     assert report["user_home_read"] == "denied"
@@ -1134,36 +1480,272 @@ def test_permission_canaries_pass_only_when_gold_and_socket_are_denied(
             relabelled, boundary, runs_root=runs_root,
         )
 
-    runs_escaped = iter([
-        subprocess.CompletedProcess([], 0, "", ""),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 0, "runs", ""),
-    ])
-    monkeypatch.setattr(
-        eval_runner, "_run_canary_command", lambda *_args, **_kwargs: next(runs_escaped),
-    )
+    escaped_kind["value"] = "runs"
     with pytest.raises(RuntimeError, match="runs root"):
         run_permission_canaries(
             codex_command="codex", work_root=work_root, runs_root=runs_root,
             environment=environment,
         )
 
-    escaped = iter([
-        subprocess.CompletedProcess([], 0, "", ""),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 1, "", "denied"),
-        subprocess.CompletedProcess([], 0, "gold", ""),
-    ])
-    monkeypatch.setattr(eval_runner, "_run_canary_command", lambda *_args, **_kwargs: next(escaped))
-    with pytest.raises(RuntimeError, match="public gold-file"):
+    escaped_kind["value"] = "gold"
+    with pytest.raises(RuntimeError, match="public gold repository"):
         run_permission_canaries(
             codex_command="codex", work_root=work_root, runs_root=runs_root,
             environment=environment,
         )
+
+
+def test_treatment_mcp_uses_locked_bwrap_and_minimal_environment(tmp_path: Path) -> None:
+    work_root = tmp_path / "isolated-work"
+    for arm in ARM_IDS:
+        for corpus in load_corpus_lock()["corpora"]:
+            (work_root / arm / corpus["id"]).mkdir(parents=True)
+    (work_root / "_cache").mkdir()
+    (work_root / "environment.lock.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "materialization.json").write_text("{}\n", encoding="utf-8")
+    runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=work_root)
+    boundary = runtime["sandbox_boundary"]
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    launcher, args = eval_runner._contained_mcp_command(
+        arm="hlsgraph-v03", workspace=workspace,
+        server_command=runtime["python"]["hlsgraph_v03"]["path"],
+        server_args=["-m", "hlsgraph.mcp.server", str(workspace.resolve())],
+        server_env={"HLSGRAPH_MCP_TOOLS": "explore"},
+        sandbox_boundary=boundary,
+    )
+    assert launcher == str(Path(runtime["bubblewrap"]["path"]).resolve())
+    for flag in ("--unshare-all", "--clearenv", "--cap-drop", "--proc", "--tmpfs"):
+        assert flag in args
+    home_index = args.index("HOME")
+    assert args[home_index - 1:home_index + 2] == ["--setenv", "HOME", "/tmp/home"]
+    assert not any("PROXY" in item.upper() or "CODEX_HOME" in item for item in args)
+    assert str(workspace.resolve()) in args
+    assert runtime["python"]["hlsgraph_v02"]["path"] not in args
+    assert runtime["codex"]["path"] not in args
+    assert args[args.index("--") + 1] == str(
+        Path(runtime["python"]["hlsgraph_v03"]["path"]).resolve()
+    )
+
+
+def test_boundary_probe_is_a_real_stdio_mcp_tool(tmp_path: Path) -> None:
+    probe = ROOT / "eval" / "agent_ab" / "mcp_boundary_probe.py"
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "boundary_probe", "arguments": {
+                "allowed": [str(probe)], "denied": [str(tmp_path / "missing")],
+                "port": 1,
+            },
+        }},
+    ]
+    replies = eval_runner._run_stdio_mcp_exchange(
+        [sys.executable, str(probe)], requests, cwd=tmp_path,
+    )
+    assert replies[2]["result"]["tools"][0]["name"] == "boundary_probe"
+    assert replies[3]["result"]["structuredContent"]["allowed"] == [True]
+    assert replies[3]["result"]["structuredContent"]["denied"] == [False]
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bwrap") is None,
+    reason="real bubblewrap MCP containment probe",
+)
+def test_real_bwrap_mcp_probe_denies_host_and_network(tmp_path: Path) -> None:
+    work_root = tmp_path / "isolated-work"
+    for arm in ARM_IDS:
+        for corpus in load_corpus_lock()["corpora"]:
+            workspace = work_root / arm / corpus["id"]
+            workspace.mkdir(parents=True)
+            (workspace / "EVAL_PROVENANCE.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "_cache").mkdir()
+    (work_root / "environment.lock.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "materialization.json").write_text("{}\n", encoding="utf-8")
+    runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=work_root)
+    boundary = runtime["sandbox_boundary"]
+    bwrap = Path(shutil.which("bwrap") or "").resolve()
+    boundary["mcp_containment"]["launcher"] = {
+        "path": bwrap.as_posix(), "filename": bwrap.name,
+        "sha256": eval_runner.sha256_file(bwrap),
+    }
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    listener = __import__("socket").socket()
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        result = eval_runner.probe_contained_mcp_boundary(
+            arm="hlsgraph-v03", workspace=workspace,
+            allowed=[workspace / "EVAL_PROVENANCE.json"],
+            denied=[Path("/etc/passwd"), work_root / "environment.lock.json"],
+            port=listener.getsockname()[1], sandbox_boundary=boundary,
+        )
+    finally:
+        listener.close()
+    assert result["network"] is False
+    assert result["denied"] == [False, False]
+    assert result["home"] == "/tmp/home"
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bwrap") is None,
+    reason="real POSIX venv and bubblewrap contract",
+)
+def test_contained_mcp_executes_lexical_venv_python_and_imports_hlsgraph(
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "isolated-work"
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    workspace.mkdir(parents=True)
+    (workspace / "EVAL_PROVENANCE.json").write_text("{}\n", encoding="utf-8")
+    synthetic_retrieval_audit_placeholder(workspace)
+    (work_root / "_cache").mkdir()
+    (work_root / "environment.lock.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "materialization.json").write_text("{}\n", encoding="utf-8")
+    runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=work_root)
+    boundary = runtime["sandbox_boundary"]
+
+    venv = tmp_path / "locked-runtime" / "v03"
+    completed = subprocess.run(
+        [str(Path(sys.executable).resolve()), "-m", "venv", "--symlinks", str(venv)],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    python = venv / "bin" / "python"
+    assert python.is_symlink(), "the POSIX regression requires a lexical venv symlink"
+    purelib = subprocess.run(
+        [str(python), "-I", "-c", "import sysconfig;print(sysconfig.get_path('purelib'))"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.strip()
+    package = Path(purelib) / "hlsgraph"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "CONTAINMENT_SENTINEL = 'venv-hlsgraph-imported'\n", encoding="utf-8",
+    )
+    entries = [
+        {
+            "path": (venv / "bin").as_posix(), "kind": "tree",
+            "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+            "sha256": eval_common.sandbox_allow_tree_identity(venv / "bin"),
+        },
+        {
+            "path": (venv / "pyvenv.cfg").as_posix(), "kind": "file",
+            "algorithm": "sha256", "sha256": sha256_file(venv / "pyvenv.cfg"),
+        },
+        {
+            "path": Path(purelib).as_posix(), "kind": "tree",
+            "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+            "sha256": eval_common.sandbox_allow_tree_identity(Path(purelib)),
+        },
+    ]
+    boundary["runtime_allow_roots"]["hlsgraph-v03"] = sorted(
+        [boundary["runtime_allow_roots"]["native"][0], *entries],
+        key=lambda item: item["path"],
+    )
+    bwrap = Path(shutil.which("bwrap") or "")
+    boundary["mcp_containment"]["launcher"] = {
+        "path": bwrap.as_posix(), "filename": bwrap.name,
+        "sha256": sha256_file(bwrap),
+    }
+    audit = tmp_path / "audit.jsonl"
+    audit.write_bytes(b"")
+    audit.chmod(0o600)
+    launcher, args = eval_runner._contained_mcp_command(
+        arm="hlsgraph-v03", workspace=workspace,
+        server_command=python.as_posix(),
+        server_args=[
+            "-I", "-c",
+            "import hlsgraph;print(hlsgraph.CONTAINMENT_SENTINEL)",
+        ],
+        server_env={}, sandbox_boundary=boundary,
+        audit_overlay=(
+            audit, workspace / ".hlsgraph/private/retrieval-access.jsonl",
+            tuple(eval_runner._audit_parent_chain(audit)),
+        ),
+    )
+    assert args[args.index("--") + 1] == python.as_posix()
+    assert args[args.index("--") + 1] != python.resolve().as_posix()
+    contained = subprocess.run(
+        [launcher, *args], cwd=workspace, env={},
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert contained.returncode == 0, contained.stderr
+    assert contained.stdout.strip() == "venv-hlsgraph-imported"
+
+
+@pytest.mark.parametrize(("private_mode", "expected"), [(0o700, True), (0o755, False)])
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bwrap") is None,
+    reason="real read-only workspace audit overlay contract",
+)
+def test_read_only_workspace_allows_only_exact_audit_file_overlay(
+    tmp_path: Path, private_mode: int, expected: bool,
+) -> None:
+    work_root = tmp_path / f"isolated-work-{private_mode:o}"
+    workspace = work_root / "hlsgraph-v03" / "dataflow_gemm"
+    workspace.mkdir(parents=True)
+    placeholder = synthetic_retrieval_audit_placeholder(workspace)
+    placeholder.parent.chmod(private_mode)
+    (work_root / "_cache").mkdir()
+    (work_root / "environment.lock.json").write_text("{}\n", encoding="utf-8")
+    (work_root / "materialization.json").write_text("{}\n", encoding="utf-8")
+    runtime = synthetic_runtime_identity(public_repository=ROOT, work_root=work_root)
+    boundary = runtime["sandbox_boundary"]
+    source_root = ROOT / "src"
+    runtime_entries = [{
+        "path": source_root.as_posix(), "kind": "tree",
+        "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+        "sha256": eval_common.sandbox_allow_tree_identity(source_root),
+    }]
+    python_paths = [source_root.as_posix()]
+    if sys.version_info < (3, 11):
+        import tomli  # type: ignore[import-not-found]
+        tomli_root = Path(tomli.__file__).parent
+        runtime_entries.append({
+            "path": tomli_root.as_posix(), "kind": "tree",
+            "algorithm": eval_common.SANDBOX_ALLOW_TREE_ALGORITHM,
+            "sha256": eval_common.sandbox_allow_tree_identity(tomli_root),
+        })
+        python_paths.append(tomli_root.parent.as_posix())
+    boundary["runtime_allow_roots"]["hlsgraph-v03"].extend(runtime_entries)
+    bwrap = Path(shutil.which("bwrap") or "")
+    boundary["mcp_containment"]["launcher"] = {
+        "path": bwrap.as_posix(), "filename": bwrap.name,
+        "sha256": sha256_file(bwrap),
+    }
+    audit = tmp_path / f"audit-{private_mode:o}.jsonl"
+    audit.write_bytes(b"")
+    audit.chmod(0o600)
+    script = (
+        "from hlsgraph.retrieval import _append_private_access;"
+        "import pathlib,sys;"
+        "print(_append_private_access(pathlib.Path(sys.argv[1]),"
+        "content_sha256='a'*64,anchor={'kind':'source_line','start_line':1,"
+        "'end_line':1},result='returned',byte_count=7))"
+    )
+    kwargs = dict(
+        arm="hlsgraph-v03", workspace=workspace,
+        server_command="/usr/bin/python3",
+        server_args=["-c", script, workspace.as_posix()],
+        server_env={"PYTHONPATH": os.pathsep.join(python_paths)},
+        sandbox_boundary=boundary,
+        audit_overlay=(audit, placeholder, tuple(eval_runner._audit_parent_chain(audit))),
+        allow_system_command=True,
+    )
+    if not expected:
+        with pytest.raises(RuntimeError, match="private directory must have mode 0700"):
+            eval_runner._contained_mcp_command(**kwargs)
+        assert audit.read_bytes() == b""
+        return
+    launcher, args = eval_runner._contained_mcp_command(**kwargs)
+    completed = subprocess.run(
+        [launcher, *args], cwd=workspace, env={}, capture_output=True,
+        text=True, check=False, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(expected)
+    if expected:
+        records = eval_runner._parse_retrieval_audit(audit.read_bytes())
+        assert len(records) == 1 and records[0]["result"] == "returned"
 
 
 def test_quality_noninferiority_requires_every_baseline() -> None:

@@ -62,6 +62,8 @@ extra is requested and are not bundled by HLSGraph source or wheel releases:
 - LLVM/libclang Python distribution — Apache-2.0 with LLVM Exceptions;
 - Model Context Protocol Python SDK 1.x — MIT
   (<https://github.com/modelcontextprotocol/python-sdk/tree/v1.x>);
+- pypdf 6.x — BSD-3-Clause; used only by the explicit, local-only `pdf`
+  knowledge-parser extra and not bundled in HLSGraph releases;
 - Apache Arrow / PyArrow — Apache-2.0;
 - PyTorch — a multi-licensed distribution whose exact license expression and
   bundled third-party notices depend on the installed release; consult that

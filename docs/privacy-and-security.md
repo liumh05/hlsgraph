@@ -205,10 +205,22 @@ parse a user-owned document into bounded local chunks. Those chunks and optional
 local-only embeddings remain under `.hlsgraph/private/knowledge/`; they never
 enter the canonical database, REST, ML export, wheel, sdist, or release.
 Possession and use of the original document remain the user's responsibility.
-Sidecar queries hash a single stable read of the SQLite file and query only an
-in-memory deserialization of those same verified bytes; path-based fallback is
-forbidden, so a database swap followed by path restoration cannot change the
-queried snapshot.
+Parsers and embedders are explicitly selected trusted installed code. Parsers
+receive verified document bytes, and embedders receive private chunk plaintext;
+their local-only declarations are protocol checks, not filesystem, network, or
+memory sandboxes. HLSGraph redirects OS fd 1/2 and sanitizes the error surface
+only during each `parse`/`embed` call. Plugins can still deliberately reopen
+handles or start background work, so they must be reviewed and isolated with OS
+controls appropriate to the document sensitivity.
+
+Sidecar queries hash a single stable read of the SQLite file. When SQLite
+deserialize is available, those same verified bytes are loaded in memory. When
+it is unavailable, HLSGraph writes the verified bytes to a fresh mode-`0700`
+temporary directory and mode-`0600` file, revalidates identity, bytes, and hash
+before and after use, opens only that staged file read-only/immutable, and backs
+it up into memory. It never reopens the mutable user sidecar path after the
+verified read, so a database swap followed by path restoration cannot change
+the queried snapshot.
 Authorized source and local-document excerpt attempts are audited only in the
 project-local `.hlsgraph/private/retrieval-access.jsonl` sidecar. Records contain
 content hashes, anchors, outcome codes, and byte counts—not queries, paths,

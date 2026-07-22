@@ -1,0 +1,501 @@
+{
+  "citation_audit_sha256": "66ac93ed69978221b9bfcd4ecc8f5f54faf115880c7282df7a748161545797c4",
+  "entries": [
+    {
+      "citation_url": "https://arxiv.org/abs/2107.11673v4",
+      "evidence_url": "https://arxiv.org/abs/2107.11673v4",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw",
+      "identity": {
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.map.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Dataflow-Viewer",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/W~1WQe4UCxU9anwhLiYeOw/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "W~1WQe4UCxU9anwhLiYeOw",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "o0Spd2oLakKLmXuEGn56qg",
+        "topic_title": "Dataflow Viewer",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Failure-to-Satisfy-Optimization-Directives",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/f1w6t64BuW36pjRdSSa03g/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "f1w6t64BuW36pjRdSSa03g",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "HW_bjcalH6b4O_dsumdwyw",
+        "topic_title": "Failure to Satisfy Optimization Directives",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Performance-Metrics-Example",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/LLmm0CxFgRns~DvtnVzhcw/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "LLmm0CxFgRns~DvtnVzhcw",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "DfLCnyMY8mdJhvVGhNyeSA",
+        "topic_title": "Performance Metrics Example",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Running-C-Simulation",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/KNMmUzjocOKxCDechViD5Q/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "KNMmUzjocOKxCDechViD5Q",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "XaXpZkwSTIgICD3hxSI76A",
+        "topic_title": "Running C Simulation",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Running-C/RTL-Co-Simulation",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/f2V4VqdEol_LYW0N29tDnA/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "f2V4VqdEol_LYW0N29tDnA",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "4UxogfgyhydghXZTNHOtnA",
+        "topic_title": "Running C/RTL Co-Simulation",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Schedule-Viewer",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/la7~uJoQc7psnUAB_klLtQ/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "la7~uJoQc7psnUAB_klLtQ",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "SfgbyAVVHgpEIsCQbDY6pQ",
+        "topic_title": "Schedule Viewer",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-array_partition",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/MOtVKWo8zl1HzlTMHJsRcg/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "MOtVKWo8zl1HzlTMHJsRcg",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "PkD7DVpVViVfaU6xMtqIfA",
+        "topic_title": "pragma HLS array_partition",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-dataflow",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/5ge9k_WQBUgmtnDvBTwCjg/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "5ge9k_WQBUgmtnDvBTwCjg",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "V9Q9F19WSENU3G8TqQjw5w",
+        "topic_title": "pragma HLS dataflow",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-dependence",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/UBzzO48n5bFcXZnpoX3unA/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "UBzzO48n5bFcXZnpoX3unA",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "cXwcPlFywqisL~5NfIu4Gw",
+        "topic_title": "pragma HLS dependence",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-inline",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/nVK8TdMk9qVLcAKsRaaCoQ/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "nVK8TdMk9qVLcAKsRaaCoQ",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "FxuYn9Mb_kcZrN_uEZqy~Q",
+        "topic_title": "pragma HLS inline",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-interface",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/w_GvVDL9Ee_cjsXJU3cb3w/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "w_GvVDL9Ee_cjsXJU3cb3w",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "SQ5wKqOzOOvnkzyKcFhsYQ",
+        "topic_title": "pragma HLS interface",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-loop_tripcount",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/YxSKlRQBEw1oDRrsB7dGow/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "YxSKlRQBEw1oDRrsB7dGow",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "JngcnxVwXAFNZz~nV68k8Q",
+        "topic_title": "pragma HLS loop_tripcount",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-pipeline",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/kg61RoGbbl0EvRYKj2jrIg/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "kg61RoGbbl0EvRYKj2jrIg",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "eaZofgg~weCOwZg4k0YA1Q",
+        "topic_title": "pragma HLS pipeline",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-stream",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/nSJg5iVKAtrjjdzsz8SBbw/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "nSJg5iVKAtrjjdzsz8SBbw",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "KaFlw6bPniLBqp0trPASuQ",
+        "topic_title": "pragma HLS stream",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-unroll",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/r09IY6k76Lg_cjdQMUoQMw/topics/P9KSCA5KM6zrm9Pv5dymTw/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "P9KSCA5KM6zrm9Pv5dymTw",
+        "document_id": "UG1399",
+        "document_slug": "ug1399-vitis-hls",
+        "publication_id": "r09IY6k76Lg_cjdQMUoQMw",
+        "title": "Vitis High-Level Synthesis User Guide (UG1399)",
+        "toc_id": "ep~vBsPVR9smGyUVZQnNhg",
+        "topic_title": "pragma HLS unroll",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug835-vivado-tcl-commands/",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/jQrYymKiUwDLi~2cbbIujA",
+      "identity": {
+        "document_id": "UG835",
+        "document_slug": "ug835-vivado-tcl-commands",
+        "publication_id": "jQrYymKiUwDLi~2cbbIujA",
+        "title": "Vivado Design Suite Tcl Command Reference Guide (UG835)",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.map.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug835-vivado-tcl-commands/report_timing_summary",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/jQrYymKiUwDLi~2cbbIujA/topics/~wpwBHx_4jZ6bjrPOT3P9w/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "~wpwBHx_4jZ6bjrPOT3P9w",
+        "document_id": "UG835",
+        "document_slug": "ug835-vivado-tcl-commands",
+        "publication_id": "jQrYymKiUwDLi~2cbbIujA",
+        "title": "Vivado Design Suite Tcl Command Reference Guide (UG835)",
+        "toc_id": "51Yk_goWWXRp6VyWgxRrhg",
+        "topic_title": "report_timing_summary",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug903-vivado-using-constraints/",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/u9LSSB7mLDpGWm1jBRiY1Q",
+      "identity": {
+        "document_id": "UG903",
+        "document_slug": "ug903-vivado-using-constraints",
+        "publication_id": "u9LSSB7mLDpGWm1jBRiY1Q",
+        "title": "Vivado Design Suite User Guide: Using Constraints (UG903)",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.map.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug903-vivado-using-constraints/About-XDC-Constraints",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/u9LSSB7mLDpGWm1jBRiY1Q/topics/g882MLOGH9P8EXihadJ5wQ/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "g882MLOGH9P8EXihadJ5wQ",
+        "document_id": "UG903",
+        "document_slug": "ug903-vivado-using-constraints",
+        "publication_id": "u9LSSB7mLDpGWm1jBRiY1Q",
+        "title": "Vivado Design Suite User Guide: Using Constraints (UG903)",
+        "toc_id": "g4h_WB5VzhbCXSQoXXKIIA",
+        "topic_title": "About XDC Constraints",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/ojtKupPnQVDdqZRGFeSjmA",
+      "identity": {
+        "document_id": "UG906",
+        "document_slug": "ug906-vivado-design-analysis",
+        "publication_id": "ojtKupPnQVDdqZRGFeSjmA",
+        "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques (UG906)",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.map.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Analyzing-the-Design-Congestion",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/ojtKupPnQVDdqZRGFeSjmA/topics/jGWJ0OjrAzE4OXX~fr5wSA/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "jGWJ0OjrAzE4OXX~fr5wSA",
+        "document_id": "UG906",
+        "document_slug": "ug906-vivado-design-analysis",
+        "publication_id": "ojtKupPnQVDdqZRGFeSjmA",
+        "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques (UG906)",
+        "toc_id": "4hfdBTC5GdBuv7F9OsEv9g",
+        "topic_title": "Analyzing the Design Congestion",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Report-Utilization",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/ojtKupPnQVDdqZRGFeSjmA/topics/udP9l9xK1Xi6r9J6HbD4Pw/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "udP9l9xK1Xi6r9J6HbD4Pw",
+        "document_id": "UG906",
+        "document_slug": "ug906-vivado-design-analysis",
+        "publication_id": "ojtKupPnQVDdqZRGFeSjmA",
+        "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques (UG906)",
+        "toc_id": "b4QY3IcaSaE1G7CWYdEGXw",
+        "topic_title": "Report Utilization",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Verifying-Timing-Signoff",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/ojtKupPnQVDdqZRGFeSjmA/topics/RsPfMFmcMv9d_XwEGUJsHA/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "RsPfMFmcMv9d_XwEGUJsHA",
+        "document_id": "UG906",
+        "document_slug": "ug906-vivado-design-analysis",
+        "publication_id": "ojtKupPnQVDdqZRGFeSjmA",
+        "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques (UG906)",
+        "toc_id": "m_8X~iwlW2N830hVSYSgEg",
+        "topic_title": "Verifying Timing Signoff",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug907-vivado-power-analysis-optimization/",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/e5OhDiDi0Qf9FGttPTD8Xw",
+      "identity": {
+        "document_id": "UG907",
+        "document_slug": "ug907-vivado-power-analysis-optimization",
+        "publication_id": "e5OhDiDi0Qf9FGttPTD8Xw",
+        "title": "Vivado Design Suite User Guide: Power Analysis and Optimization (UG907)",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.map.v1"
+    },
+    {
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug907-vivado-power-analysis-optimization/Running-Power-Analysis-from-the-Vivado-IDE",
+      "evidence_url": "https://docs.amd.com/api/khub/maps/e5OhDiDi0Qf9FGttPTD8Xw/topics/MzaeGolG4thV1YSIV369sA/content?target=DESIGNED_READER",
+      "identity": {
+        "content_id": "MzaeGolG4thV1YSIV369sA",
+        "document_id": "UG907",
+        "document_slug": "ug907-vivado-power-analysis-optimization",
+        "publication_id": "e5OhDiDi0Qf9FGttPTD8Xw",
+        "title": "Vivado Design Suite User Guide: Power Analysis and Optimization (UG907)",
+        "toc_id": "YqFPIz4mkL17hKW__ahKFA",
+        "topic_title": "Running Power Analysis from the Vivado IDE",
+        "version": "2024.2"
+      },
+      "resolver_id": "amd.docs.khub.topic.v1"
+    },
+    {
+      "citation_url": "https://documentation-service.arm.com/static/602a9df190ee6824a1e02b98",
+      "evidence_url": "https://documentation-service.arm.com/static/602a9df190ee6824a1e02b98",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://documentation-service.arm.com/static/64819f1516f0f201aa6b963c",
+      "evidence_url": "https://documentation-service.arm.com/static/64819f1516f0f201aa6b963c",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/EPFL-LAP/dynamatic/blob/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+      "evidence_url": "https://github.com/EPFL-LAP/dynamatic/blob/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
+      "evidence_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://llvm.org/docs/LangRef.html",
+      "evidence_url": "https://llvm.org/docs/LangRef.html",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://llvm.org/docs/SourceLevelDebugging.html",
+      "evidence_url": "https://llvm.org/docs/SourceLevelDebugging.html",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    },
+    {
+      "citation_url": "https://mlir.llvm.org/docs/LangRef/",
+      "evidence_url": "https://mlir.llvm.org/docs/LangRef/",
+      "identity": null,
+      "resolver_id": "direct.v1"
+    }
+  ],
+  "schema_version": "hlsgraph.knowledge-review.evidence-map.v1"
+}

@@ -14,8 +14,11 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
-from contextlib import closing
+import threading
+import time
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -44,6 +47,117 @@ DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_PARSER_TIMEOUT_S = 10.0
 DEFAULT_MAX_PARSED_CHARS = 8 * 1024 * 1024
 DEFAULT_MAX_MANIFEST_BYTES = 1024 * 1024
+
+
+_EMBEDDER_STDIO_LOCK = threading.RLock()
+
+
+class _StdioContainmentFailure(RuntimeError):
+    """Internal, body-free marker for a failed descriptor transition."""
+
+
+_SAFE_EXTERNAL_TYPE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_PARSER_ERROR_MESSAGES = {
+    "stdio_containment": "knowledge parser stdio containment could not be established",
+    "non_text": "knowledge parser returned a non-text value",
+    "nul_text": "knowledge parser returned text containing NUL",
+    "output_limit": "knowledge parser output exceeded the declared character limit",
+}
+
+
+@dataclass(frozen=True)
+class _PluginIdentity:
+    name: str
+    version: str
+    fingerprint: str
+
+
+def _safe_external_type_name(error: BaseException) -> str:
+    candidate = type(error).__name__
+    return (
+        candidate
+        if isinstance(candidate, str)
+        and _SAFE_EXTERNAL_TYPE_RE.fullmatch(candidate) is not None
+        else "external_error"
+    )
+
+
+def _flush_standard_streams() -> None:
+    """Best-effort flush around a process-wide descriptor transition."""
+    for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except BaseException:
+            # A replaced/broken Python stream must not reveal plugin data or
+            # prevent restoration of the underlying process descriptors.
+            pass
+
+
+def _restore_standard_descriptors(
+    saved: Mapping[int, int], null_descriptor: int,
+) -> bool:
+    """Restore fd 1/2 and close all private duplicates without raising."""
+    restored = True
+    for target_descriptor in (1, 2):
+        saved_descriptor = saved.get(target_descriptor)
+        if saved_descriptor is None:
+            continue
+        try:
+            os.dup2(saved_descriptor, target_descriptor)
+        except BaseException:
+            restored = False
+    for saved_descriptor in saved.values():
+        try:
+            os.close(saved_descriptor)
+        except BaseException:
+            restored = False
+    if null_descriptor >= 0 and null_descriptor not in (1, 2):
+        try:
+            os.close(null_descriptor)
+        except BaseException:
+            restored = False
+    return restored
+
+
+@contextmanager
+def _suppress_embedder_stdio():
+    """Discard fd 1/2 only while trusted embedder code is executing.
+
+    Descriptor replacement is process-wide, so all HLSGraph embed calls share
+    one lock.  This is an output/error-surface guard, not a filesystem,
+    network, memory, or malicious-code sandbox.
+    """
+    with _EMBEDDER_STDIO_LOCK:
+        saved: dict[int, int] = {}
+        null_descriptor = -1
+        setup_ok = False
+        try:
+            _flush_standard_streams()
+            null_descriptor = os.open(os.devnull, os.O_WRONLY)
+            for target_descriptor in (1, 2):
+                saved_descriptor = os.dup(target_descriptor)
+                saved[target_descriptor] = saved_descriptor
+                os.set_inheritable(saved_descriptor, False)
+                os.dup2(null_descriptor, target_descriptor)
+            setup_ok = True
+        except BaseException:
+            # Leave the active exception scope before raising the public,
+            # body-free error so no OS/plugin exception survives as context.
+            setup_ok = False
+        if not setup_ok:
+            _restore_standard_descriptors(saved, null_descriptor)
+            raise _StdioContainmentFailure() from None
+        try:
+            yield
+        finally:
+            # Flush Python wrappers while their underlying descriptors still
+            # target the null sink; otherwise buffered plugin text could be
+            # emitted after fd 1/2 are restored.
+            _flush_standard_streams()
+            if not _restore_standard_descriptors(saved, null_descriptor):
+                raise _StdioContainmentFailure() from None
 
 
 class _VisibleHtml(HTMLParser):
@@ -80,21 +194,92 @@ def _parser_worker(
     max_chars: int,
     output: Any,
 ) -> None:
-    """Isolated parser process target; never returns document bytes on failure."""
+    """Parser process target; never returns document bytes or stdio on failure."""
+    # Parser dependencies can emit warnings through C extensions, ``os.write``,
+    # or logging handlers that bypass Python-level redirectors.  Replace the OS
+    # stdout/stderr descriptors before invoking any parser method so private
+    # document text cannot escape through the parent terminal or test capture.
+    # This is output containment, not a security sandbox for installed code.
+    try:
+        null_descriptor = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for target_descriptor in (1, 2):
+                if null_descriptor != target_descriptor:
+                    os.dup2(null_descriptor, target_descriptor)
+        finally:
+            if null_descriptor not in (1, 2):
+                os.close(null_descriptor)
+    except BaseException:
+        output.put(("error", "stdio_containment"))
+        return
     try:
         value = parser.parse(data, metadata)
         if value is None:
             output.put(("metadata_only", None))
         elif not isinstance(value, str):
-            output.put(("error", "parser returned a non-text value"))
+            output.put(("error", "non_text"))
         elif "\x00" in value:
-            output.put(("error", "parser returned text containing NUL"))
+            output.put(("error", "nul_text"))
         elif len(value) > max_chars:
-            output.put(("error", "parser output exceeded the declared character limit"))
+            output.put(("error", "output_limit"))
         else:
             output.put(("ok", value))
-    except BaseException as exc:  # isolated untrusted plugin boundary
-        output.put(("error", f"parser raised {type(exc).__name__}"))
+    except BaseException as exc:  # normalize the trusted parser's failure surface
+        output.put(("error", "raised." + _safe_external_type_name(exc)))
+
+
+def _get_parser_result(output: Any, *, timeout: float) -> tuple[Any, Any]:
+    """Read one worker result without exposing queue implementation failures."""
+    try:
+        return output.get(timeout=timeout)
+    except Empty:
+        raise
+    except (EOFError, OSError, ValueError):
+        raise KnowledgePackError(
+            "knowledge parser result channel failed"
+        ) from None
+
+
+def _cleanup_parser_worker(process: Any, *, timeout: float = 2.0) -> bool:
+    """Terminate and, if necessary, kill a parser worker without leaking errors.
+
+    The helper is deliberately idempotent so timeout, post-result, and finally
+    paths can all call it.  A worker that ignores terminate/SIGTERM receives a
+    hard kill followed by a second join when the platform exposes ``kill``.
+    """
+    try:
+        alive = bool(process.is_alive())
+    except BaseException:
+        return False
+    if not alive:
+        return True
+    try:
+        process.terminate()
+    except BaseException:
+        pass
+    try:
+        process.join(timeout)
+    except BaseException:
+        pass
+    try:
+        alive = bool(process.is_alive())
+    except BaseException:
+        return False
+    if alive:
+        killer = getattr(process, "kill", None)
+        if callable(killer):
+            try:
+                killer()
+            except BaseException:
+                pass
+            try:
+                process.join(timeout)
+            except BaseException:
+                pass
+    try:
+        return not bool(process.is_alive())
+    except BaseException:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,8 +338,8 @@ def _ensure_private_root(project_root: str | Path) -> tuple[Path, Path]:
     root = current.resolve()
     try:
         root.relative_to(project)
-    except ValueError as exc:
-        raise KnowledgePackError("private knowledge sidecar escaped the project root") from exc
+    except ValueError:
+        raise KnowledgePackError("private knowledge sidecar escaped the project root") from None
     return project, root
 
 
@@ -209,12 +394,14 @@ def _parse_text(metadata: LocalDocumentMetadata, data: bytes, path: Path) -> str
     )
     if not text_like:
         return None
+    decode_failed = False
     try:
         decoded = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise KnowledgePackError(
-            f"local knowledge text must be UTF-8 or use an explicit parser plugin: {path}"
-        ) from exc
+    except UnicodeDecodeError:
+        decoded = ""
+        decode_failed = True
+    if decode_failed:
+        raise KnowledgePackError("local_knowledge_text.utf8_decode_failed") from None
     if extension in {".html", ".htm"} or metadata.media_type == "text/html":
         parser = _VisibleHtml()
         parser.feed(decoded)
@@ -222,13 +409,28 @@ def _parse_text(metadata: LocalDocumentMetadata, data: bytes, path: Path) -> str
     return decoded.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _validate_parser(parser: Any | None) -> frozenset[str]:
+def _validate_parser(
+    parser: Any | None,
+) -> tuple[frozenset[str], _PluginIdentity | None]:
     if parser is None:
-        return frozenset()
-    for attribute in ("name", "version", "fingerprint", "capabilities", "parse"):
-        if not hasattr(parser, attribute):
-            raise KnowledgePackError(f"local knowledge parser is missing {attribute!r}")
-    capabilities = parser.capabilities()
+        return frozenset(), None
+    contract_failed = False
+    try:
+        name = parser.name
+        version = parser.version
+        fingerprint = parser.fingerprint
+        capabilities_method = parser.capabilities
+        parse_method = parser.parse
+        capabilities = capabilities_method()
+    except BaseException:
+        contract_failed = True
+        name = version = fingerprint = ""
+        capabilities_method = parse_method = None
+        capabilities = None
+    if contract_failed:
+        raise KnowledgePackError("knowledge_parser.contract_read_failed") from None
+    if not callable(capabilities_method) or not callable(parse_method):
+        raise KnowledgePackError("knowledge_parser.contract_invalid")
     if (not isinstance(capabilities, Mapping)
             or capabilities.get("protocol_version") != "hlsgraph.knowledge_parser.v1"
             or capabilities.get("local_only") is not True
@@ -243,12 +445,18 @@ def _validate_parser(parser: Any | None) -> frozenset[str]:
         raise KnowledgePackError(
             "knowledge parser must declare non-empty media_types"
         )
-    if (not isinstance(parser.name, str) or not parser.name.strip()
-            or not isinstance(parser.version, str) or not parser.version.strip()
-            or not isinstance(parser.fingerprint, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", parser.fingerprint)):
+    if (not isinstance(name, str) or not name.strip() or len(name) > 256
+            or re.search(r"[\x00-\x1f\x7f]", name) is not None
+            or not isinstance(version, str) or not version.strip()
+            or len(version) > 256
+            or re.search(r"[\x00-\x1f\x7f]", version) is not None
+            or not isinstance(fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
         raise KnowledgePackError("knowledge parser has invalid immutable identity")
-    return frozenset(str(item).casefold() for item in media_types)
+    return (
+        frozenset(str(item).casefold() for item in media_types),
+        _PluginIdentity(name=name, version=version, fingerprint=fingerprint),
+    )
 
 
 def _parse_with_plugin(
@@ -287,35 +495,73 @@ def _parse_with_plugin(
     try:
         try:
             process.start()
-        except Exception as exc:
+        except Exception:
             raise KnowledgePackError(
                 "knowledge parser could not start in the isolated process"
-            ) from exc
-        process.join(float(timeout_s))
+            ) from None
+        # Drain the bounded result while the worker is alive.  Joining a
+        # multiprocessing.Queue producer first can deadlock once a valid
+        # parser result exceeds the OS pipe buffer (full manuals commonly
+        # produce several MiB of text).  Polling the process also makes an
+        # abnormal early exit fail promptly instead of consuming the timeout.
+        deadline = time.monotonic() + float(timeout_s)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _cleanup_parser_worker(process)
+                raise KnowledgePackError("knowledge parser timed out")
+            try:
+                status, value = _get_parser_result(
+                    output, timeout=min(0.1, remaining),
+                )
+                break
+            except Empty:
+                if process.is_alive():
+                    continue
+                # Permit the Queue feeder a short final handoff after process
+                # exit, but do not turn a crashed parser into a long timeout.
+                try:
+                    status, value = _get_parser_result(
+                        output, timeout=min(0.5, remaining),
+                    )
+                    break
+                except Empty:
+                    raise KnowledgePackError(
+                        "knowledge parser exited without a bounded result"
+                    ) from None
+        process.join(2.0)
         if process.is_alive():
-            process.terminate()
-            process.join(2.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(2.0)
-            raise KnowledgePackError("knowledge parser timed out")
-        try:
-            status, value = output.get(timeout=0.5)
-        except Empty as exc:
+            _cleanup_parser_worker(process)
             raise KnowledgePackError(
-                "knowledge parser exited without a bounded result"
-            ) from exc
+                "knowledge parser did not exit after returning a result"
+            )
         if status == "metadata_only":
             return None
         if status != "ok":
-            raise KnowledgePackError(str(value))
-        return str(value).replace("\r\n", "\n").replace("\r", "\n")
+            if isinstance(value, str) and value in _PARSER_ERROR_MESSAGES:
+                message = _PARSER_ERROR_MESSAGES[value]
+            elif (isinstance(value, str) and value.startswith("raised.")
+                    and _SAFE_EXTERNAL_TYPE_RE.fullmatch(value[7:]) is not None):
+                message = f"knowledge parser raised {value[7:]}"
+            else:
+                message = "knowledge parser failed with an invalid error code"
+            raise KnowledgePackError(message) from None
+        if not isinstance(value, str) or len(value) > max_chars or "\x00" in value:
+            raise KnowledgePackError("knowledge parser returned an invalid success value")
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+    except KnowledgePackError:
+        raise
+    except Exception:
+        raise KnowledgePackError("knowledge_parser.runtime_failed") from None
     finally:
-        if process.is_alive():
-            process.terminate()
-            process.join(2.0)
-        output.cancel_join_thread()
-        output.close()
+        _cleanup_parser_worker(process)
+        try:
+            output.cancel_join_thread()
+            output.close()
+        except (OSError, ValueError):
+            # The result-channel failure has already been normalized above;
+            # cleanup must not replace it with a multiprocessing traceback.
+            pass
 
 
 def _sections(text: str) -> list[tuple[str | None, str]]:
@@ -371,30 +617,83 @@ def _bounded_excerpt(value: str, *, max_lines: int = 80, max_chars: int = 4_000)
     return "".join(lines)[:max_chars]
 
 
-def _validate_embedder(embedder: Any | None) -> None:
-    if embedder is None:
-        return
-    for attribute in ("name", "version", "fingerprint", "capabilities", "embed"):
-        if not hasattr(embedder, attribute):
-            raise KnowledgePackError(f"local embedder is missing {attribute!r}")
-    capabilities = embedder.capabilities()
-    if (not isinstance(capabilities, Mapping)
+def _capture_embedder_contract(embedder: Any) -> _PluginIdentity:
+    failure_code: str | None = None
+    try:
+        with _suppress_embedder_stdio():
+            name = embedder.name
+            version = embedder.version
+            fingerprint = embedder.fingerprint
+            capabilities_method = embedder.capabilities
+            embed_method = embedder.embed
+            capabilities = capabilities_method()
+    except _StdioContainmentFailure:
+        failure_code = "embedder_identity.stdio_containment_failed"
+    except BaseException:
+        failure_code = "embedder_identity.contract_read_failed"
+    if failure_code is not None:
+        raise KnowledgePackError(failure_code) from None
+    if (not callable(capabilities_method) or not callable(embed_method)
+            or not isinstance(capabilities, Mapping)
             or capabilities.get("protocol_version") != "hlsgraph.embedder.v1"
             or capabilities.get("local_only") is not True
             or capabilities.get("network_access") is not False):
         raise KnowledgePackError("embedder must implement the local-only v1 contract")
-    if not re.fullmatch(r"[0-9a-f]{64}", str(embedder.fingerprint)):
-        raise KnowledgePackError("embedder fingerprint must be lowercase SHA-256")
+    if (not isinstance(name, str) or not name.strip() or len(name) > 256
+            or re.search(r"[\x00-\x1f\x7f]", name) is not None
+            or not isinstance(version, str) or not version.strip()
+            or len(version) > 256
+            or re.search(r"[\x00-\x1f\x7f]", version) is not None
+            or not isinstance(fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None):
+        raise KnowledgePackError("embedder has an invalid immutable identity")
+    return _PluginIdentity(name=name, version=version, fingerprint=fingerprint)
 
 
-def _embed_chunks(connection: sqlite3.Connection, chunks: list[tuple[str, str]], embedder: Any) -> None:
+def _validate_embedder(embedder: Any | None) -> _PluginIdentity | None:
+    if embedder is None:
+        return None
+    return _capture_embedder_contract(embedder)
+
+
+def _invoke_embedder(embedder: Any, texts: list[str]) -> Any:
+    """Call a trusted in-process embedder with a body-free failure surface."""
+    failure_type: str | None = None
+    containment_failed = False
+    try:
+        with _suppress_embedder_stdio():
+            return embedder.embed(texts)
+    except _StdioContainmentFailure:
+        containment_failed = True
+    except BaseException as exc:
+        # Exception messages can contain input text, URLs, model diagnostics,
+        # or credentials.  Retain only a conservative class-name token and
+        # leave the exception scope before raising the public error so neither
+        # __cause__ nor __context__ retains the private exception object.
+        failure_type = _safe_external_type_name(exc)
+    if containment_failed:
+        raise KnowledgePackError(
+            "local embedder stdio containment failed"
+        ) from None
+    raise KnowledgePackError(
+        f"local embedder raised {failure_type or 'Exception'}"
+    ) from None
+
+
+def _embed_chunks(
+    connection: sqlite3.Connection, chunks: list[tuple[str, str]],
+    embedder: Any, expected_identity: _PluginIdentity,
+) -> None:
     dimension: int | None = None
     for offset in range(0, len(chunks), 64):
         batch = chunks[offset:offset + 64]
-        try:
-            vectors = embedder.embed([text for _chunk_id, text in batch])
-        except Exception as exc:
-            raise KnowledgePackError(f"local embedder failed: {exc}") from exc
+        if _capture_embedder_contract(embedder) != expected_identity:
+            raise KnowledgePackError("embedder_identity.changed_before_call")
+        vectors = _invoke_embedder(
+            embedder, [text for _chunk_id, text in batch],
+        )
+        if _capture_embedder_contract(embedder) != expected_identity:
+            raise KnowledgePackError("embedder_identity.changed_after_call")
         if not isinstance(vectors, Sequence) or len(vectors) != len(batch):
             raise KnowledgePackError("local embedder returned the wrong vector count")
         for (chunk_id, _text), vector in zip(batch, vectors):
@@ -469,7 +768,7 @@ class LocalKnowledgeSidecar:
         keys = [f"{item.document_id}@{item.document_version}" for item in entries]
         if len(set(keys)) != len(keys):
             raise KnowledgePackError("local knowledge document versions must be unique")
-        parser_media_types = _validate_parser(parser)
+        parser_media_types, parser_identity = _validate_parser(parser)
         if (not isinstance(max_parsed_chars, int) or isinstance(max_parsed_chars, bool)
                 or not 1 <= max_parsed_chars <= DEFAULT_MAX_PARSED_CHARS):
             raise KnowledgePackError(
@@ -482,7 +781,7 @@ class LocalKnowledgeSidecar:
             or not 0.1 <= float(parser_timeout_s) <= 60.0
         ):
             raise KnowledgePackError("knowledge parser timeout must be in 0.1..60 seconds")
-        _validate_embedder(embedder)
+        embedder_identity = _validate_embedder(embedder)
 
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".chunks.", suffix=".sqlite.tmp", dir=root,
@@ -493,6 +792,7 @@ class LocalKnowledgeSidecar:
         metadata_only: list[str] = []
         all_chunks: list[tuple[str, str]] = []
         fts_enabled = True
+        external_failure = False
         try:
             with closing(sqlite3.connect(temporary)) as connection:
                 connection.executescript("""
@@ -592,29 +892,42 @@ class LocalKnowledgeSidecar:
                             )
                         all_chunks.append((chunk_id, value))
                 if embedder is not None:
-                    _embed_chunks(connection, all_chunks, embedder)
+                    if embedder_identity is None:
+                        raise KnowledgePackError("embedder_identity.missing")
+                    _embed_chunks(
+                        connection, all_chunks, embedder, embedder_identity,
+                    )
+                    if _capture_embedder_contract(embedder) != embedder_identity:
+                        raise KnowledgePackError("embedder_identity.changed_before_publish")
                 connection.commit()
             index_hash = hashlib.sha256(temporary.read_bytes()).hexdigest()
+            if (embedder is not None and embedder_identity is not None
+                    and _capture_embedder_contract(embedder) != embedder_identity):
+                raise KnowledgePackError("embedder_identity.changed_before_publish")
             os.replace(temporary, self.database_path)
             manifest = LocalKnowledgeIndexManifest(
                 project_id=project_id,
                 document_hashes={key: item.sha256 for key, item in zip(keys, entries)},
                 chunk_count=len(all_chunks),
                 index_sha256=index_hash,
-                parser_id=(str(parser.name) if parser is not None
+                parser_id=(parser_identity.name if parser_identity is not None
                            else "hlsgraph.local_text"),
-                parser_version=(str(parser.version) if parser is not None else "1"),
-                parser_fingerprint=(str(parser.fingerprint) if parser is not None
+                parser_version=(parser_identity.version
+                                if parser_identity is not None else "1"),
+                parser_fingerprint=(parser_identity.fingerprint
+                                    if parser_identity is not None
                                     else hashlib.sha256(
                                         b"hlsgraph.local_text:1"
                                     ).hexdigest()),
                 chunker_id="hlsgraph.section_window",
                 chunker_version="1",
                 fts_enabled=fts_enabled,
-                embedder_id=str(embedder.name) if embedder is not None else None,
-                embedder_version=str(embedder.version) if embedder is not None else None,
-                embedder_fingerprint=(str(embedder.fingerprint)
-                                      if embedder is not None else None),
+                embedder_id=(embedder_identity.name
+                             if embedder_identity is not None else None),
+                embedder_version=(embedder_identity.version
+                                  if embedder_identity is not None else None),
+                embedder_fingerprint=(embedder_identity.fingerprint
+                                      if embedder_identity is not None else None),
                 metadata={
                     "metadata_only_documents": metadata_only,
                     "chunk_chars": chunk_chars,
@@ -624,10 +937,20 @@ class LocalKnowledgeSidecar:
                     "plugin_media_types": sorted(parser_media_types),
                 },
             )
+            if (embedder is not None and embedder_identity is not None
+                    and _capture_embedder_contract(embedder) != embedder_identity):
+                raise KnowledgePackError("embedder_identity.changed_before_manifest")
             _atomic_write_json(self.manifest_path, json_ready(manifest))
             return manifest
+        except KnowledgePackError:
+            raise
+        except (sqlite3.Error, OSError, UnicodeError, TypeError, ValueError):
+            external_failure = True
         finally:
             temporary.unlink(missing_ok=True)
+        if external_failure:
+            raise KnowledgePackError("local_sidecar_build.external_failure") from None
+        raise KnowledgePackError("local_sidecar_build.incomplete")
 
     def sync(self, project_id: str, documents: Iterable[LocalDocumentMetadata],
              **kwargs: Any) -> LocalKnowledgeIndexManifest:
@@ -635,18 +958,41 @@ class LocalKnowledgeSidecar:
         return self.build(project_id, documents, **kwargs)
 
     def manifest(self) -> LocalKnowledgeIndexManifest:
+        read_failed = False
         try:
             data, _info = _read_stable_local_file(
                 self.manifest_path, max_bytes=DEFAULT_MAX_MANIFEST_BYTES,
             )
-            payload = json.loads(data.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
-                KnowledgePackError) as exc:
-            raise KnowledgePackError(f"cannot load local sidecar manifest: {exc}") from exc
+        except (OSError, KnowledgePackError):
+            data = b""
+            read_failed = True
+        if read_failed:
+            raise KnowledgePackError("local_sidecar_manifest.read_failed") from None
+        decode_failed = False
         try:
-            return LocalKnowledgeIndexManifest.from_dict(payload)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise KnowledgePackError(f"invalid local sidecar manifest: {exc}") from exc
+            decoded = data.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            decoded = ""
+            decode_failed = True
+        if decode_failed:
+            raise KnowledgePackError("local_sidecar_manifest.utf8_decode_failed") from None
+        json_failed = False
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError:
+            payload = None
+            json_failed = True
+        if json_failed:
+            raise KnowledgePackError("local_sidecar_manifest.json_decode_failed") from None
+        contract_failed = False
+        try:
+            manifest = LocalKnowledgeIndexManifest.from_dict(payload)
+        except (KeyError, TypeError, ValueError):
+            contract_failed = True
+            manifest = None
+        if contract_failed or manifest is None:
+            raise KnowledgePackError("local_sidecar_manifest.contract_invalid") from None
+        return manifest
 
     def _verified_database_snapshot(
         self,
@@ -664,6 +1010,7 @@ class LocalKnowledgeSidecar:
                     "local knowledge sidecar cannot use links/reparse points"
                 )
         manifest = self.manifest()
+        read_failed = False
         try:
             # Preserve the existing accepted index-size envelope: the builder
             # already bounds documents/chunks/parser output, while optional
@@ -674,8 +1021,11 @@ class LocalKnowledgeSidecar:
             database_bytes, _info = _read_stable_local_file(
                 self.database_path, max_bytes=max(1, observed_size),
             )
-        except (OSError, KnowledgePackError) as exc:
-            raise KnowledgePackError(f"cannot read local knowledge database: {exc}") from exc
+        except (OSError, KnowledgePackError):
+            database_bytes = b""
+            read_failed = True
+        if read_failed:
+            raise KnowledgePackError("local_sidecar_database.read_failed") from None
         current_hash = hashlib.sha256(database_bytes).hexdigest()
         if current_hash != manifest.index_sha256:
             raise KnowledgePackError("local knowledge database hash does not match its manifest")
@@ -695,7 +1045,15 @@ class LocalKnowledgeSidecar:
     @staticmethod
     def _open_database_snapshot(database_bytes: bytes) -> sqlite3.Connection:
         """Open verified SQLite bytes without consulting the sidecar path."""
-        connection = sqlite3.connect(":memory:")
+        memory_open_failed = False
+        try:
+            connection = sqlite3.connect(":memory:")
+        except sqlite3.Error:
+            connection = None
+            memory_open_failed = True
+        if memory_open_failed or connection is None:
+            raise KnowledgePackError("local_sidecar_database.memory_open_failed") from None
+        snapshot_open_failed = False
         try:
             if not LocalKnowledgeSidecar._deserialize_into(connection, database_bytes):
                 # CPython 3.10 does not expose sqlite3_deserialize().  SQLite
@@ -798,11 +1156,11 @@ class LocalKnowledgeSidecar:
         except KnowledgePackError:
             connection.close()
             raise
-        except (sqlite3.Error, OSError, TypeError, ValueError) as exc:
+        except (sqlite3.Error, OSError, TypeError, ValueError):
             connection.close()
-            raise KnowledgePackError(
-                f"cannot open verified local knowledge database: {exc}"
-            ) from exc
+            snapshot_open_failed = True
+        if snapshot_open_failed:
+            raise KnowledgePackError("local_sidecar_database.snapshot_open_failed") from None
         return connection
 
     @staticmethod

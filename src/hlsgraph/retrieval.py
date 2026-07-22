@@ -533,7 +533,21 @@ def _append_private_access(
             if _is_link_or_reparse(private_root) or not private_root.is_dir():
                 return False
         if os.name != "nt":
-            os.chmod(private_root, 0o700)
+            # A read-only sandbox may expose an already-hardened private
+            # directory.  Re-applying the same mode is still a metadata write
+            # and fails with EROFS, which would incorrectly suppress an audit
+            # append supplied through a narrowly writable file overlay.
+            # Preserve fail-closed behavior for any weaker/stricter mode: only
+            # the exact 0700 state avoids chmod, and the result is rechecked.
+            private_mode = stat.S_IMODE(
+                private_root.stat(follow_symlinks=False).st_mode
+            )
+            if private_mode != 0o700:
+                os.chmod(private_root, 0o700)
+            if stat.S_IMODE(
+                private_root.stat(follow_symlinks=False).st_mode
+            ) != 0o700:
+                return False
         path = root / _PRIVATE_ACCESS_LOG
         if path.exists() and (_is_link_or_reparse(path) or not path.is_file()):
             return False
@@ -562,6 +576,12 @@ def _append_private_access(
                 or _is_link_or_reparse(private_root)
                 or _is_link_or_reparse(path) or not path.is_file()):
             return False
+        if os.name != "nt":
+            final_private_mode = stat.S_IMODE(
+                private_root.stat(follow_symlinks=False).st_mode
+            )
+            if final_private_mode != 0o700:
+                return False
     except OSError:
         return False
     return True

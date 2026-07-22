@@ -23,6 +23,7 @@ dependencies = ["tomli>=2; python_version < '3.11'"]
 [project.optional-dependencies]
 clang = ["libclang>=16"]
 mcp = ["mcp>=1.27,<2"]
+pdf = ["pypdf>=6,<7"]
 parquet = ["pyarrow>=15"]
 pyg = ["torch>=2", "torch-geometric>=2.5"]
 dev = ["pytest>=8", "coverage[toml]>=7"]
@@ -30,6 +31,9 @@ dev = ["pytest>=8", "coverage[toml]>=7"]
 [project.scripts]
 hlsgraph = "hlsgraph.cli:main"
 hlsgraph-mcp = "hlsgraph.mcp.server:main"
+
+[project.entry-points."hlsgraph.knowledge_parsers.v1"]
+pdf = "hlsgraph.knowledge.pdf_parser:PdfKnowledgeParser"
 
 [project.urls]
 Homepage = "https://github.com/liumh05/hlsgraph"

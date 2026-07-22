@@ -7,9 +7,13 @@ Inspect every pack, binding, context producer, reserved-token guard, extractor,
 and coverage classification. Repeat the supplied pack and implementation
 surface hashes exactly.
 
-For citation semantics, inspect only the frozen derived text associated with
-each exact HTTPS `citation_url`/`official_url` in the supplied cache manifest.
-The trusted runner performed the network fetch before this network-disabled
+For citation semantics, inspect the closed citation-to-evidence mapping and
+only the frozen derived text associated with each official `evidence_url` in
+the supplied cache manifest. `citation_url` remains the human-facing locator;
+only `direct.v1` requires equality. AMD KHUB mappings must close
+document/version identity and, for topic evidence, TOC/content identity.
+Document-root map metadata proves document identity only and cannot replace a
+topic body for a rule. The trusted runner performed the evidence fetch before this network-disabled
 turn and bound the complete same-host redirect chain, response hash, and parser
 identity. Missing/empty text, a binary PDF without a bound parser, an application
 shell, reachability metadata, memory, or another version is insufficient;
@@ -19,9 +23,12 @@ Use only the private read-only frozen cache supplied by the caller. The live
 checkout, sibling repositories, user files, and all network operations are
 unavailable. Native web/search/MCP tools, guessed paths, arbitrary shell
 commands, writes, installs, and project-code execution are forbidden. Read each
-required cached source and every available derived citation text in full; a
-hash-only command is not inspection evidence. Every permitted read and final
-result emission must appear in the normalized trace.
+source row explicitly marked `model_inspection_required=true` and every
+available derived citation text in full, one bounded UTF-8 chunk at a time; a
+hash-only command is not inspection evidence. Rows marked `integrity_bound_only`
+still invalidate the snapshot but are not claimed as model inspected. Every
+required chunk's exact, untruncated output and the final result emission must
+appear in the normalized trace.
 
 Treat the supplied citation-audit manifest only as the exact reference
 inventory, never as semantic proof. Repeat its raw SHA-256 and emit exactly one
@@ -73,7 +80,11 @@ Try at least these attacks:
   adapter emit a trusted fact/evidence/knowledge plane;
 - leak prediction/hypothesis or knowledge guidance into fact ranking.
 
-For each successful or plausible bypass, cite exact code/pack evidence and a
-concrete required fix. Set `approved=true` only if all attempted paths fail
-closed and no material issue remains. Use protocol ID
+Classify each successful or plausible bypass only through the schema's
+controlled severity/code pair. Do not publish finding/evidence/fix prose,
+quotations, paths, or any other free text in the result. Use the fixed summary
+`approved_no_issues` for approval and `rejected_with_controlled_issues`
+otherwise; citation issue values come only from their closed enum. Set
+`approved=true` only if all attempted paths fail closed and no material issue
+remains. Use protocol ID
 `hlsgraph.knowledge-review.adversarial.v1` and the required JSON schema.

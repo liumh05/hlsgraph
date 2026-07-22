@@ -234,9 +234,10 @@ def test_codex_command_is_read_only_ephemeral_and_has_one_arm_server(tmp_path: P
     assert any(item == 'permissions.hlsgraph_eval.network.enabled=false' for item in command)
     assert any(item.startswith('permissions.hlsgraph_eval.filesystem={') for item in command)
     assert any(
-        f'"{runs_root.resolve().as_posix()}"="deny"' in item
+        '":minimal"="read"' in item
         for item in command
     )
+    assert not any(runs_root.resolve().as_posix() in item for item in command)
     assert command[command.index("--model") + 1] == "gpt-5.6-sol"
     assert any("HLSGRAPH_MCP_TOOLS=\"explore\"" in item for item in command)
     assert not any("codegraph" in item.casefold() for item in command)
@@ -650,7 +651,10 @@ def _gate_fixture() -> tuple[
                 run_id = f"{question['id']}__r{repetition:02d}__{arm}"
                 source_hashes = {
                     name: hashlib.sha256(f"{run_id}:{name}".encode("utf-8")).hexdigest()
-                    for name in ("run.json", "prompt.txt", "codex.jsonl", "codex.stderr.log")
+                    for name in (
+                        "run.json", "prompt.txt", "codex.jsonl", "codex.stderr.log",
+                        "retrieval-access.jsonl",
+                    )
                 }
                 rows.append({
                     "schema_version": "hlsgraph.agent_eval.score.v1",
@@ -678,6 +682,18 @@ def _gate_fixture() -> tuple[
                     "tool_calls": 1, "total_tokens": 10,
                     "wall_time_seconds": 1.0,
                     "fabricated_truth_count": 0,
+                    "retrieval_audit": {
+                        "schema_version": "hlsgraph.agent_eval.retrieval_audit.v1",
+                        "status": (
+                            "verified" if arm == "hlsgraph-v03" else "not_applicable"
+                        ),
+                        "sha256": hashlib.sha256(b"").hexdigest(),
+                        "record_count": 0, "returned_count": 0,
+                        "returned_bytes": 0, "source_access_calls": 0,
+                        "receipt_sha256": hashlib.sha256(
+                            f"audit:{run_id}".encode("utf-8")
+                        ).hexdigest(),
+                    },
                     "trace_policy": {
                         "schema_version": "hlsgraph.agent_eval.trace_policy.v1",
                         "passed": True, "arm": arm,

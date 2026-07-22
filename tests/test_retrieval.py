@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -2028,6 +2030,46 @@ def test_private_access_log_fails_closed_on_unsafe_private_path(tmp_path: Path) 
         anchor={"kind": "source_line", "start_line": 1, "end_line": 1},
         result="denied_policy", byte_count=0,
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode contract")
+def test_private_access_log_does_not_rechmod_hardened_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hlsgraph.retrieval as retrieval
+
+    ledger_root = tmp_path / ".hlsgraph"
+    private_root = ledger_root / "private"
+    ledger_root.mkdir()
+    private_root.mkdir(mode=0o700)
+    private_root.chmod(0o700)
+
+    def reject_redundant_chmod(_path: object, _mode: int) -> None:
+        raise AssertionError("an already-hardened directory must not be rewritten")
+
+    monkeypatch.setattr(retrieval.os, "chmod", reject_redundant_chmod)
+    assert retrieval._append_private_access(
+        tmp_path, content_sha256="a" * 64,
+        anchor={"kind": "source_line", "start_line": 1, "end_line": 1},
+        result="returned", byte_count=1,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode contract")
+def test_private_access_log_hardens_weaker_directory_mode(tmp_path: Path) -> None:
+    import hlsgraph.retrieval as retrieval
+
+    ledger_root = tmp_path / ".hlsgraph"
+    private_root = ledger_root / "private"
+    ledger_root.mkdir()
+    private_root.mkdir(mode=0o755)
+    private_root.chmod(0o755)
+    assert retrieval._append_private_access(
+        tmp_path, content_sha256="a" * 64,
+        anchor={"kind": "source_line", "start_line": 1, "end_line": 1},
+        result="returned", byte_count=1,
+    )
+    assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
 
 
 def test_private_access_log_verifies_opened_file_identity(

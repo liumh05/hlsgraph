@@ -6,10 +6,14 @@ packs under `src/hlsgraph/knowledge/packs/` together with the actual context
 construction and binding guards in `src/hlsgraph/retrieval.py`, relevant
 extractors, `src/hlsgraph/knowledge/core.py`, and the knowledge models.
 
-For citation semantics, inspect the frozen derived text for every exact
-`citation_url`/`official_url` entry in the caller-supplied cache manifest. The
-trusted runner fetched those exact HTTPS locators before this network-disabled
-model turn, rejected any redirect chain that left the original host, retained
+For citation semantics, inspect the closed citation-to-evidence mapping and the
+frozen derived text for every official `evidence_url` in the caller-supplied
+cache manifest. `citation_url` remains the human-facing locator; only
+`direct.v1` requires equality. AMD KHUB mappings must close document/version
+identity and, for a topic, TOC/content identity. Document-root map metadata can
+verify document identity only and cannot support a rule in place of the
+specific topic body. The trusted runner fetched those evidence URLs before this
+network-disabled model turn, rejected any redirect chain that left the original host, retained
 the response body outside the repository, and bound any text derivation to its
 parser identity and hashes. A missing/empty derivation, binary PDF without a
 bound parser, application shell, metadata-only audit, model memory, or unrelated
@@ -20,9 +24,12 @@ Use only the private read-only frozen cache supplied by the caller. The live
 checkout, sibling repositories, user files, and every network operation are
 unavailable. Native web/search/MCP tools, guessed paths, arbitrary shell
 commands, writes, installs, and project-code execution are forbidden. Read every
-required cached source file and every available derived citation text in full;
-a hash-only command is not inspection evidence. Every permitted read and final
-result emission must appear in the normalized trace.
+source row explicitly marked `model_inspection_required=true` and every
+available derived citation text in full, one bounded UTF-8 chunk at a time; a
+hash-only command is not inspection evidence. Rows marked `integrity_bound_only`
+still invalidate the frozen snapshot when changed but are not claimed as model
+inspected. Every required chunk's exact, untruncated output and the final result
+emission must appear in the normalized trace.
 
 The supplied citation-audit manifest is only a deterministic inventory of the
 exact current references; it is not semantic proof. Repeat its raw SHA-256 and
@@ -93,6 +100,11 @@ semantic surface that the supplied hashes cover.
     locator. Do not approve a merely reachable URL as semantic verification of
     vendor prose.
 
-Report every material premise-to-binding gap. Set `approved=true` only when no
-issue remains; in that case `issues` must be empty. Use protocol ID
+Report a material premise-to-binding gap only through the schema's controlled
+severity/code pair; do not place explanations, findings, quotations, evidence,
+required fixes, paths, or any other free text in the public result. Use the
+fixed summary `approved_no_issues` for approval and
+`rejected_with_controlled_issues` otherwise. Citation issue values likewise
+come only from the closed enum. Set `approved=true` only when no issue remains;
+in that case `issues` must be empty. Use protocol ID
 `hlsgraph.knowledge-review.semantic.v1` and the required JSON schema.

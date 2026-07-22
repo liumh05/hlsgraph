@@ -264,6 +264,7 @@ def _score_identity_issues(
         source_hashes = row.get("source_hashes")
         expected_source_names = {
             "run.json", "prompt.txt", "codex.jsonl", "codex.stderr.log",
+            "retrieval-access.jsonl",
         }
         if (not isinstance(source_hashes, dict)
                 or set(source_hashes) != expected_source_names
@@ -277,6 +278,28 @@ def _score_identity_issues(
                 issues.append(f"{prefix}:run_source_sha256")
         if not isinstance(row.get("thread_id"), str) or not row["thread_id"]:
             issues.append(f"{prefix}:thread_id")
+        retrieval_audit = row.get("retrieval_audit")
+        expected_audit_status = "verified" if arm == "hlsgraph-v03" else "not_applicable"
+        if (not isinstance(retrieval_audit, dict)
+                or retrieval_audit.get("status") != expected_audit_status
+                or re.fullmatch(r"[0-9a-f]{64}", str(
+                    retrieval_audit.get("sha256", "")
+                )) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(
+                    retrieval_audit.get("receipt_sha256", "")
+                )) is None
+                or any(
+                    isinstance(retrieval_audit.get(key), bool)
+                    or not isinstance(retrieval_audit.get(key), int)
+                    or retrieval_audit[key] < 0
+                    for key in (
+                        "record_count", "returned_count", "returned_bytes",
+                        "source_access_calls",
+                    )
+                )
+                or retrieval_audit.get("returned_count", 0)
+                > retrieval_audit.get("record_count", 0)):
+            issues.append(f"{prefix}:retrieval_audit")
         trace_policy = row.get("trace_policy")
         if (
             not isinstance(trace_policy, dict) or trace_policy.get("passed") is not True
