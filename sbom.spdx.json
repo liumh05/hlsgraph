@@ -2,8 +2,8 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "hlsgraph-0.2.0",
-  "documentNamespace": "https://github.com/liumh05/hlsgraph/sbom/0.2.0",
+  "name": "hlsgraph-0.3.0",
+  "documentNamespace": "https://github.com/liumh05/hlsgraph/sbom/0.3.0",
   "comment": "Scope: files shipped by the base HLSGraph distribution, vendored components, and mandatory runtime dependencies. Optional, build, and development dependencies are separately disclosed in THIRD_PARTY_NOTICES.md and are not represented as base-package dependencies because they are not installed or bundled by the base package.",
   "creationInfo": {
     "created": "2026-07-16T21:57:59Z",
@@ -13,7 +13,7 @@
     {
       "name": "hlsgraph",
       "SPDXID": "SPDXRef-Package-HLSGraph",
-      "versionInfo": "0.2.0",
+      "versionInfo": "0.3.0",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",

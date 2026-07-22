@@ -28,6 +28,11 @@ from ..model import (
     TranslationUnit,
 )
 from .base import ExtractionContext, ExtractionError, ExtractionResult
+from .directive_identity import (
+    bind_directive_identity,
+    directive_identity_metadata,
+    resolve_directive_variable_operand,
+)
 
 
 _PRAGMA = re.compile(r"^\s*#\s*pragma\s+HLS\s+([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$", re.I)
@@ -1121,6 +1126,16 @@ class LibClangExtractor:
                 target = _scope_for_pragma(
                     graph, artifact.id, line_number, directive_kind, options
                 )
+                operand_target = (
+                    resolve_directive_variable_operand(
+                        graph, target, options.get("variable"),
+                    )
+                    if directive_kind == "DEPENDENCE" else None
+                )
+                identity_complete = bool(
+                    target is not None
+                    and (directive_kind != "DEPENDENCE" or operand_target is not None)
+                )
                 directive = Entity(
                     kind="hls.directive", name=directive_kind,
                     qualified_name=f"{artifact.uri}:{line_number}:{directive_kind}",
@@ -1129,8 +1144,15 @@ class LibClangExtractor:
                     attrs={"directive_kind": directive_kind, "options": options,
                            "origin": "source_pragma", "precedence": 10,
                            "state": "requested"}, anchors=[anchor],
-                    completeness=(Completeness.COMPLETE if target
+                    completeness=(Completeness.COMPLETE if identity_complete
                                   else Completeness.AMBIGUOUS),
+                )
+                scope_resolution = (
+                    "source_ast" if activity_mode == "libclang" else "regex_degraded"
+                )
+                bind_directive_identity(
+                    directive, target, scope_resolution=scope_resolution if target else None,
+                    operand_target=operand_target,
                 )
                 graph.add_entity(directive)
                 if target:
@@ -1138,7 +1160,8 @@ class LibClangExtractor:
                         src=directive.id, dst=target.id, kind="hls.annotates",
                         snapshot_id=context.snapshot.id,
                         authority=AuthorityClass.DECLARED_CONSTRAINT, stage=Stage.SOURCE.value,
-                        attrs={"scope_node_id": target.id, "scope_resolution": "source_ast"},
+                        attrs={"scope_node_id": target.id,
+                               "scope_resolution": scope_resolution},
                         anchors=[anchor],
                     ))
                     result.observations.append(Observation(
@@ -1146,13 +1169,29 @@ class LibClangExtractor:
                         predicate="directive.requested", value=options or True,
                         stage=Stage.SOURCE.value, authority=AuthorityClass.DECLARED_CONSTRAINT,
                         artifact_id=artifact.id, anchor=anchor,
-                        metadata={"directive_kind": directive_kind, "scope_id": target.id},
+                        completeness=directive.completeness,
+                        metadata={
+                            "directive_kind": directive_kind,
+                            **directive_identity_metadata(directive),
+                        },
                     ))
                 else:
                     result.diagnostics.append(Diagnostic(
                         snapshot_id=context.snapshot.id, code="directive.unresolved_scope",
                         severity=DiagnosticSeverity.WARNING,
                         message=f"could not deterministically bind {directive_kind} at {artifact.uri}:{line_number}",
+                        stage=Stage.SOURCE.value, subject_id=directive.id,
+                        artifact_id=artifact.id, anchor=anchor,
+                    ))
+                if (target is not None and directive_kind == "DEPENDENCE"
+                        and operand_target is None):
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.unresolved_operand",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=("could not deterministically bind DEPENDENCE operand "
+                                 f"{options.get('variable')!r} at "
+                                 f"{artifact.uri}:{line_number}"),
                         stage=Stage.SOURCE.value, subject_id=directive.id,
                         artifact_id=artifact.id, anchor=anchor,
                     ))
@@ -1171,7 +1210,7 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
         and anchor.start_line <= line <= anchor.end_line for anchor in entity.anchors
     )]
     variable = str(options.get("variable") or options.get("port") or "")
-    if variable:
+    if variable and kind != "DEPENDENCE":
         matches = [entity for entity in candidates if entity.name == variable]
         owners = [entity for entity in containing
                   if entity.kind in {"hls.kernel", "hls.function"}]
@@ -1194,7 +1233,21 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
         # A directive that explicitly names storage/port scope must never fall
         # back to a loop or function merely because that name is ambiguous.
         return None
-    loop_directives = {"PIPELINE", "UNROLL", "LOOP_FLATTEN", "LOOP_TRIPCOUNT", "DEPENDENCE"}
+    if kind == "DEPENDENCE":
+        # DEPENDENCE names an operand but applies to the loop/function that
+        # lexically encloses the declaration.  Unlike a loop pragma placed
+        # immediately before a loop, a nearby following loop is not sufficient
+        # evidence for this two-identity contract.
+        loops = [entity for entity in containing if entity.kind == "hls.loop"]
+        if loops:
+            spans = {entity.id: min(
+                (anchor.end_line or line) - (anchor.start_line or line)
+                for anchor in entity.anchors
+            ) for entity in loops}
+            smallest = min(spans.values())
+            winners = [entity for entity in loops if spans[entity.id] == smallest]
+            return winners[0] if len(winners) == 1 else None
+    loop_directives = {"PIPELINE", "UNROLL", "LOOP_FLATTEN", "LOOP_TRIPCOUNT"}
     if kind in loop_directives:
         # HLS loop pragmas normally precede the loop they annotate.  Prefer the
         # nearest unique following loop before considering an enclosing loop;

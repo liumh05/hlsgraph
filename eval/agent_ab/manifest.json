@@ -1,0 +1,108 @@
+{
+  "schema_version": "hlsgraph.agent_eval.v1",
+  "suite_id": "hlsgraph-public-graphrag-v1",
+  "description": "Public HLS architecture and evidence retrieval A/B; no vendor tools or training are invoked.",
+  "model": {
+    "id": "gpt-5.6-sol",
+    "reasoning_effort": "medium"
+  },
+  "codex_cli": {
+    "minimum_version": "0.144.0",
+    "sandbox": "read-only",
+    "web": false,
+    "ephemeral": true,
+    "timeout_seconds": 900,
+    "output_schema": "answer.schema.json"
+  },
+  "indexing": {
+    "source_backend": "libclang",
+    "allow_degraded": false
+  },
+  "repetitions": 4,
+  "randomization_seed": 20260721,
+  "bootstrap": {
+    "samples": 10000,
+    "seed": 20260721,
+    "confidence": 0.95,
+    "method": "question-stratified paired bootstrap"
+  },
+  "arms": [
+    {
+      "id": "native",
+      "label": "Native Codex file tools",
+      "kind": "native",
+      "mcp": null
+    },
+    {
+      "id": "codegraph",
+      "label": "CodeGraph frozen main",
+      "kind": "mcp",
+      "repository": "https://github.com/colbymchenry/codegraph",
+      "revision": "286e9ccc2dad45336d4fd67052930322054d64b5",
+      "entrypoint_sha256": "9909193d596dc12f0fa70fb4349f9a9d3447f69fee78821fc9330475eef087c7",
+      "license": "MIT",
+      "mcp_tool": "codegraph_explore"
+    },
+    {
+      "id": "hlsgraph-v02",
+      "label": "HLSGraph v0.2 narrow tools",
+      "kind": "mcp",
+      "repository": "https://github.com/liumh05/hlsgraph",
+      "revision": "7b26bfb07aa7c4d1a4705d3076cac684c3561e6f",
+      "version": "0.2.0",
+      "mcp_tools": "all"
+    },
+    {
+      "id": "hlsgraph-v03",
+      "label": "HLSGraph v0.3 unified explore",
+      "kind": "mcp",
+      "repository": "https://github.com/liumh05/hlsgraph",
+      "revision": "record-at-run-time",
+      "version": "0.3.0",
+      "mcp_tools": "explore"
+    }
+  ],
+  "metrics": [
+    "evidence_grounded_correctness",
+    "citation_precision",
+    "unsupported_claims",
+    "tool_calls",
+    "file_reads",
+    "total_tokens",
+    "wall_time_seconds"
+  ],
+  "claim_contracts": {
+    "design_fact": {
+      "authority_pattern": "source|static|declaration|ast|compiler",
+      "allowed_stages": ["source", "ast"]
+    },
+    "synthetic_observation": {
+      "authority_pattern": "synthetic|fixture",
+      "allowed_stages": ["schedule", "csim", "cosim", "rtl_cosim", "post_route", "source", "unknown", null],
+      "selector_stage_rules": [
+        {"path_pattern": "directive_status\\.json$|schedule\\.json$", "allowed_stages": ["schedule"]},
+        {"path_pattern": "csim_result\\.json$", "allowed_stages": ["csim"]},
+        {"path_pattern": "cosim\\.rpt$|dataflow_profile\\.json$", "allowed_stages": ["cosim", "rtl_cosim"]},
+        {"path_pattern": "post_route_", "allowed_stages": ["post_route"]},
+        {"path_pattern": "EVAL_PROVENANCE\\.json$", "allowed_stages": ["source", "unknown", null]}
+      ]
+    },
+    "knowledge_guidance": {
+      "authority_pattern": "knowledge|rule|guidance|invariant",
+      "allowed_stages": ["knowledge", null]
+    },
+    "unknown": {
+      "authority_pattern": "absence|manifest|evaluation|incomplete|source|provenance|no[_ -]?evidence",
+      "allowed_stages": ["source", "unknown", null]
+    }
+  },
+  "release_gates": {
+    "static_recall_at_8": 0.9,
+    "static_ndcg_at_8": 0.8,
+    "static_citation_precision": 0.95,
+    "fabricated_truth_count": 0,
+    "quality_noninferiority_margin": -0.02,
+    "codegraph_quality_delta_ci_lower": 0.0,
+    "minimum_positive_efficiency_metrics": 2
+  }
+}

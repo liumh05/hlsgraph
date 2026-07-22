@@ -10,7 +10,20 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from .model import ArtifactRef, AuthorityClass, Observation, ProjectManifest, ToolRun
+from .model import (
+    ArtifactRef,
+    AuthorityClass,
+    DesignSnapshot,
+    ExecutionAttestation,
+    ExecutionCommitReceipt,
+    ExecutionDeclaredOutput,
+    ExecutionOutputAttestation,
+    Observation,
+    ProjectManifest,
+    ToolRun,
+    json_ready,
+    stable_hash,
+)
 
 
 TOOL_EVIDENCE_POLICY_VERSION = "hlsgraph.tool-evidence.v0.1"
@@ -21,6 +34,11 @@ REAL_TOOL_RUN_AUTHORITIES = frozenset({
     AuthorityClass.VERIFICATION_EVIDENCE.value,
     AuthorityClass.PHYSICAL_MEASUREMENT.value,
 })
+EXECUTION_ATTESTATION_PROTOCOL = "hlsgraph.execution_attestation.v1"
+EXECUTION_ATTESTATION_VALIDATOR = "hlsgraph.stage_orchestrator.v1"
+EXECUTION_RECEIPT_CONTRACT = "hlsgraph.execution_commit_receipt.v1"
+EXECUTION_RECEIPT_VALIDATOR = "hlsgraph.ledger.execution_attestation.v1"
+_DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +168,8 @@ def real_tool_run_claim_error(run: ToolRun) -> str | None:
     """
     if run.stage == "index":
         return "index runs cannot claim external tool truth"
+    if str(run.status) not in {"succeeded", "failed"}:
+        return "real-tool truth requires a freshly executed succeeded/failed run"
     if str(run.backend).casefold() not in REAL_TOOL_RUN_BACKENDS:
         return f"backend {run.backend!r} is not an approved real-tool backend"
     authority = str(run.metadata.get("authority", "")).casefold()
@@ -196,6 +216,181 @@ def tool_run_manifest_identity_error(
         or run.working_directory != "."
     ):
         return "execution identity does not match the immutable snapshot manifest"
+    return None
+
+
+def tool_run_stable_id_error(run: ToolRun) -> str | None:
+    """Return an error when a caller supplied a non-canonical ToolRun ID."""
+
+    payload = json_ready(run)
+    payload["id"] = ""
+    try:
+        expected = ToolRun.from_dict(payload).id
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"run payload cannot be canonically reconstructed: {exc}"
+    if run.id != expected:
+        return f"run stable ID {run.id!r} does not match {expected!r}"
+    return None
+
+
+def _declared_output_contracts(
+    manifest: ProjectManifest, stage: str,
+) -> tuple[ExecutionDeclaredOutput, ...]:
+    return tuple(sorted((
+        ExecutionDeclaredOutput(
+            path=item.path,
+            kind=item.kind,
+            required=item.required,
+            max_bytes=item.metadata.get("max_bytes", _DEFAULT_MAX_OUTPUT_BYTES),
+        )
+        for item in manifest.stage_outputs.get(stage, [])
+    ), key=lambda item: item.path))
+
+
+def execution_attestation_error(
+    attestation: ExecutionAttestation,
+    run: ToolRun,
+    snapshot: DesignSnapshot,
+    manifest: ProjectManifest,
+    artifacts: Sequence[ArtifactRef],
+) -> str | None:
+    """Re-verify a persisted execution attestation from public ledger data.
+
+    This validates deterministic content only.  Initial authorization remains a
+    separate, process-local capability check at the store commit boundary.
+    """
+
+    if attestation.protocol_version != EXECUTION_ATTESTATION_PROTOCOL:
+        return "execution attestation uses an unsupported protocol"
+    if attestation.validator != EXECUTION_ATTESTATION_VALIDATOR:
+        return "execution attestation was not validated by StageOrchestrator"
+    stable_error = tool_run_stable_id_error(run)
+    if stable_error is not None:
+        return stable_error
+    expected_runner_fingerprint = run.metadata.get("runner_fingerprint")
+    expected = {
+        "run_id": run.id,
+        "snapshot_id": run.snapshot_id,
+        "stage": run.stage,
+        "runner_identity": run.backend,
+        "runner_fingerprint": expected_runner_fingerprint,
+        "request_hash": run.request_hash,
+        "run_payload_hash": stable_hash(json_ready(run)),
+        "manifest_hash": snapshot.manifest_hash,
+        "build_hash": snapshot.build_hash,
+        "target_hash": snapshot.target_hash,
+        "constraint_hash": snapshot.constraint_hash,
+        "toolchain_hash": snapshot.toolchain_hash,
+        "toolchain_id": run.toolchain_id,
+    }
+    for name, value in expected.items():
+        if getattr(attestation, name) != value:
+            return f"execution attestation {name} does not match its run/snapshot"
+    builtin_authority = {
+        "runner.local": "hlsgraph.runner_authority.builtin_local.v1",
+        "runner.ssh": "hlsgraph.runner_authority.builtin_ssh.v1",
+    }.get(str(run.backend).casefold())
+    if (attestation.runner_authority != builtin_authority
+            and not attestation.runner_authority.startswith(
+                "hlsgraph.runner_authority.plugin."
+            )):
+        return "execution attestation runner authority is not a trusted built-in/plugin origin"
+    if snapshot.id != run.snapshot_id or snapshot.project_id != manifest.project_id:
+        return "execution attestation snapshot/project identity is inconsistent"
+    manifest_hashes = {
+        "manifest_hash": stable_hash(manifest.identity_payload()),
+        "build_hash": stable_hash(manifest.build),
+        "target_hash": stable_hash(manifest.target),
+        "constraint_hash": stable_hash(manifest.constraints),
+        "toolchain_hash": stable_hash({
+            "toolchains": manifest.toolchains,
+            "stage_toolchains": manifest.stage_toolchains,
+        }),
+    }
+    for name, value in manifest_hashes.items():
+        if getattr(attestation, name) != value:
+            return f"execution attestation {name} does not match the immutable manifest"
+    identity_error = tool_run_manifest_identity_error(run, manifest)
+    if identity_error is not None:
+        return identity_error
+    expected_declarations = _declared_output_contracts(manifest, run.stage)
+    if attestation.declared_outputs != expected_declarations:
+        return "execution attestation output declarations differ from the manifest"
+
+    values = list(artifacts)
+    by_id = {item.id: item for item in values}
+    if len(by_id) != len(values):
+        return "execution attestation artifacts contain duplicate IDs"
+    if set(by_id) != set(run.output_artifact_ids):
+        return "execution attestation artifacts differ from run output_artifact_ids"
+    declarations = {item.path: item for item in expected_declarations}
+    expected_outputs: list[ExecutionOutputAttestation] = []
+    for artifact in values:
+        path = artifact.metadata.get("declared_output_path")
+        if not isinstance(path, str) or path not in declarations:
+            return f"execution output artifact {artifact.id!r} lacks a declared output path"
+        declaration = declarations[path]
+        if artifact.kind != declaration.kind:
+            return f"execution output artifact {artifact.id!r} has the wrong declared kind"
+        if artifact.producer_run_id != run.id:
+            return f"execution output artifact {artifact.id!r} has the wrong producer run"
+        if artifact.size > declaration.max_bytes:
+            return f"execution output artifact {artifact.id!r} exceeds its declared limit"
+        expected_outputs.append(ExecutionOutputAttestation(
+            artifact_id=artifact.id,
+            path=path,
+            kind=artifact.kind,
+            sha256=artifact.sha256,
+            size=artifact.size,
+        ))
+    expected_output_tuple = tuple(sorted(expected_outputs, key=lambda item: item.path))
+    if attestation.outputs != expected_output_tuple:
+        return "execution attestation output identities differ from committed artifacts"
+    if str(run.status) == "succeeded":
+        missing_required = sorted(
+            item.path for item in expected_declarations
+            if item.required and item.path not in {output.path for output in expected_outputs}
+        )
+        if missing_required:
+            return "successful execution omits required declared outputs"
+    staged_manifest = run.metadata.get("staged_output_manifest")
+    expected_staged_manifest = [
+        {"path": item.path, "size": item.size, "sha256": item.sha256}
+        for item in expected_output_tuple
+    ]
+    if (not isinstance(staged_manifest, list)
+            or any(not isinstance(item, Mapping) for item in staged_manifest)):
+        return "execution runner staged manifest is missing or malformed"
+    normalized_staged = sorted(
+        (dict(item) for item in staged_manifest),
+        key=lambda item: str(item.get("path", "")),
+    )
+    if normalized_staged != expected_staged_manifest:
+        return "execution attestation outputs differ from the runner staged manifest"
+    return None
+
+
+def execution_commit_receipt_error(
+    receipt: ExecutionCommitReceipt,
+    attestation: ExecutionAttestation,
+    run: ToolRun,
+) -> str | None:
+    """Return why a persisted store receipt does not close to its attestation."""
+
+    if receipt.receipt_contract != EXECUTION_RECEIPT_CONTRACT:
+        return "execution commit receipt uses an unsupported contract"
+    if receipt.validator != EXECUTION_RECEIPT_VALIDATOR:
+        return "execution commit receipt uses an unsupported validator"
+    expected = {
+        "attestation_id": attestation.id,
+        "run_id": run.id,
+        "snapshot_id": run.snapshot_id,
+        "run_payload_hash": stable_hash(json_ready(run)),
+        "attestation_payload_hash": stable_hash(json_ready(attestation)),
+    }
+    for name, value in expected.items():
+        if getattr(receipt, name) != value:
+            return f"execution commit receipt {name} does not match its attestation/run"
     return None
 
 

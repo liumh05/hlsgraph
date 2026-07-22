@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_id",
+    "review_surface_sha256",
+    "implementation_surface_sha256",
+    "citation_audit_sha256",
+    "citation_results",
+    "approved",
+    "issues",
+    "summary"
+  ],
+  "properties": {
+    "protocol_id": {
+      "enum": [
+        "hlsgraph.knowledge-review.semantic.v1",
+        "hlsgraph.knowledge-review.adversarial.v1"
+      ]
+    },
+    "review_surface_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hlsgraph.amd.public_guidance.2024_2",
+        "hlsgraph.axi.public_guidance.v1",
+        "hlsgraph.open_ir.public_guidance.2026_07_21"
+      ],
+      "properties": {
+        "hlsgraph.amd.public_guidance.2024_2": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hlsgraph.axi.public_guidance.v1": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hlsgraph.open_ir.public_guidance.2026_07_21": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "implementation_surface_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "citation_audit_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "citation_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reference_id",
+          "reference_surface_sha256",
+          "verdict",
+          "exact_locator_inspected",
+          "declared_version_matched",
+          "declared_section_matched",
+          "paraphrase_supported",
+          "applicability_not_broader",
+          "issues"
+        ],
+        "properties": {
+          "reference_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "reference_surface_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "verdict": {"enum": ["verified", "unavailable", "rejected"]},
+          "exact_locator_inspected": {"type": "boolean"},
+          "declared_version_matched": {"type": "boolean"},
+          "declared_section_matched": {"type": ["boolean", "null"]},
+          "paraphrase_supported": {"type": ["boolean", "null"]},
+          "applicability_not_broader": {"type": ["boolean", "null"]},
+          "issues": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        }
+      }
+    },
+    "approved": {"type": "boolean"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity", "pack_id", "rule_id", "binding_target", "finding",
+          "evidence", "required_fix"
+        ],
+        "properties": {
+          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "pack_id": {"type": "string"},
+          "rule_id": {"type": ["string", "null"]},
+          "binding_target": {"type": ["string", "null"]},
+          "finding": {"type": "string"},
+          "evidence": {"type": "string"},
+          "required_fix": {"type": "string"}
+        }
+      }
+    },
+    "summary": {"type": "string"}
+  }
+}

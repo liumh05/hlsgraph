@@ -2,11 +2,18 @@ include LICENSE NOTICE THIRD_PARTY_NOTICES.md sbom.spdx.json
 include README.md CHANGELOG.md pyproject.toml build_backend.py CITATION.cff
 include CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md DCO
 recursive-include licenses *
-recursive-include docs *.md
+recursive-include docs *.md *.json *.jsonl
 recursive-include examples/dataflow_gemm *.cpp *.h *.toml *.json *.xml *.rpt *.tcl *.ll *.mlir *.md
 recursive-include src/hlsgraph/render/vendor *.js
 recursive-include src/hlsgraph/knowledge/packs *.json
-recursive-include tools *.py
+recursive-include tools *.py *.json *.md
+recursive-include tests *.py *.json
+include eval/__init__.py
+recursive-include eval/agent_ab *.py *.json *.jsonl *.md *.h *.hpp
+include eval/agent_ab/stubs/algorithm eval/agent_ab/stubs/iostream eval/agent_ab/stubs/vector
+prune eval/agent_ab/work
+prune eval/agent_ab/runs
+prune eval/agent_ab/results
 prune examples/dataflow_gemm/.hlsgraph
 prune .packaging-test
 prune .wheel-test

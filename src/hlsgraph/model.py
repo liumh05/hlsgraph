@@ -449,6 +449,184 @@ class ArtifactRef:
         return cls(**dict(value))
 
 
+@dataclass(frozen=True, slots=True)
+class LanguageSpecCompatibility:
+    """One exact language-specification compatibility claim.
+
+    This is an adapter claim, not a fact inferred from an IR filename, dialect
+    spelling, or arbitrary artifact metadata.  The public v0.3 pipeline does
+    not authorize any producer to make the claim; this type reserves a future
+    persisted capability contract and is not itself a trust token.
+    """
+
+    family: str
+    revision: str
+    compatibility_contract: str
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.family, "language specification family")
+        require_namespaced(self.revision, "language specification revision")
+        require_namespaced(
+            self.compatibility_contract,
+            "language specification compatibility contract",
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "LanguageSpecCompatibility":
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSemanticClaim:
+    """Semantic compatibility claimed by the extractor handling one artifact.
+
+    The shape is reserved for a future authorized adapter protocol.  Public
+    v0.3 extraction rejects every such claim, including one returned by a
+    plugin with a built-in-looking name.
+    """
+
+    artifact_id: str
+    artifact_revision: str
+    adapter_contract: str
+    adapter_version: str
+    language_spec_contracts: tuple[LanguageSpecCompatibility, ...]
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.artifact_id, "semantic claim artifact_id")
+        require_namespaced(
+            self.artifact_revision, "semantic claim artifact_revision",
+        )
+        require_namespaced(
+            self.adapter_contract, "semantic claim adapter_contract",
+        )
+        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
+            raise ValueError("semantic claim adapter_version is required")
+        values = tuple(
+            item if isinstance(item, LanguageSpecCompatibility)
+            else LanguageSpecCompatibility.from_dict(item)
+            for item in self.language_spec_contracts
+        )
+        if not values:
+            raise ValueError("semantic claim requires a language specification contract")
+        families = [item.family for item in values]
+        if len(set(families)) != len(families):
+            raise ValueError("semantic claim language specification families must be unique")
+        object.__setattr__(
+            self, "language_spec_contracts",
+            tuple(sorted(values, key=lambda item: item.family)),
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ArtifactSemanticClaim":
+        data = dict(value)
+        data["language_spec_contracts"] = tuple(
+            LanguageSpecCompatibility.from_dict(item)
+            for item in data.get("language_spec_contracts", ())
+        )
+        return cls(**data)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSemanticAttestation:
+    """Pipeline-issued, content-closed semantic evidence for one IR artifact.
+
+    The value is deterministic and deliberately has no free-form metadata, but
+    constructing or storing it does not confer authority.  Public v0.3 has no
+    persisted adapter-authorization ledger and retrieval ignores these values.
+    """
+
+    snapshot_id: str
+    artifact_id: str
+    artifact_kind: str
+    artifact_sha256: str
+    artifact_revision: str
+    extraction_hash: str
+    extractor_name: str
+    extractor_version: str
+    extractor_identity: str
+    adapter_contract: str
+    adapter_version: str
+    language_spec_contracts: tuple[LanguageSpecCompatibility, ...]
+    attestation_contract: str = "hlsgraph.artifact_semantic_attestation.v1"
+    origin_kind: str = "immutable_extraction_manifest"
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.snapshot_id, "semantic attestation snapshot_id")
+        require_namespaced(self.artifact_id, "semantic attestation artifact_id")
+        require_namespaced(self.artifact_kind, "semantic attestation artifact_kind")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", self.artifact_sha256):
+            raise ValueError("semantic attestation artifact_sha256 must be SHA-256")
+        object.__setattr__(self, "artifact_sha256", self.artifact_sha256.lower())
+        require_namespaced(
+            self.artifact_revision, "semantic attestation artifact_revision",
+        )
+        for value, label in (
+            (self.extraction_hash, "semantic attestation extraction_hash"),
+            (self.extractor_identity, "semantic attestation extractor_identity"),
+        ):
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                raise ValueError(f"{label} must be SHA-256")
+        object.__setattr__(self, "extraction_hash", self.extraction_hash.lower())
+        object.__setattr__(self, "extractor_identity", self.extractor_identity.lower())
+        require_namespaced(self.extractor_name, "semantic attestation extractor_name")
+        if not isinstance(self.extractor_version, str) or not self.extractor_version.strip():
+            raise ValueError("semantic attestation extractor_version is required")
+        require_namespaced(self.adapter_contract, "semantic attestation adapter_contract")
+        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
+            raise ValueError("semantic attestation adapter_version is required")
+        require_namespaced(
+            self.attestation_contract,
+            "semantic attestation contract",
+        )
+        if self.origin_kind != "immutable_extraction_manifest":
+            raise ValueError("unsupported semantic attestation origin_kind")
+        values = tuple(
+            item if isinstance(item, LanguageSpecCompatibility)
+            else LanguageSpecCompatibility.from_dict(item)
+            for item in self.language_spec_contracts
+        )
+        if not values:
+            raise ValueError("semantic attestation requires a language specification contract")
+        families = [item.family for item in values]
+        if len(set(families)) != len(families):
+            raise ValueError(
+                "semantic attestation language specification families must be unique"
+            )
+        values = tuple(sorted(values, key=lambda item: item.family))
+        object.__setattr__(self, "language_spec_contracts", values)
+        expected = stable_id("semantic_attestation", {
+            "snapshot_id": self.snapshot_id,
+            "artifact_id": self.artifact_id,
+            "artifact_kind": self.artifact_kind,
+            "artifact_sha256": self.artifact_sha256,
+            "artifact_revision": self.artifact_revision,
+            "extraction_hash": self.extraction_hash,
+            "extractor_name": self.extractor_name,
+            "extractor_version": self.extractor_version,
+            "extractor_identity": self.extractor_identity,
+            "adapter_contract": self.adapter_contract,
+            "adapter_version": self.adapter_version,
+            "language_spec_contracts": values,
+            "attestation_contract": self.attestation_contract,
+            "origin_kind": self.origin_kind,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"semantic attestation stable id {self.id!r} does not match {expected!r}"
+            )
+        object.__setattr__(self, "id", expected)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ArtifactSemanticAttestation":
+        data = dict(value)
+        data["language_spec_contracts"] = tuple(
+            LanguageSpecCompatibility.from_dict(item)
+            for item in data.get("language_spec_contracts", ())
+        )
+        return cls(**data)
+
+
 @dataclass(slots=True)
 class TranslationUnit:
     file: str
@@ -1054,6 +1232,105 @@ class Relation:
         return cls(**data)
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationSource:
+    """Parser-issued commitment for one canonical source report.
+
+    This record is deliberately singular.  It commits the observation
+    predicate/value/unit tuple to one exact content-addressed artifact, but is
+    not by itself an authorization or signature.  The ledger/retriever accept
+    it as tool evidence only after fixed-parser replay, and never assemble an
+    observation from sibling reports.  Predicate-specific multi-report joins
+    require a separate, future contract and are not represented by this type.
+    """
+
+    artifact_id: str
+    artifact_sha256: str
+    parser_name: str
+    parser_version: str
+    payload_sha256: str
+    binding_sha256: str
+    contract: str = "hlsgraph.observation_source.v1"
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.artifact_id, "observation source artifact_id")
+        require_namespaced(self.parser_name, "observation source parser_name")
+        require_namespaced(self.contract, "observation source contract")
+        if self.contract != "hlsgraph.observation_source.v1":
+            raise ValueError("unsupported observation source contract")
+        if not isinstance(self.parser_version, str) or not self.parser_version.strip():
+            raise ValueError("observation source parser_version must be non-empty")
+        object.__setattr__(self, "parser_version", self.parser_version.strip())
+        for field_name in ("artifact_sha256", "payload_sha256", "binding_sha256"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                raise ValueError(f"observation source {field_name} must be SHA-256")
+            object.__setattr__(self, field_name, value.lower())
+
+    def validation_error(
+        self, *, predicate: str, value: Any, unit: str | None,
+    ) -> str | None:
+        expected_payload = stable_hash({
+            "predicate": predicate, "value": value, "unit": unit,
+        })
+        if self.payload_sha256 != expected_payload:
+            return "parser source payload does not match predicate/value/unit"
+        expected_binding = stable_hash({
+            "contract": self.contract,
+            "artifact_id": self.artifact_id,
+            "artifact_sha256": self.artifact_sha256,
+            "parser_name": self.parser_name,
+            "parser_version": self.parser_version,
+            "payload_sha256": self.payload_sha256,
+        })
+        if self.binding_sha256 != expected_binding:
+            return "parser source binding does not match its artifact and payload"
+        return None
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ObservationSource":
+        return cls(**dict(value))
+
+
+def _observation_source_commitment(
+    *, artifact: ArtifactRef, parser_name: str, parser_version: str,
+    predicate: str, value: Any, unit: str | None,
+) -> ObservationSource:
+    """Build an untrusted parser-output content commitment.
+
+    This private helper does not authorize an observation.  Tool truth is
+    admitted only after the ledger/retriever reruns the corresponding fixed
+    parser over the managed artifact and finds exactly one matching output.
+    """
+
+    normalized_parser_version = str(parser_version).strip()
+    if not normalized_parser_version:
+        raise ValueError("observation source parser_version must be non-empty")
+    payload_sha256 = stable_hash({
+        "predicate": predicate,
+        "value": value,
+        # ``None`` is intentional and distinct from an omitted field or an
+        # empty unit string in canonical JSON.
+        "unit": unit,
+    })
+    binding_sha256 = stable_hash({
+        "contract": "hlsgraph.observation_source.v1",
+        "artifact_id": artifact.id,
+        "artifact_sha256": artifact.sha256,
+        "parser_name": parser_name,
+        "parser_version": normalized_parser_version,
+        "payload_sha256": payload_sha256,
+    })
+    return ObservationSource(
+        artifact_id=artifact.id,
+        artifact_sha256=artifact.sha256,
+        parser_name=parser_name,
+        parser_version=normalized_parser_version,
+        payload_sha256=payload_sha256,
+        binding_sha256=binding_sha256,
+    )
+
+
 @dataclass(slots=True)
 class Observation:
     snapshot_id: str
@@ -1071,6 +1348,7 @@ class Observation:
     workload_id: str | None = None
     observed_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    source: ObservationSource | None = None
 
     def __post_init__(self) -> None:
         require_namespaced(self.predicate, "observation predicate")
@@ -1079,21 +1357,55 @@ class Observation:
         require_fact_authority(self.authority, "observation")
         self.completeness = enum_value(Completeness, self.completeness)  # type: ignore[assignment]
         reject_embedded_body_fields(self.metadata, "observation metadata")
+        if self.anchor is not None and not isinstance(self.anchor, SourceAnchor):
+            self.anchor = SourceAnchor.from_dict(self.anchor)  # type: ignore[arg-type]
+        if self.source is not None and not isinstance(self.source, ObservationSource):
+            self.source = ObservationSource.from_dict(self.source)  # type: ignore[arg-type]
+        if (self.artifact_id is not None and self.anchor is not None
+                and self.artifact_id != self.anchor.artifact_id):
+            raise ValueError("observation artifact_id must match its anchor artifact_id")
+        if self.source is not None:
+            if self.artifact_id is None or self.anchor is None:
+                raise ValueError(
+                    "parser-issued observation source requires one artifact_id and anchor"
+                )
+            if (self.source.artifact_id != self.artifact_id
+                    or self.source.artifact_id != self.anchor.artifact_id):
+                raise ValueError(
+                    "parser-issued observation source must name the canonical artifact"
+                )
+            source_error = self.source.validation_error(
+                predicate=self.predicate, value=self.value, unit=self.unit,
+            )
+            if source_error is not None:
+                raise ValueError(source_error)
+        identity = {
+            "snapshot": self.snapshot_id, "subject": self.subject_id,
+            "predicate": self.predicate, "value": self.value, "unit": self.unit,
+            "stage": self.stage, "authority": str(self.authority), "run": self.run_id,
+            "artifact": self.artifact_id, "workload": self.workload_id,
+            "anchor": self.anchor, "completeness": str(self.completeness),
+            "observed_at": self.observed_at, "metadata": self.metadata,
+        }
+        # Preserve v0.1/v0.2 observation identity byte-for-byte.  Only the new
+        # v0.3 typed-source contract extends the identity payload.
+        if self.source is not None:
+            identity["source"] = self.source
+        expected_id = stable_id("observation", identity)
+        if self.source is not None and self.id and self.id != expected_id:
+            raise ValueError(
+                f"typed observation stable id {self.id!r} does not match {expected_id!r}"
+            )
         if not self.id:
-            self.id = stable_id("observation", {
-                "snapshot": self.snapshot_id, "subject": self.subject_id,
-                "predicate": self.predicate, "value": self.value, "unit": self.unit,
-                "stage": self.stage, "authority": str(self.authority), "run": self.run_id,
-                "artifact": self.artifact_id, "workload": self.workload_id,
-                "anchor": self.anchor, "completeness": str(self.completeness),
-                "observed_at": self.observed_at, "metadata": self.metadata,
-            })
+            self.id = expected_id
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Observation":
         data = dict(value)
         if data.get("anchor"):
             data["anchor"] = SourceAnchor.from_dict(data["anchor"])
+        if data.get("source"):
+            data["source"] = ObservationSource.from_dict(data["source"])
         return cls(**data)
 
 
@@ -1438,6 +1750,221 @@ class ToolRun:
         return cls(**data)
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionDeclaredOutput:
+    """One immutable output declaration covered by an execution attestation."""
+
+    path: str
+    kind: str
+    required: bool
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", safe_relative_path(
+            self.path, "execution declared output path",
+        ))
+        require_namespaced(self.kind, "execution declared output kind")
+        if not isinstance(self.required, bool):
+            raise ValueError("execution declared output required must be boolean")
+        if (not isinstance(self.max_bytes, int) or isinstance(self.max_bytes, bool)
+                or self.max_bytes < 0):
+            raise ValueError("execution declared output max_bytes must be non-negative")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutionDeclaredOutput":
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOutputAttestation:
+    """Identity of one declared output whose bytes reached the local CAS."""
+
+    artifact_id: str
+    path: str
+    kind: str
+    sha256: str
+    size: int
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.artifact_id, "execution output artifact_id")
+        object.__setattr__(self, "path", safe_relative_path(
+            self.path, "execution output path",
+        ))
+        require_namespaced(self.kind, "execution output kind")
+        digest = str(self.sha256).casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("execution output sha256 must be SHA-256")
+        object.__setattr__(self, "sha256", digest)
+        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size < 0:
+            raise ValueError("execution output size must be non-negative")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutionOutputAttestation":
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionAttestation:
+    """Publicly re-verifiable identity of one pipeline-validated tool execution.
+
+    Constructing this serializable value is deliberately *not* sufficient to
+    commit tool truth.  The write path additionally consumes a process-local,
+    one-shot capability issued inside :class:`StageOrchestrator`.  Once that
+    succeeds, this value and an :class:`ExecutionCommitReceipt` are retained so
+    later readers can re-check every deterministic binding without possessing
+    the private capability.
+    """
+
+    run_id: str
+    snapshot_id: str
+    stage: str
+    runner_identity: str
+    runner_authority: str
+    runner_fingerprint: str
+    request_hash: str
+    run_payload_hash: str
+    manifest_hash: str
+    build_hash: str
+    target_hash: str
+    constraint_hash: str
+    toolchain_hash: str
+    toolchain_id: str
+    declared_outputs: tuple[ExecutionDeclaredOutput, ...] = ()
+    outputs: tuple[ExecutionOutputAttestation, ...] = ()
+    protocol_version: str = "hlsgraph.execution_attestation.v1"
+    validator: str = "hlsgraph.stage_orchestrator.v1"
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.run_id, "execution attestation run_id"),
+            (self.snapshot_id, "execution attestation snapshot_id"),
+            (self.stage, "execution attestation stage"),
+            (self.runner_identity, "execution attestation runner_identity"),
+            (self.runner_authority, "execution attestation runner_authority"),
+            (self.toolchain_id, "execution attestation toolchain_id"),
+            (self.protocol_version, "execution attestation protocol_version"),
+            (self.validator, "execution attestation validator"),
+        ):
+            require_namespaced(value, label)
+        for name in (
+            "runner_fingerprint", "request_hash", "run_payload_hash",
+            "manifest_hash", "build_hash", "target_hash", "constraint_hash",
+            "toolchain_hash",
+        ):
+            digest = str(getattr(self, name)).casefold()
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"execution attestation {name} must be SHA-256")
+            object.__setattr__(self, name, digest)
+        declarations = tuple(
+            item if isinstance(item, ExecutionDeclaredOutput)
+            else ExecutionDeclaredOutput.from_dict(item)
+            for item in self.declared_outputs
+        )
+        outputs = tuple(
+            item if isinstance(item, ExecutionOutputAttestation)
+            else ExecutionOutputAttestation.from_dict(item)
+            for item in self.outputs
+        )
+        if len({item.path for item in declarations}) != len(declarations):
+            raise ValueError("execution attestation declarations must have unique paths")
+        if len({item.path for item in outputs}) != len(outputs):
+            raise ValueError("execution attestation outputs must have unique paths")
+        if len({item.artifact_id for item in outputs}) != len(outputs):
+            raise ValueError("execution attestation outputs must have unique artifact IDs")
+        object.__setattr__(
+            self, "declared_outputs", tuple(sorted(declarations, key=lambda item: item.path)),
+        )
+        object.__setattr__(
+            self, "outputs", tuple(sorted(outputs, key=lambda item: item.path)),
+        )
+        expected = stable_id("execution_attestation", {
+            "run_id": self.run_id,
+            "snapshot_id": self.snapshot_id,
+            "stage": self.stage,
+            "runner_identity": self.runner_identity,
+            "runner_authority": self.runner_authority,
+            "runner_fingerprint": self.runner_fingerprint,
+            "request_hash": self.request_hash,
+            "run_payload_hash": self.run_payload_hash,
+            "manifest_hash": self.manifest_hash,
+            "build_hash": self.build_hash,
+            "target_hash": self.target_hash,
+            "constraint_hash": self.constraint_hash,
+            "toolchain_hash": self.toolchain_hash,
+            "toolchain_id": self.toolchain_id,
+            "declared_outputs": self.declared_outputs,
+            "outputs": self.outputs,
+            "protocol_version": self.protocol_version,
+            "validator": self.validator,
+        }, 32)
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"execution attestation stable id {self.id!r} does not match {expected!r}"
+            )
+        object.__setattr__(self, "id", expected)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutionAttestation":
+        data = dict(value)
+        data["declared_outputs"] = tuple(
+            ExecutionDeclaredOutput.from_dict(item)
+            for item in data.get("declared_outputs", ())
+        )
+        data["outputs"] = tuple(
+            ExecutionOutputAttestation.from_dict(item)
+            for item in data.get("outputs", ())
+        )
+        return cls(**data)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCommitReceipt:
+    """Store-issued public receipt for a capability-authorized attestation."""
+
+    attestation_id: str
+    run_id: str
+    snapshot_id: str
+    run_payload_hash: str
+    attestation_payload_hash: str
+    receipt_contract: str = "hlsgraph.execution_commit_receipt.v1"
+    validator: str = "hlsgraph.ledger.execution_attestation.v1"
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.attestation_id, "execution receipt attestation_id"),
+            (self.run_id, "execution receipt run_id"),
+            (self.snapshot_id, "execution receipt snapshot_id"),
+            (self.receipt_contract, "execution receipt contract"),
+            (self.validator, "execution receipt validator"),
+        ):
+            require_namespaced(value, label)
+        for name in ("run_payload_hash", "attestation_payload_hash"):
+            digest = str(getattr(self, name)).casefold()
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"execution receipt {name} must be SHA-256")
+            object.__setattr__(self, name, digest)
+        expected = stable_id("execution_receipt", {
+            "attestation_id": self.attestation_id,
+            "run_id": self.run_id,
+            "snapshot_id": self.snapshot_id,
+            "run_payload_hash": self.run_payload_hash,
+            "attestation_payload_hash": self.attestation_payload_hash,
+            "receipt_contract": self.receipt_contract,
+            "validator": self.validator,
+        }, 32)
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"execution receipt stable id {self.id!r} does not match {expected!r}"
+            )
+        object.__setattr__(self, "id", expected)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ExecutionCommitReceipt":
+        return cls(**dict(value))
+
+
 @dataclass(slots=True)
 class KnowledgeRule:
     document_id: str
@@ -1456,6 +1983,17 @@ class KnowledgeRule:
     def __post_init__(self) -> None:
         require_namespaced(self.document_id, "knowledge document_id")
         require_namespaced(self.rule_id, "knowledge rule_id")
+        for constraints, label in (
+            (self.applicability, "knowledge applicability"),
+            (self.condition, "knowledge condition"),
+        ):
+            if not isinstance(constraints, dict):
+                raise ValueError(f"{label} must be an object")
+            for key, constraint in constraints.items():
+                if isinstance(constraint, list):
+                    raise ValueError(
+                        f"{label} constraint {key!r} alternatives require explicit one_of"
+                    )
         for value, label in ((self.applicability, "knowledge applicability"),
                              (self.condition, "knowledge condition"),
                              (self.effect, "knowledge effect"),
@@ -1467,6 +2005,433 @@ class KnowledgeRule:
     @property
     def id(self) -> str:
         return f"{self.document_id}:{self.document_version}:{self.rule_id}"
+
+
+_BUILTIN_KNOWLEDGE_TARGET_KINDS = frozenset({
+    "predicate", "directive_kind", "artifact_kind", "gate_kind",
+    "diagnostic_code", "entity_kind", "relation_kind",
+})
+
+
+@dataclass(slots=True)
+class KnowledgeBinding:
+    """Fail-closed applicability link from guidance to a public contract term.
+
+    A binding is retrieval metadata, never a relation in the canonical design
+    graph.  It may therefore help select a rule without upgrading that rule to
+    a design fact.
+    """
+
+    knowledge_rule_id: str
+    target_kind: str
+    target: str
+    required_context: dict[str, Any]
+    producer: str
+    producer_version: str
+    id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.knowledge_rule_id, "knowledge binding rule_id")
+        if self.target_kind not in _BUILTIN_KNOWLEDGE_TARGET_KINDS:
+            require_namespaced(self.target_kind, "knowledge binding target_kind")
+        require_namespaced(self.target, "knowledge binding target")
+        require_namespaced(self.producer, "knowledge binding producer")
+        if not isinstance(self.producer_version, str) or not self.producer_version.strip():
+            raise ValueError("knowledge binding producer_version is required")
+        if not isinstance(self.required_context, dict):
+            raise ValueError("knowledge binding required_context must be an object")
+        reject_embedded_body_fields(
+            self.required_context, "knowledge binding required_context",
+        )
+        reject_embedded_body_fields(self.metadata, "knowledge binding metadata")
+        expected = stable_id("knowledge_binding", {
+            "rule": self.knowledge_rule_id,
+            "target_kind": self.target_kind,
+            "target": self.target,
+            "required_context": self.required_context,
+            "producer": self.producer,
+            "producer_version": self.producer_version,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"knowledge binding stable id {self.id!r} does not match {expected!r}"
+            )
+        self.id = expected
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "KnowledgeBinding":
+        return cls(**dict(value))
+
+
+class CoverageStatus(ValueEnum):
+    RULE = "rule"
+    CITATION_ONLY = "citation_only"
+    NOT_APPLICABLE = "not_applicable"
+    DEFERRED = "deferred"
+
+
+class TargetCoverageStatus(ValueEnum):
+    BOUND = "bound"
+    NO_NORMATIVE = "no_normative"
+
+
+@dataclass(slots=True)
+class KnowledgeTargetCoverage:
+    """Machine-checkable coverage for one supported public contract target."""
+
+    target_kind: str
+    target: str
+    status: TargetCoverageStatus
+    binding_ids: list[str] = field(default_factory=list)
+    rationale: str | None = None
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.target_kind not in _BUILTIN_KNOWLEDGE_TARGET_KINDS:
+            require_namespaced(self.target_kind, "knowledge target coverage kind")
+        require_namespaced(self.target, "knowledge target coverage target")
+        self.status = enum_value(TargetCoverageStatus, self.status)  # type: ignore[assignment]
+        if (not isinstance(self.binding_ids, list)
+                or any(not isinstance(item, str) for item in self.binding_ids)):
+            raise ValueError("knowledge target coverage binding_ids must be a list of strings")
+        for item in self.binding_ids:
+            require_namespaced(item, "knowledge target coverage binding_id")
+        if len(set(self.binding_ids)) != len(self.binding_ids):
+            raise ValueError("knowledge target coverage binding_ids must be unique")
+        self.binding_ids = sorted(self.binding_ids)
+        if self.status == TargetCoverageStatus.BOUND and not self.binding_ids:
+            raise ValueError("bound knowledge target coverage requires a binding")
+        if self.status == TargetCoverageStatus.NO_NORMATIVE and self.binding_ids:
+            raise ValueError("no_normative knowledge target coverage cannot reference bindings")
+        if self.status == TargetCoverageStatus.NO_NORMATIVE and self.rationale is None:
+            raise ValueError("no_normative knowledge target coverage requires a rationale")
+        if self.rationale is not None and (
+            not isinstance(self.rationale, str) or not self.rationale.strip()
+            or len(self.rationale) > 500 or "\x00" in self.rationale
+        ):
+            raise ValueError(
+                "knowledge target coverage rationale must be a bounded non-empty string"
+            )
+        expected = stable_id("knowledge_target_coverage", {
+            "target_kind": self.target_kind,
+            "target": self.target,
+            "status": self.status.value,
+            "bindings": self.binding_ids,
+            "rationale": self.rationale,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"knowledge target coverage stable id {self.id!r} does not match {expected!r}"
+            )
+        self.id = expected
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "KnowledgeTargetCoverage":
+        return cls(**dict(value))
+
+
+@dataclass(slots=True)
+class CoverageEntry:
+    document_id: str
+    document_version: str
+    section: str
+    status: CoverageStatus
+    rule_ids: list[str] = field(default_factory=list)
+    binding_ids: list[str] = field(default_factory=list)
+    rationale: str | None = None
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.document_id, "coverage document_id")
+        if not isinstance(self.document_version, str) or not self.document_version.strip():
+            raise ValueError("coverage document_version is required")
+        if (not isinstance(self.section, str) or not self.section.strip()
+                or len(self.section) > 512 or "\x00" in self.section):
+            raise ValueError("coverage section must be a bounded non-empty string")
+        self.status = enum_value(CoverageStatus, self.status)  # type: ignore[assignment]
+        for field_name in ("rule_ids", "binding_ids"):
+            values = getattr(self, field_name)
+            if not isinstance(values, list):
+                raise ValueError(f"coverage {field_name} must be a list")
+            for value in values:
+                if not isinstance(value, str):
+                    raise ValueError(f"coverage {field_name} entries must be strings")
+                require_namespaced(value, f"coverage {field_name} entry")
+            if len(set(values)) != len(values):
+                raise ValueError(f"coverage {field_name} must be unique")
+            setattr(self, field_name, sorted(values))
+        if self.status == CoverageStatus.RULE and not self.rule_ids:
+            raise ValueError("rule coverage requires at least one knowledge rule")
+        if self.status != CoverageStatus.RULE and self.rule_ids:
+            raise ValueError("only rule coverage may reference knowledge rules")
+        if self.status != CoverageStatus.RULE and self.binding_ids:
+            raise ValueError("only rule coverage may reference knowledge bindings")
+        if self.status != CoverageStatus.RULE and self.rationale is None:
+            raise ValueError("non-rule coverage requires an explicit rationale")
+        if self.rationale is not None and (
+            not isinstance(self.rationale, str) or not self.rationale.strip()
+            or len(self.rationale) > 500 or "\x00" in self.rationale
+        ):
+            raise ValueError("coverage rationale must be a bounded paraphrase or None")
+        expected = stable_id("coverage_entry", {
+            "document": self.document_id,
+            "version": self.document_version,
+            "section": self.section,
+            "status": self.status.value,
+            "rules": self.rule_ids,
+            "bindings": self.binding_ids,
+            "rationale": self.rationale,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"coverage entry stable id {self.id!r} does not match {expected!r}"
+            )
+        self.id = expected
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CoverageEntry":
+        return cls(**dict(value))
+
+
+@dataclass(slots=True)
+class CoverageManifest:
+    """Auditable section inventory for one versioned knowledge-pack scope."""
+
+    pack_id: str
+    coverage_scope: str
+    entries: list[CoverageEntry]
+    target_inventory: list[KnowledgeTargetCoverage] = field(default_factory=list)
+    target_registry_version: str = "hlsgraph.knowledge_supported_targets.v1"
+    review_status: str = "unreviewed"
+    reviewers: list[str] = field(default_factory=list)
+    source_hashes: dict[str, str] = field(default_factory=dict)
+    review_evidence: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = "1.0"
+    id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.pack_id, "coverage pack_id")
+        require_namespaced(self.coverage_scope, "coverage scope")
+        require_namespaced(
+            self.target_registry_version, "coverage target registry version",
+        )
+        if self.schema_version != "1.0":
+            raise ValueError("unsupported coverage manifest schema")
+        self.entries = sorted([
+            entry if isinstance(entry, CoverageEntry) else CoverageEntry.from_dict(entry)
+            for entry in self.entries
+        ], key=lambda entry: (
+            entry.document_id, entry.document_version, entry.section.casefold(), entry.id,
+        ))
+        section_keys = [
+            (entry.document_id, entry.document_version, entry.section.casefold())
+            for entry in self.entries
+        ]
+        if len(set(section_keys)) != len(section_keys):
+            raise ValueError("coverage manifest contains duplicate document sections")
+        self.target_inventory = sorted([
+            item if isinstance(item, KnowledgeTargetCoverage)
+            else KnowledgeTargetCoverage.from_dict(item)
+            for item in self.target_inventory
+        ], key=lambda item: (item.target_kind, item.target, item.id))
+        target_keys = [
+            (item.target_kind, item.target) for item in self.target_inventory
+        ]
+        if len(set(target_keys)) != len(target_keys):
+            raise ValueError("coverage manifest contains duplicate supported targets")
+        allowed_review_statuses = {
+            "unreviewed", "maintainer_reviewed", "human_reviewed",
+            "machine_repeated_reviewed", "machine_cross_reviewed",
+        }
+        if self.review_status not in allowed_review_statuses:
+            raise ValueError(
+                "coverage review_status must be unreviewed, maintainer_reviewed, "
+                "human_reviewed, machine_repeated_reviewed, or "
+                "machine_cross_reviewed"
+            )
+        if (not isinstance(self.reviewers, list) or any(
+            not isinstance(item, str) or not item.strip() or "\x00" in item
+            for item in self.reviewers
+        ) or len(set(self.reviewers)) != len(self.reviewers)):
+            raise ValueError("coverage reviewers must be unique non-empty strings")
+        self.reviewers = sorted(self.reviewers)
+        for key, digest in self.source_hashes.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("coverage source hash keys must be non-empty strings")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("coverage source hashes must be lowercase SHA-256 values")
+        if not isinstance(self.review_evidence, dict):
+            raise ValueError("coverage review_evidence must be an object")
+        reject_embedded_body_fields(self.review_evidence, "coverage review_evidence")
+        if self.review_status in {
+            "machine_repeated_reviewed", "machine_cross_reviewed",
+        }:
+            if len(self.reviewers) < 2:
+                raise ValueError(
+                    f"{self.review_status} coverage requires two review invocations"
+                )
+            if not self.source_hashes:
+                raise ValueError(
+                    f"{self.review_status} coverage requires verified source hashes"
+                )
+            required_review_evidence = {
+                "independent_invocations": True,
+                "citation_verified": True,
+                "review_agreement": True,
+                "unresolved_conflicts": False,
+            }
+            if self.review_status == "machine_repeated_reviewed":
+                required_review_evidence.update({
+                    "same_model_repeated_review": True,
+                    "distinct_model_families": False,
+                })
+            else:
+                required_review_evidence["distinct_model_families"] = True
+            if any(
+                self.review_evidence.get(key) is not expected
+                for key, expected in required_review_evidence.items()
+            ):
+                raise ValueError(
+                    f"{self.review_status} coverage requires truthful independent "
+                    "review provenance, verified citations, agreement, and no "
+                    "unresolved conflicts"
+                )
+        reject_embedded_body_fields(self.metadata, "coverage metadata")
+        expected = stable_id("coverage", {
+            "pack": self.pack_id,
+            "scope": self.coverage_scope,
+            "entries": self.entries,
+            "target_inventory": self.target_inventory,
+            "target_registry_version": self.target_registry_version,
+            "review_status": self.review_status,
+            "reviewers": self.reviewers,
+            "source_hashes": self.source_hashes,
+            "review_evidence": self.review_evidence,
+            "schema_version": self.schema_version,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"coverage manifest stable id {self.id!r} does not match {expected!r}"
+            )
+        self.id = expected
+
+    @property
+    def complete(self) -> bool:
+        return bool(self.entries) and all(
+            entry.status != CoverageStatus.DEFERRED for entry in self.entries
+        )
+
+    @property
+    def review_ready(self) -> bool:
+        """Whether classification is complete and an explicit review was recorded.
+
+        ``complete`` deliberately answers only the coverage-classification
+        question.  Keeping review readiness separate prevents an ``unreviewed``
+        catalog with no deferred entries from being presented as release-ready.
+        Machine-review evidence has already been validated in ``__post_init__``.
+        """
+
+        return self.complete and self.review_status != "unreviewed"
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CoverageManifest":
+        data = dict(value)
+        if "target_registry_version" not in data:
+            raise ValueError(
+                "coverage manifest must explicitly declare target_registry_version"
+            )
+        data["entries"] = [CoverageEntry.from_dict(item) for item in data.get("entries", [])]
+        data["target_inventory"] = [
+            KnowledgeTargetCoverage.from_dict(item)
+            for item in data.get("target_inventory", [])
+        ]
+        return cls(**data)
+
+
+@dataclass(slots=True)
+class LocalKnowledgeIndexManifest:
+    """Metadata-only identity for a private, rebuildable local sidecar index."""
+
+    project_id: str
+    document_hashes: dict[str, str]
+    chunk_count: int
+    index_sha256: str
+    parser_id: str
+    parser_version: str
+    chunker_id: str
+    chunker_version: str
+    storage_uri: str = ".hlsgraph/private/knowledge/chunks.sqlite"
+    fts_enabled: bool = True
+    parser_fingerprint: str | None = None
+    embedder_id: str | None = None
+    embedder_version: str | None = None
+    embedder_fingerprint: str | None = None
+    schema_version: str = "1.0"
+    created_at: str = field(default_factory=utc_now)
+    content_embedded_in_canonical: bool = False
+    id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_namespaced(self.project_id, "local knowledge project_id")
+        if self.schema_version != "1.0":
+            raise ValueError("unsupported local knowledge manifest schema")
+        self.storage_uri = safe_relative_path(
+            self.storage_uri, "local knowledge storage_uri",
+        )
+        for key, digest in self.document_hashes.items():
+            if not isinstance(key, str) or not key.strip() or "\x00" in key:
+                raise ValueError("local knowledge document keys must be non-empty strings")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("local knowledge document hashes must be lowercase SHA-256")
+        if (not isinstance(self.chunk_count, int) or isinstance(self.chunk_count, bool)
+                or self.chunk_count < 0):
+            raise ValueError("local knowledge chunk_count must be non-negative")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.index_sha256):
+            raise ValueError("local knowledge index_sha256 must be lowercase SHA-256")
+        for field_name in ("parser_id", "chunker_id"):
+            require_namespaced(getattr(self, field_name), f"local knowledge {field_name}")
+        for field_name in ("parser_version", "chunker_version"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"local knowledge {field_name} is required")
+        if self.parser_fingerprint is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", self.parser_fingerprint,
+        ):
+            raise ValueError("local knowledge parser_fingerprint must be SHA-256")
+        if (self.embedder_id is None) != (self.embedder_version is None):
+            raise ValueError("local knowledge embedder id and version must be set together")
+        if self.embedder_id is not None:
+            require_namespaced(self.embedder_id, "local knowledge embedder_id")
+        if self.embedder_fingerprint is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", self.embedder_fingerprint,
+        ):
+            raise ValueError("local knowledge embedder fingerprint must be SHA-256")
+        if self.content_embedded_in_canonical is not False:
+            raise ValueError("private knowledge content cannot be embedded in the canonical store")
+        reject_embedded_body_fields(self.metadata, "local knowledge metadata")
+        expected = stable_id("local_knowledge_index", {
+            "project": self.project_id,
+            "documents": self.document_hashes,
+            "chunks": self.chunk_count,
+            "index_sha256": self.index_sha256,
+            "parser": [self.parser_id, self.parser_version, self.parser_fingerprint],
+            "chunker": [self.chunker_id, self.chunker_version],
+            "embedder": [self.embedder_id, self.embedder_version,
+                         self.embedder_fingerprint],
+            "schema_version": self.schema_version,
+        })
+        if self.id and self.id != expected:
+            raise ValueError(
+                f"local knowledge index stable id {self.id!r} does not match {expected!r}"
+            )
+        self.id = expected
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "LocalKnowledgeIndexManifest":
+        return cls(**dict(value))
 
 
 @dataclass(slots=True)

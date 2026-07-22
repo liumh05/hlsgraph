@@ -17,6 +17,7 @@ import signal
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -24,15 +25,25 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..model import (
+    ArtifactRef,
+    DesignSnapshot,
+    ExecutionAttestation,
+    ExecutionDeclaredOutput,
+    ExecutionOutputAttestation,
     FailureClass,
     GateKind,
     GateResult,
     GateStatus,
+    ProjectManifest,
     RunStatus,
     ToolRun,
     json_ready,
     stable_hash,
     utc_now,
+)
+from ..evidence_policy import (
+    execution_attestation_error,
+    tool_run_stable_id_error,
 )
 from .staging import (
     DEFAULT_MAX_OUTPUT_BYTES,
@@ -50,6 +61,39 @@ PROTOCOL_VERSION = "hlsgraph.runner.v2"
 # Compatibility spelling retained for v0.x callers.  It intentionally points
 # at v2; requests cannot opt back into the unsafe in-place v1 protocol.
 RUNNER_PROTOCOL_VERSION = PROTOCOL_VERSION
+
+_RUNNER_AUTHORITY_LOCK = threading.Lock()
+_TRUSTED_RUNNER_AUTHORITIES: dict[int, tuple[object, str]] = {}
+
+
+def _grant_builtin_runner_authority(runner: object, authority: str) -> None:
+    """Register one built-in runner instance with the private issuer boundary."""
+
+    with _RUNNER_AUTHORITY_LOCK:
+        _TRUSTED_RUNNER_AUTHORITIES[id(runner)] = (runner, authority)
+
+
+def _grant_trusted_plugin_runner(runner: object, plugin_identity: str) -> None:
+    """Mark an explicitly loaded entry-point runner as trusted executable code.
+
+    This function is intentionally private.  Installing and explicitly selecting
+    a runner plugin crosses the trusted-code boundary; arbitrary Runner objects
+    passed to the public SDK do not.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{64}", plugin_identity):
+        raise RunnerProtocolError("trusted runner plugin identity must be SHA-256")
+    _grant_builtin_runner_authority(
+        runner, f"hlsgraph.runner_authority.plugin.{plugin_identity}",
+    )
+
+
+def _trusted_runner_authority(runner: object) -> str | None:
+    with _RUNNER_AUTHORITY_LOCK:
+        value = _TRUSTED_RUNNER_AUTHORITIES.get(id(runner))
+    if value is None or value[0] is not runner:
+        return None
+    return value[1]
 
 # Values below are measurements made by a Runner, not caller-provided request
 # context.  Reserving them prevents a request from pre-seeding provenance that
@@ -443,6 +487,221 @@ class StagedOutput:
         object.__setattr__(self, "sha256", digest)
 
 
+_CAPABILITY_CONSTRUCTOR_SENTINEL = object()
+_AUTHORIZATION_LOCK = threading.Lock()
+_ACTIVE_EXECUTION_AUTHORIZATIONS: dict[str, object] = {}
+
+
+class _ExecutionCommitAuthorization:
+    """One-shot process-local proof that cannot be reconstructed from JSON."""
+
+    __slots__ = ("attestation", "_seal")
+
+    def __init__(self, attestation: ExecutionAttestation, seal: object, *,
+                 _sentinel: object) -> None:
+        if _sentinel is not _CAPABILITY_CONSTRUCTOR_SENTINEL:
+            raise RunnerProtocolError("execution authorization is pipeline-internal")
+        self.attestation = attestation
+        self._seal = seal
+
+    def __copy__(self) -> object:  # pragma: no cover - defensive protocol guard
+        raise TypeError("execution authorization is non-copyable")
+
+    def __deepcopy__(self, _memo: object) -> object:
+        raise TypeError("execution authorization is non-copyable")
+
+    def __reduce__(self) -> object:
+        raise TypeError("execution authorization is non-serializable")
+
+
+def _consume_execution_authorization(value: object) -> ExecutionAttestation:
+    """Consume one exact StageOrchestrator-issued authorization.
+
+    This private function is the only bridge used by the ledger.  A caller can
+    serialize and reconstruct the public attestation, but cannot reconstruct
+    the registered object identity required here.
+    """
+
+    if type(value) is not _ExecutionCommitAuthorization:
+        raise RunnerProtocolError(
+            "tool-truth commit requires a StageOrchestrator-issued authorization"
+        )
+    authorization = value
+    with _AUTHORIZATION_LOCK:
+        expected = _ACTIVE_EXECUTION_AUTHORIZATIONS.pop(
+            authorization.attestation.id, None,
+        )
+    if expected is not authorization:
+        raise RunnerProtocolError(
+            "execution authorization is unknown, copied, or already consumed"
+        )
+    return authorization.attestation
+
+
+class _ExecutionCapability:
+    """Validated runner response plus immutable snapshot execution context."""
+
+    __slots__ = (
+        "_manifest", "_request_hash", "_run_id", "_runner_fingerprint",
+        "_runner_authority", "_runner_identity", "_snapshot", "_used",
+    )
+
+    def __init__(
+        self, *, snapshot: DesignSnapshot, manifest: ProjectManifest,
+        request: "ToolRunRequest", run: ToolRun, runner_identity: str,
+        runner_authority: str, runner_fingerprint: str, _sentinel: object,
+    ) -> None:
+        if _sentinel is not _CAPABILITY_CONSTRUCTOR_SENTINEL:
+            raise RunnerProtocolError("execution capability is pipeline-internal")
+        # Freeze mutable dataclasses at issuance.  Their canonical round-trip
+        # also revalidates stable IDs and all manifest model invariants.
+        self._snapshot = DesignSnapshot.from_dict(json_ready(snapshot))
+        self._manifest = ProjectManifest.from_dict(json_ready(manifest))
+        self._request_hash = request.cache_key(runner_fingerprint)
+        self._run_id = run.id
+        self._runner_authority = runner_authority
+        self._runner_identity = runner_identity
+        self._runner_fingerprint = runner_fingerprint
+        self._used = False
+        self._validate_context(request, run)
+
+    def __copy__(self) -> object:  # pragma: no cover - defensive protocol guard
+        raise TypeError("execution capability is non-copyable")
+
+    def __deepcopy__(self, _memo: object) -> object:
+        raise TypeError("execution capability is non-copyable")
+
+    def __reduce__(self) -> object:
+        raise TypeError("execution capability is non-serializable")
+
+    def __reduce_ex__(self, _protocol: int) -> object:
+        raise TypeError("execution capability is non-serializable")
+
+    def _validate_context(self, request: "ToolRunRequest", run: ToolRun) -> None:
+        snapshot = self._snapshot
+        manifest = self._manifest
+        if snapshot.id != request.snapshot_id or run.snapshot_id != snapshot.id:
+            raise RunnerProtocolError("execution context snapshot identity mismatch")
+        hashes = {
+            "manifest_hash": stable_hash(manifest.identity_payload()),
+            "build_hash": stable_hash(manifest.build),
+            "target_hash": stable_hash(manifest.target),
+            "constraint_hash": stable_hash(manifest.constraints),
+            "toolchain_hash": stable_hash({
+                "toolchains": manifest.toolchains,
+                "stage_toolchains": manifest.stage_toolchains,
+            }),
+        }
+        mismatches = [name for name, value in hashes.items()
+                      if getattr(snapshot, name) != value]
+        if snapshot.project_id != manifest.project_id:
+            mismatches.append("project_id")
+        try:
+            toolchain = manifest.toolchain_for_stage(request.stage)
+            command = manifest.stage_commands[request.stage]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RunnerProtocolError(
+                "execution stage lacks an immutable manifest identity"
+            ) from exc
+        if (request.toolchain_id != toolchain.id
+                or request.environment_hash != toolchain.environment_hash
+                or request.argv != command
+                or request.working_directory != "."):
+            mismatches.append("stage_execution_identity")
+        expected_declarations = [DeclaredOutput(
+            path=item.path,
+            required=item.required,
+            max_bytes=item.metadata.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES),
+        ) for item in manifest.stage_outputs.get(request.stage, [])]
+        if ([item.identity_payload() for item in request.declared_outputs]
+                != [item.identity_payload() for item in expected_declarations]):
+            mismatches.append("declared_outputs")
+        expected_metadata = [
+            {"path": item.path, "kind": item.kind, "required": item.required,
+             "consumed_by": list(item.consumed_by)}
+            for item in manifest.stage_outputs.get(request.stage, [])
+        ]
+        if request.metadata.get("declared_outputs") != expected_metadata:
+            mismatches.append("metadata.declared_outputs")
+        if request.metadata.get("project_id") != manifest.project_id:
+            mismatches.append("metadata.project_id")
+        if self._request_hash != run.request_hash or self._run_id != run.id:
+            mismatches.append("validated_run_identity")
+        stable_error = tool_run_stable_id_error(run)
+        if stable_error is not None:
+            mismatches.append("run_stable_id")
+        if mismatches:
+            raise RunnerProtocolError(
+                "execution pipeline context mismatch: "
+                + ", ".join(sorted(set(mismatches)))
+            )
+
+    def authorize(
+        self, run: ToolRun, artifacts: Sequence[ArtifactRef],
+    ) -> _ExecutionCommitAuthorization:
+        if self._used:
+            raise RunnerProtocolError("execution capability was already used")
+        if (run.id != self._run_id or run.snapshot_id != self._snapshot.id
+                or run.backend != self._runner_identity
+                or run.request_hash != self._request_hash
+                or run.metadata.get("runner_fingerprint") != self._runner_fingerprint):
+            raise RunnerProtocolError("run changed after orchestrator validation")
+        if (run.metadata.get("tool_truth") is not True
+                or run.metadata.get("fresh_execution") is not True
+                or run.metadata.get("fresh_tool_truth") is not True):
+            raise RunnerProtocolError("only fresh tool-truth runs can be authorized")
+        stable_error = tool_run_stable_id_error(run)
+        if stable_error is not None:
+            raise RunnerProtocolError(stable_error)
+        declarations = tuple(ExecutionDeclaredOutput(
+            path=item.path,
+            kind=item.kind,
+            required=item.required,
+            max_bytes=item.metadata.get("max_bytes", DEFAULT_MAX_OUTPUT_BYTES),
+        ) for item in self._manifest.stage_outputs.get(run.stage, []))
+        outputs = tuple(ExecutionOutputAttestation(
+            artifact_id=item.id,
+            path=str(item.metadata.get("declared_output_path", "")),
+            kind=item.kind,
+            sha256=item.sha256,
+            size=item.size,
+        ) for item in artifacts)
+        if run.toolchain_id is None:
+            raise RunnerProtocolError("tool-truth run lacks an immutable toolchain ID")
+        attestation = ExecutionAttestation(
+            run_id=run.id,
+            snapshot_id=run.snapshot_id,
+            stage=run.stage,
+            runner_identity=run.backend,
+            runner_authority=self._runner_authority,
+            runner_fingerprint=self._runner_fingerprint,
+            request_hash=run.request_hash,
+            run_payload_hash=stable_hash(json_ready(run)),
+            manifest_hash=self._snapshot.manifest_hash,
+            build_hash=self._snapshot.build_hash,
+            target_hash=self._snapshot.target_hash,
+            constraint_hash=self._snapshot.constraint_hash,
+            toolchain_hash=self._snapshot.toolchain_hash,
+            toolchain_id=run.toolchain_id,
+            declared_outputs=declarations,
+            outputs=outputs,
+        )
+        error = execution_attestation_error(
+            attestation, run, self._snapshot, self._manifest, artifacts,
+        )
+        if error is not None:
+            raise RunnerProtocolError(f"invalid execution attestation: {error}")
+        self._used = True
+        authorization = _ExecutionCommitAuthorization(
+            attestation, object(), _sentinel=_CAPABILITY_CONSTRUCTOR_SENTINEL,
+        )
+        with _AUTHORIZATION_LOCK:
+            if attestation.id in _ACTIVE_EXECUTION_AUTHORIZATIONS:
+                raise RunnerProtocolError("duplicate active execution authorization")
+            _ACTIVE_EXECUTION_AUTHORIZATIONS[attestation.id] = authorization
+        return authorization
+
+
 @dataclass(slots=True)
 class RunnerExecution:
     """A terminal run event plus its still-isolated, verified output bytes.
@@ -457,6 +716,9 @@ class RunnerExecution:
     staging_parent: Path | None = None
     resource_guard: ResourceGuardResult | None = None
     runtime_resource_monitor: RuntimeResourceMonitorResult | None = None
+    _execution_capability: _ExecutionCapability | None = field(
+        default=None, init=False, repr=False,
+    )
     _cleaned: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -501,6 +763,17 @@ class RunnerExecution:
         # Read-only compatibility for v0.1 callers that inspected the ToolRun
         # returned by execute().  New code should use ``execution.run``.
         return getattr(self.run, name)
+
+    def authorize_tool_truth_commit(
+        self, artifacts: Sequence[ArtifactRef] = (),
+    ) -> object:
+        """Return a one-shot opaque authorization for the ledger write path."""
+
+        if self._execution_capability is None:
+            raise RunnerProtocolError(
+                "execution has no pipeline-issued tool-truth capability"
+            )
+        return self._execution_capability.authorize(self.run, list(artifacts))
 
 
 @dataclass(slots=True)
@@ -824,6 +1097,10 @@ class LocalRunner(Runner):
         self.runtime_resource_monitor = _coerce_runtime_resource_monitor(
             runtime_resource_monitor
         )
+        if type(self) is LocalRunner:
+            _grant_builtin_runner_authority(
+                self, "hlsgraph.runner_authority.builtin_local.v1",
+            )
 
     @property
     def can_report_resource_guard(self) -> bool:  # type: ignore[override]
@@ -1380,6 +1657,10 @@ class SSHRunner(Runner):
         self.runtime_resource_monitor = _coerce_runtime_resource_monitor(
             runtime_resource_monitor
         )
+        if type(self) is SSHRunner:
+            _grant_builtin_runner_authority(
+                self, "hlsgraph.runner_authority.builtin_ssh.v1",
+            )
 
     @property
     def can_report_resource_guard(self) -> bool:  # type: ignore[override]
@@ -1848,16 +2129,25 @@ class StageResult:
 
 class StageOrchestrator:
     def __init__(self, runner: Runner, *,
-                 evidence_validator: Callable[[ToolRun, str], bool] | None = None):
+                 evidence_validator: Callable[[ToolRun, str], bool] | None = None,
+                 snapshot: DesignSnapshot | None = None,
+                 manifest: ProjectManifest | None = None):
         self.runner = runner
         # Gate IDs alone are references, not proof. Callers with a ledger or
         # an atomic run-result bundle can provide recursive evidence validation;
         # absence of such a validator is fail-closed for ``tool_truth``.
         self.evidence_validator = evidence_validator
+        if (snapshot is None) != (manifest is None):
+            raise RunnerProtocolError(
+                "execution attestation context requires both snapshot and manifest"
+            )
+        self.snapshot = snapshot
+        self.manifest = manifest
 
     def _validate_response(self, request: ToolRunRequest, execution: RunnerExecution,
                            runner_fingerprint: str, runner_name: str,
-                           runner_capabilities: Mapping[str, Any]) -> None:
+                           runner_capabilities: Mapping[str, Any],
+                           runner_authority: str | None = None) -> None:
         if not isinstance(execution, RunnerExecution):
             raise RunnerProtocolError("runner response must be a RunnerExecution")
         run = execution.run
@@ -1908,6 +2198,7 @@ class StageOrchestrator:
             run.metadata.get("fresh_execution") is not True
             or run.metadata.get("tool_truth") is not True
             or str(run.backend).casefold() in {"runner.fake", "runner.replay"}
+            or run.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED}
         ):
             raise RunnerProtocolError("fresh_tool_truth is inconsistent with runner provenance")
         for key in ("fresh_execution", "fresh_tool_truth", "tool_truth"):
@@ -2059,6 +2350,14 @@ class StageOrchestrator:
                 raise RunnerProtocolError(str(exc)) from exc
             if path != item.local_path or size != item.size or digest != item.sha256:
                 raise RunnerProtocolError("runner staged output identity mismatch")
+        if run.metadata.get("tool_truth") is True and (
+            runner_capabilities.get("can_produce_tool_truth") is not True
+            or runner_authority is None
+            or str(run.backend).casefold() in {"runner.fake", "runner.replay"}
+        ):
+            raise RunnerProtocolError(
+                "runner is not trusted to produce tool-truth provenance"
+            )
 
     def execute(self, requests: Sequence[ToolRunRequest]) -> StageResult:
         runs: list[ToolRun] = []
@@ -2084,6 +2383,7 @@ class StageOrchestrator:
         for request in requests:
             runner_fingerprint = self.runner.fingerprint
             runner_name = self.runner.name
+            runner_authority = _trusted_runner_authority(self.runner)
             runner_capabilities = self.runner.capabilities()
             if (not isinstance(runner_capabilities, Mapping)
                     or runner_capabilities.get("protocol_version") != PROTOCOL_VERSION
@@ -2105,13 +2405,25 @@ class StageOrchestrator:
             try:
                 self._validate_response(
                     request, execution, runner_fingerprint, runner_name,
-                    runner_capabilities,
+                    runner_capabilities, runner_authority,
                 )
             except Exception:
                 if isinstance(execution, RunnerExecution):
                     execution.cleanup()
                 raise
             run = execution.run
+            if run.metadata.get("tool_truth") is True:
+                if self.snapshot is not None and self.manifest is not None:
+                    execution._execution_capability = _ExecutionCapability(
+                        snapshot=self.snapshot,
+                        manifest=self.manifest,
+                        request=request,
+                        run=run,
+                        runner_identity=runner_name,
+                        runner_authority=runner_authority,
+                        runner_fingerprint=runner_fingerprint,
+                        _sentinel=_CAPABILITY_CONSTRUCTOR_SENTINEL,
+                    )
             executions.append(execution)
             runs.append(run)
             if run.status not in {RunStatus.SUCCEEDED, RunStatus.CACHED}:
@@ -2180,3 +2492,4 @@ class StageOrchestrator:
                            gates_complete=gates_complete, tool_truth=tool_truth,
                            verified=verified,
                            stopped_after_stage=stopped, executions=executions)
+    ProjectManifest,

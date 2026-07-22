@@ -356,13 +356,21 @@ def test_mcp_context_and_render_validate_bounds(indexed_bundle):
         mcp.traverse("missing")
 
 
-def test_optional_fastmcp_registers_only_read_tools(indexed_bundle):
+def test_optional_fastmcp_defaults_to_explore_and_can_opt_in_legacy_tools(
+    indexed_bundle, monkeypatch,
+):
     if importlib.util.find_spec("mcp") is None:
         pytest.skip("optional mcp dependency is not installed")
     server = create_mcp(indexed_bundle["bundle"].project_root,
                         snapshot_id=indexed_bundle["first"])
     registered = {item.name for item in asyncio.run(server.list_tools())}
-    assert registered == {
+    assert registered == {"explore"}
+
+    monkeypatch.setenv("HLSGRAPH_MCP_TOOLS", "all")
+    server = create_mcp(indexed_bundle["bundle"].project_root,
+                        snapshot_id=indexed_bundle["first"])
+    registered = {item.name for item in asyncio.run(server.list_tools())}
+    assert registered == {"explore",
         "overview", "search", "context", "module_or_region", "traverse", "impact",
         "evidence", "feature_evidence", "correspondences", "compare", "health",
         "runs", "predictions", "variants", "render", "knowledge",

@@ -16,6 +16,10 @@ from .model import (
     AuthorityClass, DiagnosticSeverity, Entity, GateKind, GateStatus, hash_artifact_bytes,
     json_ready, reject_embedded_body_fields, stable_hash,
 )
+from .retrieval import (
+    HybridRetriever, RetrievalAdapter, RetrievalResult, RetrievalSpec,
+    default_retrieval_adapters,
+)
 from .version import SCHEMA_VERSION
 
 
@@ -236,6 +240,27 @@ class CoreService:
 
     def graph(self) -> CanonicalGraph:
         return self.bundle.store.load_graph(self.snapshot_id)
+
+    def retrieve(self, spec: RetrievalSpec,
+                 *, adapters: Iterable[RetrievalAdapter] = ()) -> RetrievalResult:
+        """Run the shared deterministic GraphRAG pipeline on one pinned snapshot.
+
+        Optional adapters are explicit local channels.  They cannot mutate the
+        canonical graph and their results retain their own retrieval plane.
+        """
+        selected = spec.snapshot_id or self.snapshot_id
+        if selected != self.snapshot_id:
+            self.bundle.store.snapshot(selected)
+            if not self.bundle.store.has_graph(selected):
+                raise ValueError(f"snapshot {selected!r} has no canonical graph")
+        selected_adapters = [*default_retrieval_adapters(self.bundle), *adapters]
+        deduplicated: dict[str, RetrievalAdapter] = {}
+        for adapter in selected_adapters:
+            key = str(getattr(adapter, "adapter_id", type(adapter).__name__))
+            deduplicated[key] = adapter
+        return HybridRetriever(
+            self.bundle, selected, tuple(deduplicated.values()),
+        ).retrieve(spec)
 
     def query(self, spec: QuerySpec) -> QueryResult:
         graph = self.graph()
@@ -931,6 +956,12 @@ class CoreService:
                     and run.metadata.get("fresh_execution") is True
                     and run.metadata.get("fresh_tool_truth") is True
                 )
+                execution_attested = (
+                    tool_truth
+                    and self.bundle.store.has_valid_execution_commit(
+                        self.snapshot_id, run.id,
+                    )
+                )
                 inputs = list(run.input_artifact_ids)
                 outputs = list(run.output_artifact_ids)
                 artifact_contract = (
@@ -966,10 +997,12 @@ class CoreService:
                             and run.working_directory == "."
                             and base_artifact_ids.issubset(set(inputs))
                         )
-                valid = (terminal and clean and tool_truth and not denied
-                         and artifact_contract and manifest_contract)
+                valid = (terminal and clean and tool_truth and execution_attested
+                         and not denied and artifact_contract and manifest_contract)
                 if not manifest_contract:
                     authority = "run_snapshot_manifest_mismatch"
+                elif tool_truth and not execution_attested:
+                    authority = "run_execution_attestation_invalid"
                 result = (valid, valid, authority or "untrusted_run")
             trust_cache[key] = result
             return result

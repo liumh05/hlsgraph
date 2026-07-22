@@ -7,7 +7,15 @@ from pathlib import Path
 
 from ..graph import CanonicalGraph
 from ..manifest import project_path
-from ..model import AuthorityClass, Diagnostic, DiagnosticSeverity, Entity, Relation, SourceAnchor, Stage
+from ..model import (
+    AuthorityClass,
+    Diagnostic,
+    DiagnosticSeverity,
+    Entity,
+    Relation,
+    SourceAnchor,
+    Stage,
+)
 from .base import ExtractionContext, ExtractionResult
 
 
@@ -220,7 +228,10 @@ class LlvmIrExtractor:
                         src=operation_id, dst=target.id, kind="llvm.calls",
                         snapshot_id=context.snapshot.id,
                         authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.LLVM.value,
-                        attrs={"hardware_instance": False},
+                        attrs={
+                            "hardware_instance": False,
+                            "hardware_topology": False,
+                        },
                     ))
         result.coverage = {"instructions": instruction_count,
                            "cfg_is_hls_topology": False}

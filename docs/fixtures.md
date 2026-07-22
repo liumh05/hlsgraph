@@ -97,7 +97,10 @@ not required by Windows/Linux CI.
 ## Adding a public fixture
 
 1. Use synthetic, authorized, or demonstrably sanitized material.
-2. Add SPDX headers and record an explicit license in `artifact_paths`.
+2. Add an SPDX header where the artifact format safely permits comments, and
+   always record the explicit license in `artifact_paths`. For formats such as
+   JSON or normalized reports that cannot carry a comment without changing
+   their parser contract, the manifest license is the authoritative marker.
 3. Mark all imitated IR/report artifacts with
    `fixture_authority = "synthetic"`; do not rely on filenames or prose.
 4. Remove absolute paths, usernames, hosts, seeds, proprietary vectors, and

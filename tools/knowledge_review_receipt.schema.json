@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol_id",
+    "invocation_id",
+    "thread_id",
+    "model",
+    "reasoning_effort",
+    "prompt_sha256",
+    "output_schema_sha256",
+    "review_snapshot_sha256",
+    "cache_manifest_sha256",
+    "result_sha256",
+    "command_sha256",
+    "raw_event_stream_sha256",
+    "event_stream_path",
+    "event_stream_sha256",
+    "codex_cli_version",
+    "completed",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "hlsgraph.knowledge-review.cli-receipt.v2"
+    },
+    "protocol_id": {
+      "enum": [
+        "hlsgraph.knowledge-review.semantic.v1",
+        "hlsgraph.knowledge-review.adversarial.v1"
+      ]
+    },
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "model": {
+      "const": "gpt-5.6-sol"
+    },
+    "reasoning_effort": {
+      "const": "medium"
+    },
+    "prompt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "output_schema_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "review_snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "cache_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "result_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "command_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "raw_event_stream_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "event_stream_path": {
+      "enum": [
+        "docs/knowledge-review-v0.3.semantic.trace.jsonl",
+        "docs/knowledge-review-v0.3.adversarial.trace.jsonl"
+      ]
+    },
+    "event_stream_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "codex_cli_version": {
+      "const": "codex-cli 0.144.0"
+    },
+    "completed": {
+      "const": true
+    },
+    "exit_code": {
+      "const": 0
+    }
+  }
+}

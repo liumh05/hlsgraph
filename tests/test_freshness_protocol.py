@@ -34,6 +34,7 @@ from hlsgraph.runner import (
 from hlsgraph.runner.staging import (
     create_run_directory, read_verified_file, write_new_file,
 )
+from hlsgraph.runner.core import _grant_trusted_plugin_runner
 from hlsgraph.sdk import Project
 
 
@@ -79,6 +80,8 @@ def _successful_run(request: ToolRunRequest, runner: Runner) -> ToolRun:
             "fresh_tool_truth": True,
             "authority": "tool_observation",
             "tool_truth": True,
+            "staging_isolated": True,
+            "staged_output_manifest": [],
         },
     )
 
@@ -99,6 +102,9 @@ class _CallbackRunner(Runner):
         self.outputs = outputs or {}
         self.calls: list[ToolRunRequest] = []
         self.project_root: Path | None = None
+        _grant_trusted_plugin_runner(
+            self, stable_hash({"test_plugin": "freshness.callback.v1"}),
+        )
 
     def bind_project_root(self, project_root: str | Path) -> None:
         self.project_root = Path(project_root).resolve()
@@ -284,17 +290,21 @@ def test_run_detects_base_input_drift_before_next_stage_and_stops(
     source = project.bundle.project_root / "kernel.cpp"
     runner: _CallbackRunner
     runner = _CallbackRunner(lambda request: _successful_run(request, runner))
-    original_add_run = project.bundle.store.add_run
+    original_commit = project.bundle.store.commit_run_result
     changed = False
 
-    def add_then_change_source(run: ToolRun) -> None:
+    def commit_then_change_source(**values: object) -> None:
         nonlocal changed
-        original_add_run(run)
+        original_commit(**values)
+        run = values["run"]
+        assert isinstance(run, ToolRun)
         if run.stage == "csim" and not changed:
             source.write_text("void dut() { int changed = 1; }\n", encoding="utf-8")
             changed = True
 
-    monkeypatch.setattr(project.bundle.store, "add_run", add_then_change_source)
+    monkeypatch.setattr(
+        project.bundle.store, "commit_run_result", commit_then_change_source,
+    )
     result = project.run(runner, stages)
 
     assert [item.stage for item in runner.calls] == ["csim"]

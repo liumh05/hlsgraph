@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -47,7 +48,7 @@ def test_parser_exposes_public_commands() -> None:
     parser = build_parser()
     choices = next(action for action in parser._actions
                    if action.dest == "command").choices
-    assert {"init", "index", "status", "query", "explore", "run", "render",
+    assert {"init", "index", "status", "query", "explore", "retrieve", "run", "render",
             "export", "doctor", "knowledge", "serve"}.issubset(choices)
     args = parser.parse_args(["run", "--backend", "fake"])
     assert args.backend == "fake"
@@ -285,6 +286,114 @@ def test_doctor_and_knowledge_are_read_only_json_commands(tmp_path: Path, capsys
     payload = local_index.read_text(encoding="utf-8")
     assert "private local guide bytes" not in payload
     assert json.loads(payload)["documents"][0]["sha256"] == result["document"]["sha256"]
+
+
+def test_knowledge_index_default_path_is_in_private_sidecar(
+    tmp_path: Path, capsys,
+) -> None:
+    guide = tmp_path / "local-guide.md"
+    guide.write_text("private local guidance\n", encoding="utf-8")
+    code, result = _invoke(
+        capsys, "knowledge", "index", "--project", str(tmp_path),
+        "--path", str(guide), "--document-id", "local.guide",
+        "--document-version", "1",
+    )
+    assert code == 0
+    index_path = tmp_path / ".hlsgraph/private/knowledge/documents.json"
+    assert index_path.is_file()
+    assert Path(result["output"]) == index_path
+    assert "private local guidance" not in index_path.read_text(encoding="utf-8")
+    if os.name != "nt":
+        assert index_path.parent.stat().st_mode & 0o777 == 0o700
+        assert index_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_knowledge_v03_cli_coverage_install_sync_and_private_sidecar(
+    tmp_path: Path, capsys,
+) -> None:
+    root = _indexed_project(tmp_path, capsys)
+    code, coverage = _invoke(
+        capsys, "knowledge", "coverage", "--project", str(root),
+    )
+    assert code == 0
+    assert coverage["complete"] is True
+    assert coverage["classification_complete"] is coverage["complete"]
+    assert coverage["review_ready"] is all(
+        item["review_status"] != "unreviewed" for item in coverage["items"]
+    )
+    assert coverage["items"] and coverage["installed_packs"]
+    pack_id = coverage["installed_packs"][0]["pack_id"]
+
+    code, installed = _invoke(
+        capsys, "knowledge", "install", "--project", str(root),
+        "--pack-id", pack_id,
+    )
+    assert code == 0
+    assert installed["results"][0]["status"] == "unchanged"
+    assert installed["mutated_design_facts"] is False
+
+    code, synced = _invoke(
+        capsys, "knowledge", "sync", "--project", str(root),
+    )
+    assert code == 1
+    assert "not review_ready" in synced["error"]
+
+    sentinel = "PRIVATE_CLI_KNOWLEDGE_SENTINEL"
+    guide = root / "local-guide.md"
+    guide.write_text(f"# Pipeline\n{sentinel} achieved II.\n", encoding="utf-8")
+    metadata_index = root / "local-index.json"
+    code, _ = _invoke(
+        capsys, "knowledge", "index", "--project", str(root),
+        "--path", str(guide), "--document-id", "local.guide",
+        "--document-version", "1", "--output", str(metadata_index),
+    )
+    assert code == 0
+    code, built = _invoke(
+        capsys, "knowledge", "build-local-index", "--project", str(root),
+        "--metadata-index", str(metadata_index),
+    )
+    assert code == 0
+    assert built["content_embedded_in_canonical"] is False
+    assert built["manifest"]["chunk_count"] == 1
+    assert sentinel not in json.dumps(built, ensure_ascii=False)
+    assert (root / ".hlsgraph/private/knowledge/chunks.sqlite").is_file()
+
+
+def test_knowledge_local_index_parser_is_explicit_and_receives_key_value_config(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    import hlsgraph.plugins as plugins
+
+    root = _indexed_project(tmp_path, capsys)
+    guide = root / "local-guide.md"
+    guide.write_text("# Pipeline\nachieved II evidence.\n", encoding="utf-8")
+    metadata_index = root / "local-index.json"
+    code, _ = _invoke(
+        capsys, "knowledge", "index", "--project", str(root),
+        "--path", str(guide), "--document-id", "local.guide",
+        "--document-version", "1", "--output", str(metadata_index),
+    )
+    assert code == 0
+
+    loaded = []
+    monkeypatch.setattr(
+        plugins, "load_knowledge_parser",
+        lambda name, config: loaded.append((name, config)) or None,
+    )
+    code, _ = _invoke(
+        capsys, "knowledge", "build-local-index", "--project", str(root),
+        "--metadata-index", str(metadata_index), "--parser", "test.pdf",
+        "--parser-config", "pages=12", "--parser-config", "language=en",
+    )
+    assert code == 0
+    assert loaded == [("test.pdf", {"pages": 12, "language": "en"})]
+
+    code, error = _invoke(
+        capsys, "knowledge", "build-local-index", "--project", str(root),
+        "--metadata-index", str(metadata_index), "--parser-config", "pages=12",
+    )
+    assert code == 1
+    assert error["error"] == "--parser-config requires --parser"
 
 
 def test_status_before_first_index_is_supported(tmp_path: Path, capsys) -> None:

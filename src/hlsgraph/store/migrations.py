@@ -28,6 +28,7 @@ class MigrationStep:
 
 _V01 = "0.1.0"
 _V02 = "0.2.0"
+_V03 = "0.3.0"
 
 
 def _require_columns(
@@ -148,6 +149,121 @@ def _migrate_v01_to_v02(connection: sqlite3.Connection) -> None:
         raise ValueError("v0.1 ledger contains foreign-key violations")
 
 
+def _migrate_v02_to_v03(connection: sqlite3.Connection) -> None:
+    """Add knowledge inventory/binding indexes without rewriting old facts.
+
+    In particular, v0.2 ``graph_views.schema_version`` values remain untouched:
+    the marker participates in ``CanonicalGraph.graph_hash``.  The v0.3 reader
+    treats those projections as immutable, read-only historical graphs.
+    """
+    for table in ("schema_info", "snapshots", "graph_views"):
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+        ).fetchone() is None:
+            raise ValueError(f"v0.2 ledger is missing required table {table!r}")
+
+    # Some early v0.1 fixtures legitimately had no knowledge table.  Creating
+    # the v0.2 table shape here keeps the chained 0.1 -> 0.2 -> 0.3 migration
+    # additive while leaving every existing row byte-for-byte unchanged.
+    connection.execute("""CREATE TABLE IF NOT EXISTS knowledge_rules (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      document_version TEXT NOT NULL,
+      section TEXT NOT NULL,
+      payload_json TEXT NOT NULL
+    )""")
+    statements = (
+        """CREATE TABLE IF NOT EXISTS execution_attestations (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+          snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS execution_commit_receipts (
+          id TEXT PRIMARY KEY,
+          attestation_id TEXT NOT NULL UNIQUE REFERENCES execution_attestations(id),
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+          snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS knowledge_packs (
+          pack_id TEXT PRIMARY KEY,
+          pack_schema_version TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          installed_at TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS knowledge_bindings (
+          id TEXT PRIMARY KEY,
+          knowledge_rule_id TEXT NOT NULL REFERENCES knowledge_rules(id),
+          target_kind TEXT NOT NULL,
+          target TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_knowledge_bindings_target
+          ON knowledge_bindings(target_kind, target, knowledge_rule_id)""",
+        """CREATE TABLE IF NOT EXISTS knowledge_coverage (
+          id TEXT PRIMARY KEY,
+          pack_id TEXT NOT NULL REFERENCES knowledge_packs(pack_id),
+          coverage_scope TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_knowledge_coverage_pack
+          ON knowledge_coverage(pack_id, coverage_scope)""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+    _require_columns(connection, "execution_attestations", frozenset({
+        "id", "run_id", "snapshot_id", "payload_json",
+    }))
+    _require_columns(connection, "execution_commit_receipts", frozenset({
+        "id", "attestation_id", "run_id", "snapshot_id", "payload_json",
+    }))
+    try:
+        connection.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_rules_fts USING fts5("
+            "knowledge_rule_id UNINDEXED, rule_id, document_id, document_version, "
+            "section, title, summary)"
+        )
+        connection.execute("DELETE FROM knowledge_rules_fts")
+        for row in connection.execute(
+            "SELECT id,document_id,document_version,section,payload_json "
+            "FROM knowledge_rules ORDER BY id"
+        ).fetchall():
+            payload = json.loads(row[4])
+            connection.execute(
+                "INSERT INTO knowledge_rules_fts("
+                "knowledge_rule_id,rule_id,document_id,document_version,section,title,summary) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (row[0], payload.get("rule_id", ""), row[1], row[2], row[3],
+                 payload.get("title", ""), payload.get("summary") or ""),
+            )
+        connection.execute(
+            "INSERT OR REPLACE INTO schema_info(key,value) "
+            "VALUES('knowledge_fts5','1')"
+        )
+    except (sqlite3.OperationalError, json.JSONDecodeError) as exc:
+        if isinstance(exc, json.JSONDecodeError):
+            raise ValueError(f"invalid v0.2 knowledge rule payload: {exc}") from exc
+        connection.execute(
+            "INSERT OR REPLACE INTO schema_info(key,value) "
+            "VALUES('knowledge_fts5','0')"
+        )
+
+    unexpected_views = connection.execute(
+        "SELECT DISTINCT schema_version FROM graph_views "
+        "WHERE schema_version NOT IN (?,?)", (_V02, _V03),
+    ).fetchall()
+    if unexpected_views:
+        raise ValueError(
+            "v0.2 ledger contains graph views with unsupported schema markers: "
+            + ", ".join(sorted(str(row[0]) for row in unexpected_views))
+        )
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise ValueError("v0.2 ledger contains foreign-key violations")
+
+
 # Migration is explicit and append-only.  It supplements legacy derivation
 # payloads but never changes observation meaning, historical manifests, or IDs.
 MIGRATIONS: tuple[MigrationStep, ...] = (
@@ -159,6 +275,15 @@ MIGRATIONS: tuple[MigrationStep, ...] = (
             "materialization contracts"
         ),
         apply=_migrate_v01_to_v02,
+    ),
+    MigrationStep(
+        from_version=_V02,
+        to_version=_V03,
+        description=(
+            "add knowledge pack inventory, fail-closed bindings, coverage "
+            "manifests, and rebuildable knowledge FTS"
+        ),
+        apply=_migrate_v02_to_v03,
     ),
 )
 

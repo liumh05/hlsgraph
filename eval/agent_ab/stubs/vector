@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+namespace std {
+using size_t = decltype(sizeof(0));
+template <typename T> class vector {
+ public:
+  void push_back(const T&) {}
+  T& operator[](size_t index) { return storage_[index]; }
+  const T& operator[](size_t index) const { return storage_[index]; }
+
+ private:
+  T storage_[1024]{};
+};
+}  // namespace std

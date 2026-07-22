@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+namespace std {
+template <typename Iterator> void sort(Iterator first, Iterator last) {
+  (void)first;
+  (void)last;
+}
+}  // namespace std

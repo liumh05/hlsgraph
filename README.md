@@ -10,7 +10,7 @@ questions: which processes can run concurrently, how values move through streams
 and memories, which directive applies to which scope, what limits initiation
 interval, and which result was observed at which tool stage.
 
-HLSGraph is an early **v0.2 developer preview**. Schemas are versioned, but public
+HLSGraph is an early **v0.3 developer preview**. Schemas are versioned, but public
 interfaces may evolve before 1.0.
 
 ## Truth boundaries
@@ -76,6 +76,8 @@ result = project.index()
 print(result.snapshot_id, result.graph_hash)
 
 overview = project.explore(view="architecture", depth=2)
+answer = project.retrieve("Which process limits II, and what evidence supports it?")
+print(answer.confidence, [item.title for item in answer.facts])
 project.render("examples/dataflow_gemm/graph.html")
 ```
 
@@ -85,6 +87,7 @@ The shortest equivalent CLI session is:
 hlsgraph index --project examples/dataflow_gemm --manifest hlsgraph.toml
 hlsgraph status --project examples/dataflow_gemm
 hlsgraph query --project examples/dataflow_gemm compute
+hlsgraph retrieve --project examples/dataflow_gemm "why is achieved II above target?"
 hlsgraph render --project examples/dataflow_gemm graph.html
 ```
 
@@ -113,6 +116,10 @@ reports remains supported without executing a tool.
   and exports datasets.
 - CLI, read-only REST/OpenAPI, and MCP adapters delegate common query semantics
   to the same service; cross-interface conformance is covered by tests.
+- Unified retrieval keeps facts, evidence, applicable knowledge, private local
+  documents, and opt-in predictions in separate result planes. The default MCP
+  surface exposes one bounded `explore` tool; legacy narrow tools require an
+  explicit operator opt-in.
 - A local SQLite ledger stores snapshots, artifact metadata, runs, entities,
   relations, observations, deterministic derivations, explicit cross-snapshot
   correspondences, action materialization attempts, diagnostics, and
@@ -132,7 +139,7 @@ non-null value only when explicitly proven. These derivations cite entity,
 relation, and artifact evidence and never turn software calls or LLVM CFG into
 hardware topology.
 
-The supported v0.2 unit is one HLS kernel. Component/system entities, host code,
+The fully supported v0.3 unit is one HLS kernel/component. Component/system entities, host code,
 multiple compute units, memory-bank connectivity, and accelerator runtime
 traces have reserved schema space but are not yet complete collectors.
 
@@ -140,9 +147,12 @@ traces have reserved schema space but are not yet complete collectors.
 
 Built-in packs contain only versioned document metadata, section references,
 official URLs, applicability selectors, and short project-authored paraphrases.
-They do not include UG PDFs or extracted vendor text. Users may build a local
-metadata index of documents they lawfully possess; HLSGraph hashes but does not
-parse or copy those files.
+They do not include UG PDFs or extracted vendor text. Users may explicitly build
+a private, rebuildable FTS sidecar from documents they lawfully possess. Its
+chunks and optional local-only embeddings stay under
+`.hlsgraph/private/knowledge/` and never enter the canonical bundle, REST, ML
+export, wheel, or release. Search returns metadata by default; bounded excerpts
+require both a project policy switch and an explicit request.
 
 See [the knowledge pack policy](https://github.com/liumh05/hlsgraph/blob/main/docs/governance/KNOWLEDGE_PACK_POLICY.md).
 
@@ -151,6 +161,7 @@ See [the knowledge pack policy](https://github.com/liumh05/hlsgraph/blob/main/do
 - [Architecture and current implementation boundary](https://github.com/liumh05/hlsgraph/blob/main/docs/architecture.md)
 - [Schema, authority/stage, and three-gate truth model](https://github.com/liumh05/hlsgraph/blob/main/docs/schema.md)
 - [SDK, CLI, REST, MCP, human view, and ML interfaces](https://github.com/liumh05/hlsgraph/blob/main/docs/interfaces.md)
+- [Unified deterministic retrieval and truth-plane separation](https://github.com/liumh05/hlsgraph/blob/main/docs/retrieval.md)
 - [Privacy and security](https://github.com/liumh05/hlsgraph/blob/main/docs/privacy-and-security.md)
 - [Versioning, active snapshots, staleness, and migration](https://github.com/liumh05/hlsgraph/blob/main/docs/versioning.md)
 - [Format, compiler, and implementation references](https://github.com/liumh05/hlsgraph/blob/main/docs/references.md)

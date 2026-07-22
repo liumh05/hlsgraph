@@ -24,6 +24,7 @@ from hlsgraph import (
     FailureClass,
     RunStatus,
     SourceAnchor,
+    ToolOutputSpec,
     ToolRun,
     ToolchainContext,
 )
@@ -36,6 +37,12 @@ from hlsgraph.extract.vitis import _safe_source_location
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.render.projection import to_render_data
 from hlsgraph.store import StoreError
+from tests.attested_run_support import commit_attested
+from tests.typed_report_support import (
+    parsed_report_observation,
+    write_csynth_xml,
+    write_vivado_timing,
+)
 
 
 def test_source_pragma_comment_never_enters_graph_db_or_exports(tmp_path: Path) -> None:
@@ -749,6 +756,10 @@ def test_ml_export_rejects_run_backed_label_after_report_cas_is_lost(
     )]
     manifest.stage_commands = {"csynth": ["tool", "--report"]}
     manifest.stage_toolchains = {"csynth": "test.fixture_tool"}
+    manifest.stage_outputs = {"csynth": [ToolOutputSpec(
+        path="reports/latency.xml", kind="amd.vitis.csynth_xml",
+        role="verification_report",
+    )]}
     bundle = GraphBundle.create(tmp_path, manifest)
     snapshot = bundle.snapshot()
     graph = CanonicalGraph(snapshot.id)
@@ -772,20 +783,19 @@ def test_ml_export_rejects_run_backed_label_after_report_cas_is_lost(
             "fresh_tool_truth": True, "tool_truth": True,
         },
     )
-    report_source = tmp_path / "latency.rpt"
-    report_source.write_bytes(b"latency_cycles=42\n")
+    report_source = tmp_path / "latency.xml"
+    write_csynth_xml(report_source, latency=42)
     report, retained_path, _created = bundle.prepare_managed_artifact(
-        report_source, kind="amd.vitis.csynth_report", role="verification_report",
+        report_source, kind="amd.vitis.csynth_xml", role="verification_report",
         producer_run_id=run.id,
+        metadata={"declared_output_path": "reports/latency.xml"},
     )
     run.output_artifact_ids = [report.id]
-    observation = Observation(
-        snapshot_id=snapshot.id, subject_id=kernel.id,
-        predicate="qor.latency_cycles", value=42, unit="cycle", stage="csynth",
-        authority=AuthorityClass.TOOL_OBSERVATION,
-        run_id=run.id, artifact_id=report.id,
+    observation = parsed_report_observation(
+        bundle, report, predicate="qor.latency_best_cycles", value=42,
+        subject_id=kernel.id, run_id=run.id,
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[report], observations=[observation],
     )
     dataset = DatasetManifest(
@@ -793,7 +803,7 @@ def test_ml_export_rejects_run_backed_label_after_report_cas_is_lost(
         snapshot_ids=[snapshot.id], labels=[LabelSpec(
             label_id="latency", snapshot_id=snapshot.id,
             observation_id=observation.id,
-            predicate="qor.latency_cycles", stage="csynth", unit="cycle", mask=True,
+            predicate="qor.latency_best_cycles", stage="schedule", unit="cycle", mask=True,
         )],
     )
 
@@ -823,6 +833,10 @@ def test_trusted_label_stage_and_report_must_match_the_producer_stage(
     )]
     manifest.stage_commands = {"csynth": ["tool", "--report"]}
     manifest.stage_toolchains = {"csynth": "test.fixture_tool"}
+    manifest.stage_outputs = {"csynth": [ToolOutputSpec(
+        path="reports/csynth.xml", kind="amd.vitis.csynth_xml",
+        role="verification_report",
+    )]}
     bundle = GraphBundle.create(tmp_path, manifest)
     snapshot = bundle.snapshot()
     graph = CanonicalGraph(snapshot.id)
@@ -845,11 +859,12 @@ def test_trusted_label_stage_and_report_must_match_the_producer_stage(
             "fresh_tool_truth": True, "tool_truth": True,
         },
     )
-    report_source = tmp_path / "csynth.rpt"
-    report_source.write_text("latency_cycles=42\n", encoding="utf-8")
+    report_source = tmp_path / "csynth.xml"
+    write_csynth_xml(report_source, latency=42)
     report, _retained, _created = bundle.prepare_managed_artifact(
-        report_source, kind="amd.vitis.csynth_report", role="verification_report",
+        report_source, kind="amd.vitis.csynth_xml", role="verification_report",
         producer_run_id=run.id,
+        metadata={"declared_output_path": "reports/csynth.xml"},
     )
     run.output_artifact_ids = [report.id]
     disguised_post_route = Observation(
@@ -860,18 +875,16 @@ def test_trusted_label_stage_and_report_must_match_the_producer_stage(
     )
 
     with pytest.raises(StoreError, match="incompatible with producer stage 'csynth'"):
-        bundle.store.commit_run_result(
+        commit_attested(bundle,
             run=run, artifacts=[report], observations=[disguised_post_route],
         )
     assert bundle.store.runs(snapshot.id) == []
 
-    valid_csynth = Observation(
-        snapshot_id=snapshot.id, subject_id=kernel.id,
-        predicate="qor.latency_cycles", value=42, unit="cycle", stage="csynth",
-        authority=AuthorityClass.TOOL_OBSERVATION,
-        run_id=run.id, artifact_id=report.id,
+    valid_csynth = parsed_report_observation(
+        bundle, report, predicate="qor.latency_best_cycles", value=42,
+        subject_id=kernel.id, run_id=run.id,
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[report], observations=[valid_csynth],
     )
 
@@ -907,6 +920,16 @@ def test_known_report_kind_cannot_be_retyped_by_plugin_extension(
     )]
     manifest.stage_commands = {"post_route": ["tool", "--post-route"]}
     manifest.stage_toolchains = {"post_route": "test.fixture_tool"}
+    manifest.stage_outputs = {"post_route": [
+        ToolOutputSpec(
+            path="reports/disguised_csynth.xml", kind="amd.vitis.csynth_xml",
+            role="verification_report",
+        ),
+        ToolOutputSpec(
+            path="reports/post_route_timing.rpt",
+            kind="amd.vivado.post_route_timing", role="verification_report",
+        ),
+    ]}
     bundle = GraphBundle.create(tmp_path, manifest)
     snapshot = bundle.snapshot()
     graph = CanonicalGraph(snapshot.id)
@@ -935,6 +958,7 @@ def test_known_report_kind_cannot_be_retyped_by_plugin_extension(
         disguised_source, kind="amd.vitis.csynth_xml", role="verification_report",
         producer_run_id=run.id,
         metadata={
+            "declared_output_path": "reports/disguised_csynth.xml",
             "hlsgraph_evidence": {
                 "policy_version": TOOL_EVIDENCE_POLICY_VERSION,
                 "observation_stage": "post_route",
@@ -944,10 +968,17 @@ def test_known_report_kind_cannot_be_retyped_by_plugin_extension(
         },
     )
     valid_source = tmp_path / "post_route_timing.rpt"
-    valid_source.write_text("WNS 0.25\n", encoding="utf-8")
+    write_vivado_timing(valid_source, wns=0.25)
     valid_report, _retained, _created = bundle.prepare_managed_artifact(
         valid_source, kind="amd.vivado.post_route_timing", role="verification_report",
         producer_run_id=run.id,
+        metadata={
+            "declared_output_path": "reports/post_route_timing.rpt",
+            "scope": {
+                "kind": "kernel", "top": "dut", "instance": "dut",
+                "clock": "default",
+            },
+        },
     )
     run.output_artifact_ids = [disguised_report.id, valid_report.id]
     disguised_observation = Observation(
@@ -958,19 +989,17 @@ def test_known_report_kind_cannot_be_retyped_by_plugin_extension(
     )
 
     with pytest.raises(StoreError, match="typed for another evidence stage"):
-        bundle.store.commit_run_result(
+        commit_attested(bundle,
             run=run, artifacts=[disguised_report, valid_report],
             observations=[disguised_observation],
         )
     assert bundle.store.runs(snapshot.id) == []
 
-    valid_observation = Observation(
-        snapshot_id=snapshot.id, subject_id=kernel.id,
-        predicate="timing.wns_ns", value=0.25, unit="ns", stage="post_route",
-        authority=AuthorityClass.TOOL_OBSERVATION,
-        run_id=run.id, artifact_id=valid_report.id,
+    valid_observation = parsed_report_observation(
+        bundle, valid_report, predicate="timing.wns_ns", value=0.25,
+        subject_id=kernel.id, run_id=run.id,
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[disguised_report, valid_report],
         observations=[valid_observation],
     )
@@ -1060,6 +1089,10 @@ def test_ml_export_replays_tool_run_immutable_manifest_identity(
     )]
     manifest.stage_commands = {"csynth": ["tool", "--report"]}
     manifest.stage_toolchains = {"csynth": "test.fixture_tool"}
+    manifest.stage_outputs = {"csynth": [ToolOutputSpec(
+        path="reports/csynth.xml", kind="amd.vitis.csynth_xml",
+        role="verification_report",
+    )]}
     bundle = GraphBundle.create(tmp_path, manifest)
     snapshot = bundle.snapshot()
     graph = CanonicalGraph(snapshot.id)
@@ -1081,20 +1114,19 @@ def test_ml_export_replays_tool_run_immutable_manifest_identity(
             "fresh_tool_truth": True, "tool_truth": True,
         },
     )
-    report_source = tmp_path / "csynth.rpt"
-    report_source.write_text("latency_cycles=42\n", encoding="utf-8")
+    report_source = tmp_path / "csynth.xml"
+    write_csynth_xml(report_source, latency=42)
     report, _retained, _created = bundle.prepare_managed_artifact(
-        report_source, kind="amd.vitis.csynth_report", role="verification_report",
+        report_source, kind="amd.vitis.csynth_xml", role="verification_report",
         producer_run_id=run.id,
+        metadata={"declared_output_path": "reports/csynth.xml"},
     )
     run.output_artifact_ids = [report.id]
-    observation = Observation(
-        snapshot_id=snapshot.id, subject_id=kernel.id,
-        predicate="qor.latency_cycles", value=42, unit="cycle", stage="schedule",
-        authority=AuthorityClass.TOOL_OBSERVATION,
-        run_id=run.id, artifact_id=report.id,
+    observation = parsed_report_observation(
+        bundle, report, predicate="qor.latency_best_cycles", value=42,
+        subject_id=kernel.id, run_id=run.id,
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[report], observations=[observation],
     )
 
@@ -1325,7 +1357,7 @@ def test_label_spec_rejects_ambiguous_mask_and_malformed_identifiers() -> None:
 def test_release_metadata_and_sbom_are_consistent() -> None:
     root = Path(__file__).parents[1]
     sbom = json.loads((root / "sbom.spdx.json").read_text(encoding="utf-8"))
-    assert sbom["name"] == "hlsgraph-0.2.0"
+    assert sbom["name"] == "hlsgraph-0.3.0"
     packages = {item["name"]: item for item in sbom["packages"]}
     assert {"hlsgraph", "cytoscape", "elkjs", "tomli"}.issubset(packages)
     from tools.audit_release import (
@@ -1444,7 +1476,7 @@ def test_release_audit_accepts_crlf_metadata_and_only_standard_sdist_egg_info() 
     metadata = (
         b"Metadata-Version: 2.4\r\n"
         b"Name: hlsgraph\r\n"
-        b"Version: 0.2.0\r\n"
+        b"Version: 0.3.0\r\n"
         b"Project-URL: Source, https://github.com/liumh05/hlsgraph\r\n\r\n"
     )
     assert _audit_wheel_metadata(metadata) == []

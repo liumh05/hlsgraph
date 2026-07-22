@@ -20,11 +20,14 @@ from hlsgraph.model import (
     PredictionEnvelope,
     Relation,
     RunStatus,
+    ToolOutputSpec,
     ToolRun,
     ToolchainContext,
 )
 from hlsgraph.render import render, to_render_data
 from hlsgraph.render.html import to_html
+from tests.attested_run_support import commit_attested
+from tests.typed_report_support import parsed_report_observation, write_csynth_xml
 
 
 def _dataflow(snapshot_id: str):
@@ -157,6 +160,10 @@ def test_ml_export_separates_features_truth_labels_predictions_and_private_sourc
         "csynth": ["fixture-tool", "--csynth"],
     }
     project_manifest.stage_toolchains = {"csynth": "test.fixture_tool"}
+    project_manifest.stage_outputs = {"csynth": [ToolOutputSpec(
+        path="reports/latency.xml", kind="amd.vitis.csynth_xml",
+        role="verification_report",
+    )]}
     bundle = GraphBundle.create(tmp_path, project_manifest)
     snapshot = bundle.snapshot()
     kernel = Entity(
@@ -189,20 +196,19 @@ def test_ml_export_separates_features_truth_labels_predictions_and_private_sourc
             "fresh_tool_truth": True, "tool_truth": True,
         },
     )
-    report_source = tmp_path / "latency.rpt"
-    report_source.write_text("latency_cycles=42\n", encoding="utf-8")
+    report_source = tmp_path / "latency.xml"
+    write_csynth_xml(report_source, latency=42)
     report, _retained_path, _created = bundle.prepare_managed_artifact(
-        report_source, kind="amd.vitis.csynth_report", role="verification_report",
+        report_source, kind="amd.vitis.csynth_xml", role="verification_report",
         producer_run_id=run.id,
+        metadata={"declared_output_path": "reports/latency.xml"},
     )
     run.output_artifact_ids = [report.id]
-    observation = Observation(
-        snapshot_id=snapshot.id, subject_id=kernel.id,
-        predicate="qor.latency_cycles", value=42, unit="cycle", stage="schedule",
-        authority=AuthorityClass.TOOL_OBSERVATION,
-        run_id=run.id, artifact_id=report.id,
+    observation = parsed_report_observation(
+        bundle, report, predicate="qor.latency_best_cycles", value=42,
+        subject_id=kernel.id, run_id=run.id,
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[report], observations=[observation],
     )
     prediction = PredictionEnvelope(
@@ -219,7 +225,7 @@ def test_ml_export_separates_features_truth_labels_predictions_and_private_sourc
         labels=[LabelSpec(
             label_id="latency", snapshot_id=snapshot.id,
             observation_id=observation.id,
-            predicate="qor.latency_cycles", stage="schedule", unit="cycle", mask=True,
+            predicate="qor.latency_best_cycles", stage="schedule", unit="cycle", mask=True,
         )],
         splits={snapshot.id: "test"},
         kernel_families={snapshot.id: "synthetic.dataflow"},
@@ -257,7 +263,7 @@ def test_ml_export_separates_features_truth_labels_predictions_and_private_sourc
         "mask": True,
         "missing_reason": None,
         "observation_id": observation.id,
-        "predicate": "qor.latency_cycles",
+        "predicate": "qor.latency_best_cycles",
         "snapshot_id": snapshot.id,
         "stage": "schedule",
         "unbounded": False,

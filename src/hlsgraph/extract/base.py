@@ -8,6 +8,8 @@ from typing import Any, Protocol, runtime_checkable
 from ..graph import CanonicalGraph
 from ..model import (
     ArtifactRef,
+    ArtifactSemanticAttestation,
+    ArtifactSemanticClaim,
     AuthorityClass,
     DesignSnapshot,
     Derivation,
@@ -16,6 +18,7 @@ from ..model import (
     Observation,
     ProjectManifest,
     VerificationResult,
+    json_ready,
     reject_embedded_body_fields,
     stable_hash,
 )
@@ -53,6 +56,7 @@ class ExtractionResult:
     diagnostics: list[Diagnostic] = field(default_factory=list)
     verifications: list[VerificationResult] = field(default_factory=list)
     produced_artifacts: list[ArtifactRef] = field(default_factory=list)
+    artifact_semantic_claims: list[ArtifactSemanticClaim] = field(default_factory=list)
     coverage: dict[str, Any] = field(default_factory=dict)
     capabilities: list[str] = field(default_factory=list)
 
@@ -70,15 +74,57 @@ class Extractor(Protocol):
 
 
 class ExtractionPipeline:
-    def __init__(self, extractors: list[Extractor]):
+    def __init__(self, extractors: list[Extractor], *,
+                 extractor_identities: list[dict[str, Any]] | None = None):
         self.extractors = extractors
+        if extractor_identities is not None and len(extractor_identities) != len(extractors):
+            raise ValueError("extractor identities must correspond one-to-one with extractors")
+        self.extractor_identities = extractor_identities
+
+    @staticmethod
+    def _identity(extractor: Extractor) -> dict[str, Any]:
+        identity: dict[str, Any] = {
+            "name": str(extractor.name), "version": str(extractor.version),
+            "implementation_module": type(extractor).__module__,
+            "implementation_qualname": type(extractor).__qualname__,
+        }
+        runtime_identity = getattr(extractor, "runtime_identity", None)
+        if callable(runtime_identity):
+            identity["runtime"] = runtime_identity()
+        # Canonical serialization both validates the shape and gives the
+        # immutable attestation a deterministic producer fingerprint.
+        stable_hash(identity)
+        return identity
+
+    @staticmethod
+    def _attest_claims(
+        result: ExtractionResult, *, context: ExtractionContext,
+        extractor: Extractor, extractor_identity: dict[str, Any],
+    ) -> list[ArtifactSemanticAttestation]:
+        # A parser implementation identity is not an authorization to assert
+        # conformance with an external language specification.  The public
+        # v0.3 pipeline has no persisted, capability-issued semantic adapter
+        # authorization contract yet, so every claim is rejected.  Default
+        # MLIR/LLVM text extractors still emit structural evidence normally.
+        if result.artifact_semantic_claims:
+            raise ValueError(
+                "no public extractor is authorized to issue language-spec "
+                "semantic attestations"
+            )
+        return []
 
     def run(self, context: ExtractionContext) -> ExtractionResult:
         merged = ExtractionResult(graph=CanonicalGraph(snapshot_id=context.snapshot.id))
-        for extractor in self.extractors:
+        semantic_attestations: dict[str, ArtifactSemanticAttestation] = {}
+        for position, extractor in enumerate(self.extractors):
             if not extractor.supports(context):
                 continue
             try:
+                extractor_identity = (
+                    self.extractor_identities[position]
+                    if self.extractor_identities is not None
+                    else self._identity(extractor)
+                )
                 context.options["existing_graph"] = merged.graph
                 result = extractor.extract(context)
                 reject_embedded_body_fields(
@@ -86,6 +132,10 @@ class ExtractionPipeline:
                 )
                 reject_embedded_body_fields(
                     result.coverage, f"extractor {extractor.name} coverage",
+                )
+                attestations = self._attest_claims(
+                    result, context=context, extractor=extractor,
+                    extractor_identity=extractor_identity,
                 )
                 if result.graph.metadata:
                     merged.graph.metadata.setdefault("extractor_metadata", {})[extractor.name] = result.graph.metadata
@@ -98,6 +148,8 @@ class ExtractionPipeline:
                 merged.diagnostics.extend(result.diagnostics)
                 merged.verifications.extend(result.verifications)
                 merged.produced_artifacts.extend(result.produced_artifacts)
+                for attestation in attestations:
+                    semantic_attestations[attestation.id] = attestation
                 merged.coverage[extractor.name] = result.coverage
                 merged.capabilities.extend(result.capabilities)
             except Exception as exc:
@@ -129,5 +181,10 @@ class ExtractionPipeline:
         merged.capabilities = sorted(set(merged.capabilities))
         merged.graph.metadata["coverage"] = merged.coverage
         merged.graph.metadata["capabilities"] = merged.capabilities
+        if semantic_attestations:
+            merged.graph.metadata["artifact_semantic_attestations"] = [
+                json_ready(semantic_attestations[key])
+                for key in sorted(semantic_attestations)
+            ]
         reject_embedded_body_fields(merged.graph.metadata, "merged extractor graph metadata")
         return merged

@@ -23,6 +23,7 @@ from .manifest import manifest_template, parse_manifest_text, safe_relative_path
 from .model import DatasetManifest, json_ready
 from .plugins import load_runners
 from .query import ExploreSpec, QuerySpec
+from .retrieval import RetrievalSpec
 from .runner import FakeRunner, LocalRunner, SSHRunner
 from .sdk import Project
 from .version import FEATURE_SCHEMA_VERSION, SCHEMA_VERSION, __version__
@@ -42,6 +43,29 @@ def _json(value: Any, *, compact: bool = False) -> str:
 
 def _emit(value: Any, args: argparse.Namespace) -> None:
     print(_json(value, compact=bool(getattr(args, "compact", False))))
+
+
+def _key_value_config(values: Sequence[str], *, option: str) -> dict[str, Any]:
+    """Parse repeatable ``key=value`` plugin options deterministically.
+
+    Values accept JSON scalars/arrays/objects when valid and otherwise remain strings.  This
+    keeps ordinary ``--parser-config language=en`` ergonomic without losing typed plugin
+    configuration such as ``--parser-config pages=12``.
+    """
+    result: dict[str, Any] = {}
+    for raw in values:
+        if not isinstance(raw, str) or "=" not in raw:
+            raise CliError(f"{option} must use key=value")
+        key, value = raw.split("=", 1)
+        if not key or key != key.strip() or any(char.isspace() for char in key):
+            raise CliError(f"{option} keys must be non-empty and contain no whitespace")
+        if key in result:
+            raise CliError(f"duplicate {option} key: {key}")
+        try:
+            result[key] = json.loads(value)
+        except json.JSONDecodeError:
+            result[key] = value
+    return result
 
 
 def _project_root(args: argparse.Namespace) -> Path:
@@ -592,6 +616,26 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_retrieve(args: argparse.Namespace) -> int:
+    project = _open_project(args)
+    planes = (tuple(args.plane) if args.plane
+              else ("facts", "evidence", "knowledge", "local"))
+    result = project.service(args.snapshot_id).retrieve(RetrievalSpec(
+        query=args.query,
+        snapshot_id=args.snapshot_id,
+        scope_id=args.scope,
+        view=args.view,
+        planes=planes,
+        profile=args.profile,
+        top_k=args.top_k,
+        max_chars=args.max_chars,
+        include_private_snippets=args.include_private_snippets,
+        include_predictions=args.include_predictions,
+    ))
+    _emit({"command": "retrieve", **result.to_dict()}, args)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     project = _open_project(args)
     if args.backend == "fake":
@@ -713,7 +757,8 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     # Keep the knowledge framework out of ordinary CLI startup while still delegating all
     # validation/filter semantics to its public API.
     from .knowledge import (
-        KnowledgeCatalog, index_local_document, load_local_index, save_local_index,
+        KnowledgeCatalog, LocalKnowledgeSidecar, index_local_document,
+        load_local_index, save_local_index,
     )
 
     if args.action == "index":
@@ -723,7 +768,8 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
             )
         root = _project_root(args)
         source = Path(args.path).resolve()
-        output = Path(args.output) if args.output else root / ".hlsgraph" / "knowledge-index.json"
+        output = (Path(args.output) if args.output else
+                  LocalKnowledgeSidecar(root).prepare() / "documents.json")
         if not output.is_absolute():
             output = root / output
         existing = load_local_index(output) if output.is_file() else []
@@ -744,6 +790,93 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
         return 0
 
     catalog = KnowledgeCatalog.builtin()
+    if args.action in {"install", "sync"}:
+        project = _open_project(args)
+        if args.action == "sync" and args.pack_id:
+            raise CliError("knowledge sync installs the complete built-in catalog; omit --pack-id")
+        results = (catalog.sync(project.bundle.store) if args.action == "sync"
+                   else catalog.install(project.bundle.store,
+                                        pack_ids=args.pack_id or None))
+        _emit({
+            "command": "knowledge", "action": args.action,
+            "results": results, "mutated_design_facts": False,
+        }, args)
+        return 0
+
+    if args.action == "coverage":
+        project = _open_project(args)
+        values = []
+        if args.pack_id:
+            for pack_id in args.pack_id:
+                values.extend(project.bundle.store.knowledge_coverage(pack_id=pack_id))
+        else:
+            values = project.bundle.store.knowledge_coverage()
+        classification_complete = bool(values) and all(
+            item.complete for item in values
+        )
+        review_ready = bool(values) and all(
+            item.review_ready for item in values
+        )
+        _emit({
+            "command": "knowledge", "action": "coverage",
+            "items": json_ready(values),
+            # ``complete`` is retained as a v0.x compatibility alias for the
+            # classification-only meaning.  Release readiness is independent.
+            "complete": classification_complete,
+            "classification_complete": classification_complete,
+            "review_ready": review_ready,
+            "installed_packs": project.bundle.store.installed_knowledge_packs(),
+            "metadata_only": True,
+        }, args)
+        return 0
+
+    if args.action == "build-local-index":
+        project = _open_project(args)
+        root = project.bundle.project_root
+        metadata_index = Path(args.metadata_index) if args.metadata_index else (
+            root / ".hlsgraph" / "private" / "knowledge" / "documents.json"
+        )
+        if not metadata_index.is_absolute():
+            metadata_index = root / metadata_index
+        documents = load_local_index(metadata_index)
+        parser = None
+        if args.parser_config and not args.parser:
+            raise CliError("--parser-config requires --parser")
+        if args.parser:
+            from .plugins import load_knowledge_parser
+
+            parser = load_knowledge_parser(
+                args.parser,
+                _key_value_config(args.parser_config, option="--parser-config"),
+            )
+        embedder = None
+        if args.embedder:
+            from .plugins import load_embedder
+
+            try:
+                config = json.loads(args.embedder_config)
+            except json.JSONDecodeError as exc:
+                raise CliError("--embedder-config must be a JSON object") from exc
+            if not isinstance(config, dict):
+                raise CliError("--embedder-config must be a JSON object")
+            embedder = load_embedder(args.embedder, config)
+        options: dict[str, Any] = {}
+        if args.chunk_chars is not None:
+            options["chunk_chars"] = args.chunk_chars
+        if args.chunk_overlap is not None:
+            options["overlap"] = args.chunk_overlap
+        manifest = LocalKnowledgeSidecar(root).build(
+            project.bundle.manifest.project_id, documents,
+            parser=parser, embedder=embedder, **options,
+        )
+        _emit({
+            "command": "knowledge", "action": "build-local-index",
+            "manifest": json_ready(manifest),
+            "sidecar_root": ".hlsgraph/private/knowledge",
+            "content_embedded_in_canonical": False,
+        }, args)
+        return 0
+
     applicability = {key: value for key, value in {
         "vendor": args.vendor, "tool": args.tool, "stage": args.stage,
     }.items() if value is not None}
@@ -852,6 +985,26 @@ def build_parser() -> argparse.ArgumentParser:
     explore.add_argument("--cursor")
     explore.set_defaults(func=_cmd_explore)
 
+    retrieve = sub.add_parser(
+        "retrieve", help="unified deterministic GraphRAG over facts, evidence, and guidance",
+    )
+    project_option(retrieve)
+    retrieve.add_argument("query")
+    retrieve.add_argument("--snapshot-id", help="immutable snapshot to retrieve")
+    retrieve.add_argument("--scope", help="restrict retrieval to one explicit scope")
+    retrieve.add_argument("--view", choices=("architecture", "evidence"),
+                          default="architecture")
+    retrieve.add_argument("--plane", action="append", default=[],
+                          choices=("facts", "evidence", "knowledge", "local", "predictions"))
+    retrieve.add_argument("--profile", default="hls.default.v1")
+    retrieve.add_argument("--top-k", type=int, default=8)
+    retrieve.add_argument("--max-chars", type=int)
+    retrieve.add_argument("--include-private-snippets", action="store_true",
+                          help="request snippets from an explicitly authorized local adapter")
+    retrieve.add_argument("--include-predictions", action="store_true",
+                          help="return predictions in their separate hypothesis plane")
+    retrieve.set_defaults(func=_cmd_retrieve)
+
     run = sub.add_parser("run", help="execute manifest stages through an explicit runner")
     project_option(run)
     run.add_argument("--backend", choices=("local", "ssh", "fake", "plugin"), required=True)
@@ -902,7 +1055,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     knowledge = sub.add_parser("knowledge", help="list and inspect packaged knowledge rules")
     project_option(knowledge)
-    knowledge.add_argument("action", nargs="?", choices=("list", "index"), default="list")
+    knowledge.add_argument(
+        "action", nargs="?",
+        choices=("list", "index", "coverage", "build-local-index", "sync", "install"),
+        default="list",
+    )
     knowledge.add_argument("--document-id")
     knowledge.add_argument("--document-version")
     knowledge.add_argument("--rule-id")
@@ -913,6 +1070,26 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge.add_argument("--title")
     knowledge.add_argument("--official-url")
     knowledge.add_argument("--output", help="metadata-only local index path")
+    knowledge.add_argument("--pack-id", action="append", default=[],
+                           help="exact built-in pack ID; repeat for install/coverage")
+    knowledge.add_argument(
+        "--metadata-index",
+        help=("metadata index for build-local-index "
+              "(default: .hlsgraph/private/knowledge/documents.json)"),
+    )
+    knowledge.add_argument(
+        "--parser", help="explicit local-only hlsgraph.knowledge_parsers.v1 plugin",
+    )
+    knowledge.add_argument(
+        "--parser-config", action="append", default=[], metavar="KEY=VALUE",
+        help="parser plugin option; repeat for multiple values (JSON values are accepted)",
+    )
+    knowledge.add_argument("--embedder",
+                           help="explicit local-only hlsgraph.embedders.v1 plugin")
+    knowledge.add_argument("--embedder-config", default="{}",
+                           help="JSON object passed to the selected local embedder")
+    knowledge.add_argument("--chunk-chars", type=int)
+    knowledge.add_argument("--chunk-overlap", type=int)
     knowledge.set_defaults(func=_cmd_knowledge)
 
     serve = sub.add_parser("serve", help="serve the versioned read-only REST API")

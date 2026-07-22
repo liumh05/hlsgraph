@@ -14,19 +14,24 @@ from ..model import (
     Diagnostic,
     DiagnosticSeverity,
     Observation,
+    SourceAnchor,
     Stage,
+    _observation_source_commitment,
     stable_hash,
 )
 from .base import ExtractionContext, ExtractionResult
 
 
 MAX_REPORT_BYTES = 64 * 1024 * 1024
+_PARSER_NAME = "amd.vivado.reports"
+_PARSER_VERSION = "1"
 IMPLEMENTATION_STAGES = {
     Stage.POST_SYNTH.value, Stage.POST_PLACE.value, Stage.POST_ROUTE.value,
 }
 POST_ROUTE_KINDS = {
     "amd.vivado.post_route_timing", "amd.vivado.post_route_utilization",
 }
+ROUTED_DESIGN_KINDS = {"amd.vivado.routed_checkpoint"}
 GENERIC_KINDS = {
     "amd.vivado.timing_summary", "amd.vivado.utilization",
     "amd.vivado.physical_summary", "amd.vivado.qor_summary",
@@ -39,8 +44,35 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _report_observation(artifact: Any, **values: Any) -> Observation:
+    """Create one observation committed to this exact Vivado report."""
+
+    artifact_id = values.setdefault("artifact_id", artifact.id)
+    if artifact_id != artifact.id:
+        raise ValueError("Vivado observation cannot cite a sibling report")
+    values.setdefault(
+        "anchor",
+        SourceAnchor(artifact_id=artifact.id, ir_location=artifact.kind),
+    )
+    values["source"] = _observation_source_commitment(
+        artifact=artifact,
+        parser_name=_PARSER_NAME,
+        parser_version=_PARSER_VERSION,
+        predicate=values["predicate"],
+        value=values["value"],
+        unit=values.get("unit"),
+    )
+    return Observation(**values)
+
+
 def _report_stage(artifact: Any) -> str:
     declared = artifact.metadata.get("stage")
+    if artifact.kind in ROUTED_DESIGN_KINDS:
+        if str(declared or "") != Stage.POST_ROUTE.value:
+            raise ValueError(
+                f"{artifact.kind} requires metadata.stage='post_route'"
+            )
+        return Stage.POST_ROUTE.value
     if artifact.kind in POST_ROUTE_KINDS:
         if declared is not None and str(declared) != Stage.POST_ROUTE.value:
             raise ValueError(
@@ -113,8 +145,8 @@ def _report_subject(context: ExtractionContext, graph: CanonicalGraph, artifact:
 
 
 class VivadoReportExtractor:
-    name = "amd.vivado.reports"
-    version = "1"
+    name = _PARSER_NAME
+    version = _PARSER_VERSION
 
     def supports(self, context: ExtractionContext) -> bool:
         return any(item.kind.startswith("amd.vivado.") for item in context.artifacts.values())
@@ -129,13 +161,20 @@ class VivadoReportExtractor:
         for artifact in sorted(context.artifacts.values(), key=lambda item: item.id):
             if not artifact.kind.startswith("amd.vivado."):
                 continue
-            diagnostic_stage = (Stage.POST_ROUTE.value if artifact.kind in POST_ROUTE_KINDS
+            diagnostic_stage = (Stage.POST_ROUTE.value if artifact.kind in
+                                (POST_ROUTE_KINDS | ROUTED_DESIGN_KINDS)
                                 else str(artifact.metadata.get("stage") or Stage.UNKNOWN.value))
             try:
                 stage = _report_stage(artifact)
                 artifact_subject, gate_allowed = _report_subject(
                     context, existing, artifact, result, stage,
                 )
+                if artifact.kind in ROUTED_DESIGN_KINDS:
+                    # A routed checkpoint remains a cold, content-addressed
+                    # artifact.  Its bytes are not expanded into the canonical
+                    # graph, but validated scope/stage identity can qualify
+                    # post-route knowledge guidance through the ledger.
+                    continue
                 if artifact.kind in {"amd.vivado.timing_summary", "amd.vivado.post_route_timing"}:
                     self._timing(context, result, artifact, artifact_subject, stage,
                                  gate_allowed=gate_allowed)
@@ -180,7 +219,7 @@ class VivadoReportExtractor:
             tns_value = float(tns.group(1)) if tns else None
         wns_value = float(wns.group(1))
         observations: list[Observation] = []
-        observations.append(Observation(
+        observations.append(_report_observation(artifact,
             snapshot_id=context.snapshot.id, subject_id=subject,
             predicate="timing.wns_ns", value=wns_value, unit="ns",
             stage=stage,
@@ -188,7 +227,7 @@ class VivadoReportExtractor:
             artifact_id=artifact.id, metadata={"path_group": "all", "stage": stage},
         ))
         if tns_value is not None:
-            observations.append(Observation(
+            observations.append(_report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject,
                 predicate="timing.tns_ns", value=tns_value, unit="ns",
                 stage=stage,
@@ -230,7 +269,7 @@ class VivadoReportExtractor:
         if not resources:
             raise ValueError("no utilization resources were found")
         for name, value in resources.items():
-            result.observations.append(Observation(
+            result.observations.append(_report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject,
                 predicate=f"resource.{name}", value=value, unit="count",
                 stage=stage,
@@ -255,7 +294,7 @@ class VivadoReportExtractor:
         }
         for key, (predicate, unit) in mapping.items():
             if key in data:
-                result.observations.append(Observation(
+                result.observations.append(_report_observation(artifact,
                     snapshot_id=context.snapshot.id, subject_id=subject,
                     predicate=predicate, value=data[key], unit=unit,
                     stage=stage,

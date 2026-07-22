@@ -1,0 +1,96 @@
+{
+  "schema_version": "hlsgraph.agent_eval.corpus_lock.v1",
+  "corpora": [
+    {
+      "id": "dataflow_gemm",
+      "name": "HLSGraph synthetic DATAFLOW golden design",
+      "source_kind": "repository_local",
+      "repository": "https://github.com/liumh05/hlsgraph",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/liumh05/hlsgraph/blob/main/LICENSE",
+      "top": "dut",
+      "source": "kernel.cpp",
+      "tool_evidence": "synthetic_only",
+      "files": [
+        {"source_path": "examples/dataflow_gemm/kernel.cpp", "destination": "kernel.cpp", "sha256": "b1cd9c0cd3ef483c622bc7aedabd664950826165eac8f8aea17dc8dcb7af3f82"},
+        {"source_path": "examples/dataflow_gemm/directives.tcl", "destination": "directives.tcl", "sha256": "bec5502c7735357598d8fef9fd39b145b0fbde5dca9e2f4cd2edcd7765ce1adf"},
+        {"source_path": "examples/dataflow_gemm/tb.cpp", "destination": "tb.cpp", "sha256": "ea8bdac5bca174025692e41c4f9f69293ad522723d966b73c8f29edee5b0298c"},
+        {"source_path": "examples/dataflow_gemm/reports/schedule.json", "destination": "reports/schedule.json", "sha256": "17a914d4527f3e30d87c4d2bb76ab27adab1fdecf7cc5d0028d46a4f57b45500"},
+        {"source_path": "examples/dataflow_gemm/reports/directive_status.json", "destination": "reports/directive_status.json", "sha256": "71023f100eb16c5c6acca5551174b854a75f68dc437888a72b2ba3b58e65eadd"},
+        {"source_path": "examples/dataflow_gemm/reports/dataflow_profile.json", "destination": "reports/dataflow_profile.json", "sha256": "69276e6ff10b14bdb107011d1a29f6e57d1de5b2b4e4402f07d0f5b1625d0a29"},
+        {"source_path": "examples/dataflow_gemm/reports/csim_result.json", "destination": "reports/csim_result.json", "sha256": "feb4bd5686ff8800f803fd4d1a56718f38543b47d93c773e2f1d47e66e49568b"},
+        {"source_path": "examples/dataflow_gemm/reports/dut_cosim.rpt", "destination": "reports/dut_cosim.rpt", "sha256": "afae4a737389c9c6ea463c3025329ea6484b97445e4b77bd234550e2db3961e1"},
+        {"source_path": "examples/dataflow_gemm/reports/post_route_timing.rpt", "destination": "reports/post_route_timing.rpt", "sha256": "7a7bf1177efcbb513084873b9ec26b7a51ce8b6befd4d03c8ed833c0e527a18c"},
+        {"source_path": "examples/dataflow_gemm/reports/post_route_utilization.rpt", "destination": "reports/post_route_utilization.rpt", "sha256": "7f397ab57b5274f74b149f52dd4c99de259e3cb30d8af96a12c0a7c8a260aeee"},
+        {"source_path": "examples/dataflow_gemm/README.md", "destination": "FIXTURE_README.md", "sha256": "3cc50989aa3b9ac063f51cfe03dc97e0a867a9447d2a254a56e6a91aa6cf0411"}
+        ,{"source_path": "eval/agent_ab/stubs/hls_stream.h", "destination": "support/include/hls_stream.h", "sha256": "966267ffc3bcf53374bcc8a7798a1dd01bf2d12dde9846e7035edc65234f5c26", "parser_support": true}
+      ]
+    },
+    {
+      "id": "stream_blocks",
+      "name": "Vitis HLS stream_of_blocks diamond",
+      "source_kind": "pinned_raw_files",
+      "repository": "https://github.com/Xilinx/Vitis-HLS-Introductory-Examples",
+      "revision": "1581f3323d7206aee7333f29cf7b0dfd706afc9e",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/Xilinx/Vitis-HLS-Introductory-Examples/blob/1581f3323d7206aee7333f29cf7b0dfd706afc9e/LICENSE.txt",
+      "top": "diamond",
+      "source": "diamond.cpp",
+      "tool_evidence": "none",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/Task_level_Parallelism/Control_driven/Channels/using_stream_of_blocks/README", "destination": "UPSTREAM_README", "sha256": "de4b4b3f39c772ded5ae365ef18cddaf5d1b5cb026ec7392a3828a34d6487dba"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/Task_level_Parallelism/Control_driven/Channels/using_stream_of_blocks/diamond.cpp", "destination": "diamond.cpp", "sha256": "4c853fb1db1187c882e4eb26a821fe6ea291f6ade8fce9e89b9da2f2b644b44e"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/Task_level_Parallelism/Control_driven/Channels/using_stream_of_blocks/diamond.h", "destination": "diamond.h", "sha256": "42bfc4159c204489e7427ecb25ea42aabca79b6c10dfd0915002b3747ecc7185"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/Task_level_Parallelism/Control_driven/Channels/using_stream_of_blocks/diamond_test.cpp", "destination": "diamond_test.cpp", "sha256": "2ca817292a7f5017ac2fb1aa8ed2f1e4afc622ef0efde7d55b85c1c0be0b75ee"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/Task_level_Parallelism/Control_driven/Channels/using_stream_of_blocks/hls_config.cfg", "destination": "hls_config.cfg", "sha256": "db398f2136b1ae2514ae3bb97ef52eee596f6f9e1a508aa56fd5b6b337d70719"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis-HLS-Introductory-Examples/1581f3323d7206aee7333f29cf7b0dfd706afc9e/LICENSE.txt", "destination": "UPSTREAM_LICENSE.txt", "sha256": "ee37cb403c7b162482ef62ca0a7f087bfdaab4cf219bfff5dd2a347678bade36"},
+        {"source_path": "eval/agent_ab/stubs/hls_stream.h", "destination": "support/include/hls_stream.h", "sha256": "966267ffc3bcf53374bcc8a7798a1dd01bf2d12dde9846e7035edc65234f5c26", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/hls_streamofblocks.h", "destination": "support/include/hls_streamofblocks.h", "sha256": "ea85aac2e1978eede15cb32cbce05f6b6dc8de30bdee3caf31625eff34408e5b", "parser_support": true}
+      ]
+    },
+    {
+      "id": "bitonic",
+      "name": "Vitis Database Library bitonic sort",
+      "source_kind": "pinned_raw_files",
+      "repository": "https://github.com/Xilinx/Vitis_Libraries",
+      "revision": "e42643491a5851557fb392990d7be2e8139ae67b",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/Xilinx/Vitis_Libraries/blob/e42643491a5851557fb392990d7be2e8139ae67b/LICENSE.txt",
+      "top": "hls_db_bitonic_sort_function",
+      "source": "bitonic_kernel.cpp",
+      "translation_units": ["bitonic_kernel.cpp", "upstream/xf_database/bitonic_sort.hpp"],
+      "tool_evidence": "none",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis_Libraries/e42643491a5851557fb392990d7be2e8139ae67b/database/L1/include/hw/xf_database/bitonic_sort.hpp", "destination": "upstream/xf_database/bitonic_sort.hpp", "sha256": "dd6b005f1e024305a0fcfc2df9045c818bf42e0b84cf3a8c7f63622dca6583bf"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis_Libraries/e42643491a5851557fb392990d7be2e8139ae67b/database/L1/include/hw/xf_database/enums.hpp", "destination": "upstream/xf_database/enums.hpp", "sha256": "47b4f9b1713786f937b61f7cfc815fec443297a35600da4f32368ddc12ff7f6e"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis_Libraries/e42643491a5851557fb392990d7be2e8139ae67b/database/L1/tests/hw/bitonic_sort/bitonic_sort_test.cpp", "destination": "bitonic_kernel.cpp", "sha256": "6d8c17a6011ac987a3ba105ca8cd0bf9ce09ce0d751c6446abb64a3367d37844"},
+        {"url": "https://raw.githubusercontent.com/Xilinx/Vitis_Libraries/e42643491a5851557fb392990d7be2e8139ae67b/LICENSE.txt", "destination": "UPSTREAM_LICENSE.txt", "sha256": "5d3016bfaa895975fa5e815e4a18911c4a3f73e2773cedb4e4382cfe9e2613fd"},
+        {"source_path": "eval/agent_ab/stubs/hls_stream.h", "destination": "support/include/hls_stream.h", "sha256": "966267ffc3bcf53374bcc8a7798a1dd01bf2d12dde9846e7035edc65234f5c26", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/ap_int.h", "destination": "support/include/ap_int.h", "sha256": "2b03f8b4552aa642436b52ab78d1d2c66b222ba69e0e24fb32a4e6f8254b7b71", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/bitonic_sort.hpp", "destination": "support/include/xf_database/bitonic_sort.hpp", "sha256": "e29439e0ddd9679164c600a20d0b3f6d510d7d96094fd141b784ed469afc86cb", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/vector", "destination": "support/include/vector", "sha256": "6c681da8d5117398e1b36785b5f87e2a4bf45cbcbb90d08181a1ee307ffb8730", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/iostream", "destination": "support/include/iostream", "sha256": "84958b7542477f6bbd5d7ad1da7f1ff5bab284cb5172afb9c7e6acea2453c9d2", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/stdint.h", "destination": "support/include/stdint.h", "sha256": "77def59b50132dba59d54df069cd6729b1493035c7889627f7d661de7a1536e7", "parser_support": true},
+        {"source_path": "eval/agent_ab/stubs/algorithm", "destination": "support/include/algorithm", "sha256": "8f5029eb5b213bb11f7d9da1dcd0ab9340794d6dceb11f585b30ca6b21955757", "parser_support": true}
+      ]
+    },
+    {
+      "id": "cordic",
+      "name": "pp4fpgas CORDIC HLS kernel",
+      "source_kind": "pinned_raw_files",
+      "repository": "https://github.com/xupsh/pp4fpgas-cn-hls",
+      "revision": "d14bd0769ce7f9674f206faf93b7622c5bf905bf",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/xupsh/pp4fpgas-cn-hls/blob/d14bd0769ce7f9674f206faf93b7622c5bf905bf/LICENSE",
+      "top": "cordic",
+      "source": "cordic.cpp",
+      "tool_evidence": "none",
+      "files": [
+        {"url": "https://raw.githubusercontent.com/xupsh/pp4fpgas-cn-hls/d14bd0769ce7f9674f206faf93b7622c5bf905bf/hw/ip/cordic/cordic.cpp", "destination": "cordic.cpp", "sha256": "50914a0f68d321660d800dcf90bb3b903644ec1ebb5afdd733c025e5da55416c"},
+        {"url": "https://raw.githubusercontent.com/xupsh/pp4fpgas-cn-hls/d14bd0769ce7f9674f206faf93b7622c5bf905bf/hw/ip/cordic/cordic.h", "destination": "cordic.h", "sha256": "76eac56fec0d431fe6039ade6ff48b4a250a2ba13d7d835fe1bf098b88a64706"},
+        {"url": "https://raw.githubusercontent.com/xupsh/pp4fpgas-cn-hls/d14bd0769ce7f9674f206faf93b7622c5bf905bf/LICENSE", "destination": "UPSTREAM_LICENSE.txt", "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"},
+        {"source_path": "eval/agent_ab/stubs/ap_fixed.h", "destination": "support/include/ap_fixed.h", "sha256": "930d3b82bfa1085d92ffb8cce34c3bc25a5d2d2469000912eb9afc2e87300297", "parser_support": true}
+      ]
+    }
+  ]
+}

@@ -23,6 +23,7 @@ from ..model import (
     SourceAnchor,
     Stage,
     safe_relative_path,
+    stable_hash,
 )
 from .base import ExtractionContext, ExtractionResult
 
@@ -42,6 +43,16 @@ _KNOWN_DIALECTS = frozenset({
     "affine", "arith", "builtin", "cf", "func", "handshake", "hls",
     "llvm", "memref", "scf",
 })
+_SOURCE_MAPPING_TARGET_KINDS = frozenset({
+    "hls.kernel", "hls.function", "hls.loop", "hls.memory", "hls.port",
+    "hls.stream", "source.variable",
+})
+_CONCRETE_MLIR_MAPPING_LOCATION_KINDS = frozenset({
+    "mlir.callsite", "mlir.filelinecol", "mlir.fused", "mlir.name",
+    "mlir.opaque",
+})
+_MLIR_LOCATION_RESOLUTION_CONTRACT = "hlsgraph.mlir_location_resolution.v1"
+_SOURCE_ANCHOR_IDENTITY_CONTRACT = "hlsgraph.source_anchor_identity.v1"
 
 
 def _integer_widths(text: str) -> list[int]:
@@ -193,6 +204,10 @@ class MlirTextExtractor:
                     memory_kind = _memory_access_kind(op_name)
                     index_kinds = _index_kinds(op_name, tail)
                     loop_facts = _constant_loop_facts(op_name, tail)
+                    ssa_operands = sorted({
+                        operand for operand in _SSA.findall(tail)
+                        if operand != result_name
+                    })
                     op = Entity(
                         kind="ir.mlir.operation", name=op_name,
                         qualified_name=f"{artifact.uri}:{line_number}:{op_name}:{result_name or '-'}",
@@ -201,6 +216,7 @@ class MlirTextExtractor:
                         attrs={
                             "plane": "evidence", "hot": False, "dialect": dialect,
                             "operation": op_name, "ssa_result": result_name,
+                            "ssa_operands": ssa_operands,
                             "pass_stage": artifact.metadata.get("pass_stage"),
                             **({"bitwidths": bitwidths} if bitwidths else {}),
                             **({"memory_access_kind": memory_kind}
@@ -220,9 +236,8 @@ class MlirTextExtractor:
                                                 stage=Stage.MLIR.value))
                     if result_name:
                         definitions[result_name] = op.id
-                    for operand in _SSA.findall(tail):
-                        if operand != result_name:
-                            pending_uses.append((operand, op.id, op_name))
+                    for operand in ssa_operands:
+                        pending_uses.append((operand, op.id, op_name))
 
                     projected = self._project_hardware_entity(context, artifact, line_number,
                                                                op_name, tail, location,
@@ -235,7 +250,13 @@ class MlirTextExtractor:
                             src=op.id, dst=projected.id, kind="cross.projects_to",
                             snapshot_id=context.snapshot.id,
                             authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                            attrs={"projection": "dialect_semantics", "parser": "experimental_text"},
+                            attrs={
+                                "projection": "dialect_semantics",
+                                "projection_mapping": "dialect_semantics",
+                                "hardware_projection": True,
+                                "hardware_topology": False,
+                                "parser": "experimental_text",
+                            },
                         ))
 
                     if location:
@@ -255,12 +276,20 @@ class MlirTextExtractor:
                 producer_op = graph.entities[producer].attrs.get("operation", "")
                 if str(producer_op).startswith("handshake.") and consumer_op.startswith("handshake."):
                     relation_kind = "handshake.dataflow"
-                    attrs["hardware_topology"] = True
+                    attrs.update({
+                        "hardware_topology": False,
+                        "native_ir_artifact_id": artifact.id,
+                        "native_ir_evidence": True,
+                        "native_ir_evidence_contract": "hlsgraph.mlir.ssa_def_use.v1",
+                        "native_ir_relation_provenance": "mlir.ssa_def_use",
+                    })
                 graph.add_relation(Relation(
                     src=producer, dst=consumer, kind=relation_kind,
                     snapshot_id=context.snapshot.id,
                     authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
                     attrs=attrs,
+                    anchors=([SourceAnchor(artifact_id=artifact.id)]
+                             if relation_kind == "handshake.dataflow" else []),
                 ))
                 if relation_kind == "handshake.dataflow" and producer in projections and consumer in projections:
                     source_projection = graph.entities[projections[producer]]
@@ -386,28 +415,109 @@ class MlirTextExtractor:
     @staticmethod
     def _cross_map_source(context: ExtractionContext, graph: CanonicalGraph, op: Entity,
                           location: SourceAnchor, result: ExtractionResult, artifact: Any) -> None:
-        if location.artifact_id not in context.artifacts:
-            return
         existing: CanonicalGraph | None = context.options.get("existing_graph")
-        if not existing:
-            return
-        candidates = [entity for entity in existing.entities.values() for anchor in entity.anchors
-                      if anchor.artifact_id == location.artifact_id and anchor.start_line and anchor.end_line
-                      and location.start_line and anchor.start_line <= location.start_line <= anchor.end_line]
-        candidates = sorted({item.id: item for item in candidates}.values(), key=lambda item: item.id)
+        concrete_location = (
+            location.artifact_id in context.artifacts
+            and location.mapping_kind in _CONCRETE_MLIR_MAPPING_LOCATION_KINDS
+            and isinstance(location.ir_location, str)
+            and location.ir_location.startswith("loc(")
+            and location.start_line is not None
+            and location.start_column is not None
+            and location.ambiguity is None
+        )
+        candidate_pairs: dict[tuple[str, str], tuple[Entity, SourceAnchor]] = {}
+        if existing is not None and concrete_location:
+            for entity in existing.entities.values():
+                if (entity.kind not in _SOURCE_MAPPING_TARGET_KINDS
+                        or entity.stage != Stage.AST.value
+                        or entity.completeness != Completeness.COMPLETE):
+                    continue
+                for target_anchor in entity.anchors:
+                    if (target_anchor.artifact_id == location.artifact_id
+                            and target_anchor.start_line is not None
+                            and target_anchor.end_line is not None
+                            and target_anchor.ambiguity is None
+                            and target_anchor.start_line <= location.start_line
+                            <= target_anchor.end_line):
+                        identity = stable_hash(target_anchor)
+                        candidate_pairs[(entity.id, identity)] = (
+                            entity, target_anchor,
+                        )
+        candidates = [
+            candidate_pairs[key] for key in sorted(candidate_pairs)
+        ]
         if len(candidates) == 1:
+            target, target_anchor = candidates[0]
+            location_identity = stable_hash(location)
+            target_anchor_identity = stable_hash(target_anchor)
             graph.add_relation(Relation(
-                src=op.id, dst=candidates[0].id, kind="cross.maps_to",
+                src=op.id, dst=target.id, kind="cross.maps_to",
                 snapshot_id=context.snapshot.id,
                 authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                mapping_kind="mlir.location", attrs={"cardinality": "many_to_many"},
-                anchors=[location],
+                mapping_kind="mlir.location",
+                attrs={
+                    "cardinality": "many_to_many",
+                    "hardware_topology": False,
+                    "mapping_ambiguous": False,
+                    "mapping_candidate_count": 1,
+                    "mapping_provenance": "mlir.location_anchor",
+                    "mapping_redacted": False,
+                    "mapping_resolution": "unique_exact",
+                    "mapping_resolution_contract": _MLIR_LOCATION_RESOLUTION_CONTRACT,
+                    "mapping_unresolved": False,
+                    "resolved_target_anchor_identity": target_anchor_identity,
+                    "resolved_target_id": target.id,
+                    "source_anchor_identity_contract": _SOURCE_ANCHOR_IDENTITY_CONTRACT,
+                    "target_layer": "source_ast",
+                    "typed_source_anchor_identity": location_identity,
+                },
+                anchors=[location, target_anchor],
             ), allow_dangling=True)
         elif len(candidates) > 1:
+            candidate_ids = sorted({item.id for item, _anchor in candidates})
             result.diagnostics.append(Diagnostic(
                 snapshot_id=context.snapshot.id, code="mapping.ambiguous_mlir_location",
                 severity=DiagnosticSeverity.INFO,
-                message=f"MLIR location maps to {len(candidates)} source entities; no single edge was guessed",
+                message=(f"MLIR location maps to {len(candidates)} source anchors; "
+                         "no single edge was guessed"),
                 stage=Stage.MLIR.value, subject_id=op.id,
-                metadata={"candidate_ids": [item.id for item in candidates]},
+                artifact_id=artifact.id, anchor=location,
+                metadata={
+                    "candidate_ids": candidate_ids,
+                    "candidate_anchor_identities": [
+                        stable_hash(anchor) for _entity, anchor in candidates
+                    ],
+                    "mapping_ambiguous": True,
+                    "mapping_candidate_count": len(candidates),
+                    "mapping_kind": "mlir.location",
+                    "location_kind": location.mapping_kind,
+                    "mapping_provenance": "mlir.location_anchor",
+                    "mapping_redacted": False,
+                    "mapping_resolution": "ambiguous",
+                    "mapping_resolution_contract": _MLIR_LOCATION_RESOLUTION_CONTRACT,
+                    "mapping_unresolved": False,
+                },
+            ))
+        else:
+            redacted = location.mapping_kind == "mlir.filelinecol.redacted"
+            result.diagnostics.append(Diagnostic(
+                snapshot_id=context.snapshot.id,
+                code="mapping.unresolved_mlir_location",
+                severity=DiagnosticSeverity.INFO,
+                message=("MLIR location did not resolve to one complete, supported "
+                         "source AST entity; no mapping edge was created"),
+                stage=Stage.MLIR.value, subject_id=op.id,
+                artifact_id=artifact.id, anchor=location,
+                metadata={
+                    "mapping_ambiguous": False,
+                    "mapping_candidate_count": 0,
+                    "mapping_kind": "mlir.location",
+                    "location_kind": location.mapping_kind,
+                    "mapping_provenance": "mlir.location_anchor",
+                    "mapping_redacted": redacted,
+                    "mapping_resolution": "unresolved",
+                    "mapping_resolution_contract": _MLIR_LOCATION_RESOLUTION_CONTRACT,
+                    "mapping_unresolved": True,
+                    "allowed_target_kinds": sorted(_SOURCE_MAPPING_TARGET_KINDS),
+                },
             ))

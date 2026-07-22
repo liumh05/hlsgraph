@@ -19,10 +19,13 @@ By default, source and testbench artifacts are represented by:
 Their full bodies are not copied into SQLite, REST responses, MCP responses, the
 human view, or ML exports. `ArtifactRef` is evidence metadata, not a blob.
 
-Private snippets are available only through an explicit local SDK/bundle call
-that sets `allow_private=True`, identifies an artifact, and requests a bounded
-line range. REST and MCP do not expose this operation. This is an authorization
-boundary in the API, not encryption of files on disk.
+Private snippets are disabled by default. The local SDK or MCP retrieval path
+may return a bounded, anchor-backed excerpt only when project policy sets
+`privacy.mcp_source_snippets = "bounded"` and the individual request sets
+`include_private_snippets=true`. Before returning it, HLSGraph revalidates
+project containment, link/reparse status, size, SHA-256, and the requested
+anchor. REST never exposes this capability. This is an authorization boundary
+in the API, not encryption of files on disk.
 
 Project-relative paths, symbol names, hashes, commands, diagnostics, report
 values, and source spans can themselves be sensitive. Treat `.hlsgraph/` and
@@ -71,7 +74,7 @@ mode, but the database is not encrypted. Filesystem permissions are the primary
 local control. Backup and deletion policies must cover the ledger, managed
 artifacts, renderings, and ML exports.
 
-ML export refuses `include_source=True` in v0.2. Artifact rows still include
+ML export refuses `include_source=True` in v0.3. Artifact rows still include
 URI, hash, size, role, license, and access policy. Review dataset manifests and
 licenses before sharing. The self-contained HTML view embeds graph/evidence
 metadata and should receive the same review.
@@ -93,12 +96,13 @@ mean non-sensitive.
 
 ## MCP deployment
 
-MCP tools are read-only with respect to graph facts and predictions. They can
-return symbol names, artifact metadata, observations, redacted diagnostic
-summaries, and an HTML
-or text rendering. Configure the MCP process with the minimum filesystem access
-needed for the selected bundle, and do not assume the LLM/client is authorized
-for every project on the host.
+MCP tools are read-only with respect to graph facts and predictions. The default
+surface is the unified `explore` tool; the v0.2 narrow tools require
+`HLSGRAPH_MCP_TOOLS=all`. Responses can include symbol names, artifact metadata,
+observations, redacted diagnostic summaries, and—only under the two-part policy
+above—bounded private excerpts. Configure the process with the minimum
+filesystem access needed for the selected bundle, and do not assume the
+LLM/client is authorized for every project on the host.
 
 MCP `impact` returns dependency facts only. It deliberately excludes
 software-call and LLVM-CFG relations by default and never emits predicted QoR as
@@ -140,6 +144,50 @@ host-key policy, license isolation, or host-level attestation.
 Fake/replay runners and synthetic fixture reports are marked non-tool-truth.
 They must never be used to claim a verified implementation.
 
+Tool-truth writes are capability-gated.  The public Python models are
+intentionally serializable for audit, but a caller-created `ToolRun`,
+`ExecutionAttestation`, report, or metadata dictionary is not authorization.
+Only the execution pipeline can issue the one-shot in-memory capability that
+the ledger consumes before publishing an attestation and commit receipt.  An
+arbitrary `Runner` object passed directly to the SDK is not trusted merely
+because it calls itself `runner.local`/`runner.ssh` or advertises matching
+capabilities.  Built-in runner instances are registered internally; an
+explicitly selected `hlsgraph.runners.v2` entry point is trusted executable code
+and receives a separately bound plugin authority.  Fake and replay paths can
+never receive either authority.
+
+This boundary prevents ordinary public-SDK object assembly from manufacturing
+fresh tool evidence.  It is not a sandbox against malicious Python already
+executing inside the HLSGraph process, nor against the operating-system owner
+rewriting the SQLite database or CAS directly.  Protect the environment,
+installed plugins, database, and artifact directory with normal OS controls;
+post-write readers still revalidate the public receipt and live output hashes
+to detect accidental or out-of-model corruption.
+
+`ObservationSource` follows the same boundary. It names exactly one canonical
+report and commits that report hash and a fixed parser's predicate/value/unit
+payload; `artifact_id`, anchor artifact, and source artifact must agree. It is
+not a signature. HLSGraph replays the built-in report parser against the live
+managed bytes and requires one exact output plus a valid execution receipt, so
+calling the public constructor or copying a sibling report cannot create trusted
+QoR or verification evidence.
+
+Source directives use a separate ephemeral replay boundary. Directive entities,
+`hls.annotates` relations, runless `directive.requested` observations, graph
+metadata, and stable IDs are all caller-constructible and therefore cannot
+self-attest. Before retrieval emits `directive_source_declaration_qualified`,
+`requested_directive_present`, `directive_operand_linked`, or
+`dependence_operand_resolved`, it validates the complete immutable snapshot
+input closure and reruns only the built-in `source.libclang` v2 plus literal
+`directive.external` v1 parsers. The exact spelling hash, options, source anchor,
+scope, operand, annotation, and request record must match one unique replayed
+declaration. Inputs are revalidated after parsing and proof construction. A
+missing parser/runtime, compilation diagnostic, ambiguous mapping, changed
+input, sibling scope, or option/operand mismatch withholds every capability.
+The regex scanner is an explicit degraded indexing aid and can never authorize
+these retrieval markers. Replay hashes are kept only in memory; source text is
+not copied into SQLite, bundles, REST, MCP, or ML exports.
+
 ## Plugins
 
 Extractor and runner plugins are executable Python code with the permissions of
@@ -151,10 +199,20 @@ and data handling.
 ## Knowledge documents
 
 The repository distributes metadata, short project-authored summaries, section
-citations, official URLs, and applicability rules—not UG PDFs or extracted full
-text. The local knowledge indexer hashes a user-owned document and records
-metadata without copying or parsing its contents. Possession and use of the
-original document remain the user's responsibility.
+citations, official URLs, applicability rules, bindings, and coverage
+manifests—not UG PDFs or extracted full text. An explicit private sidecar may
+parse a user-owned document into bounded local chunks. Those chunks and optional
+local-only embeddings remain under `.hlsgraph/private/knowledge/`; they never
+enter the canonical database, REST, ML export, wheel, sdist, or release.
+Possession and use of the original document remain the user's responsibility.
+Sidecar queries hash a single stable read of the SQLite file and query only an
+in-memory deserialization of those same verified bytes; path-based fallback is
+forbidden, so a database swap followed by path restoration cannot change the
+queried snapshot.
+Authorized source and local-document excerpt attempts are audited only in the
+project-local `.hlsgraph/private/retrieval-access.jsonl` sidecar. Records contain
+content hashes, anchors, outcome codes, and byte counts—not queries, paths,
+titles, or bodies—and an unsafe or unwritable log path prevents disclosure.
 
 ## Reporting and fixture hygiene
 

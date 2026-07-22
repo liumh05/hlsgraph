@@ -1,4 +1,4 @@
-schema_version = "0.2.0"
+schema_version = "0.3.0"
 project_id = "examples.dataflow_gemm"
 name = "Dataflow GEMM-style pipeline"
 
@@ -33,6 +33,20 @@ uncertainty_ns = 0.5
 resources = { lut = 116000, ff = 232000, dsp = 1248, bram_18k = 288, uram = 64 }
 xdc_files = []
 numerical = { type = "integer", exact = true }
+
+[[toolchains]]
+id = "amd.vitis.2024_2"
+vendor = "amd"
+name = "vitis_hls"
+version = "2024.2"
+build = "synthetic-fixture"
+
+[[toolchains]]
+id = "amd.vivado.2024_2"
+vendor = "amd"
+name = "vivado"
+version = "2024.2"
+build = "synthetic-fixture"
 
 [[artifact_paths]]
 path = "kernel.cpp"

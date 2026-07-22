@@ -91,6 +91,23 @@ required = true
 metadata = { workload_id = "tb.default", campaign_id = "campaign.default" }
 ```
 
+For a run that claims fresh tool truth, `RunnerExecution` also receives an
+internal one-shot execution capability only after StageOrchestrator validates a
+trusted built-in or explicitly loaded plugin runner.  The SDK consumes it while
+committing and retains `ExecutionAttestation` plus `ExecutionCommitReceipt` for
+later public verification.  These bind runner fingerprint, request/run IDs,
+snapshot identity hashes, toolchain, declarations, and exact output artifact
+hashes.  Direct ledger calls and reconstructed public attestation objects do not
+possess the capability and fail closed.
+
+Each supported Vitis/Vivado observation committed from those outputs also has
+one canonical `ObservationSource`: its artifact ID equals the observation's
+sole anchor artifact, and its payload commits the fixed parser identity plus
+predicate/value/unit. The public source model can be reconstructed, so its hash
+alone is not authority and is not a signature. Store, query, ML export, and retrieval require the
+execution commit receipt, live managed bytes, unique declared output ownership,
+and deterministic parser replay before treating it as tool evidence.
+
 Declared output paths must be absent before execution, so stale files cannot be
 attributed to a new run. A cross-process bundle execution lock covers command
 execution, output validation, and ledger commit. `consumed_by` explicitly
@@ -110,15 +127,20 @@ failure classes. Fake and replay runners never claim real-tool evidence.
 Runner plugins are discovered only from the `hlsgraph.runners.v2` entry-point
 group and only when explicitly selected. A plugin must return the exact v2
 protocol identity and capabilities; private host configuration and credentials
-belong to the plugin deployment, not to the public bundle or API.
+belong to the plugin deployment, not to the public bundle or API. Explicitly
+loading such an entry point treats its Python implementation as trusted code;
+an arbitrary `Runner` instance passed directly to the SDK cannot self-assign
+that authority.
 
 For lower-level consumers, public contracts include `GraphBundle`,
 `CanonicalGraph`, `CoreService`, schema dataclasses, extractor/plugin protocols,
 and the ledger store. Opening a bundle is read-only with respect to extraction
 and plugins; explicitly indexing or running is a separate operation.
 `GraphBundle.add_managed_artifact` is only for artifacts without a producer run.
-Run-produced bytes must use `prepare_managed_artifact` followed by the atomic
-`LedgerStore.commit_run_result` contract; published content-addressed bytes are
+Run-produced bytes must use the SDK execution pipeline followed by the atomic
+`LedgerStore.commit_run_result` contract; for tool truth, the low-level method
+also requires the opaque one-shot authorization and is not a manual-import API.
+Published content-addressed bytes are
 never deleted as rollback because another process may already reference them.
 
 ## CLI
@@ -131,12 +153,13 @@ hlsgraph index      build and activate a deterministic snapshot
 hlsgraph status     report graph, runs, gates, health, and staleness
 hlsgraph query      query entities, static feature evidence, or correspondence records
 hlsgraph explore    return a bounded graph and evidence neighborhood
+hlsgraph retrieve   run unified deterministic GraphRAG with separate truth planes
 hlsgraph run        use fake/local/SSH runner for manifest-declared stages
 hlsgraph render     write HTML, JSON, Mermaid, DOT, or SVG
 hlsgraph export     write canonical graph or leakage-aware ML dataset
 hlsgraph doctor     perform read-only environment/bundle checks
 hlsgraph migrate    inspect or explicitly apply a registered migration
-hlsgraph knowledge  list rules or index local document metadata
+hlsgraph knowledge  list/install/sync rules, audit coverage, or build a private sidecar
 hlsgraph serve      start the read-only REST service
 ```
 
@@ -147,6 +170,7 @@ python -m pip install -e ".[clang]"
 hlsgraph index --project examples/dataflow_gemm --manifest hlsgraph.toml
 hlsgraph status --project examples/dataflow_gemm
 hlsgraph query --project examples/dataflow_gemm compute
+hlsgraph retrieve --project examples/dataflow_gemm "what limits achieved II?"
 hlsgraph render --project examples/dataflow_gemm graph.html
 ```
 
@@ -188,11 +212,12 @@ metadata = { remote_attestation_argv = ["./tools/attest-vitis-env"] }
 
 ## Shared query semantics
 
-`CoreService` backs SDK query/explore, CLI, REST, and MCP. Search follows a
-deterministic exact -> substring -> SQLite FTS5 -> fuzzy chain, then applies
-stable sorting and snapshot-bound cursors. Queries can filter by entity kind,
-scope, stage, and authority. Exploration returns a bounded explicit-relation
-neighborhood plus observations, diagnostics, and artifact metadata.
+`CoreService` backs SDK query/explore/retrieve, CLI, REST, and MCP. Narrow query
+keeps its deterministic exact -> substring -> SQLite FTS5 -> fuzzy chain.
+Unified retrieval additionally fuses bilingual identifier-aware lexical search,
+typed directed graph propagation, applicable knowledge, and explicitly
+authorized local channels. Facts, guidance, local document metadata, and opt-in
+predictions remain separate. See [retrieval.md](retrieval.md).
 
 Diagnostics on these shared/public surfaces use a positive projection. It
 includes stable IDs, code, severity, stage, safe anchor fields, and
@@ -230,6 +255,7 @@ deployment.
 The versioned prefix is `/api/v1`. Implemented GET resources are:
 
 - `/status`, `/overview`, and `/graph`;
+- `/retrieve`, the unified metadata-only GraphRAG response;
 - `/entities` and `/entities/{entity_id}`;
 - `/observations`, `/diagnostics`, `/runs`, and `/artifacts`;
 - `/artifacts/{artifact_id}` (metadata only; no private body);
@@ -249,6 +275,7 @@ Example:
 ```bash
 curl "http://127.0.0.1:8000/api/v1/entities?q=compute&stages=schedule"
 curl "http://127.0.0.1:8000/api/v1/observations?stage=post_route"
+curl "http://127.0.0.1:8000/api/v1/retrieve?q=what+limits+II"
 ```
 
 ## MCP
@@ -261,23 +288,15 @@ hlsgraph-mcp /path/to/project
 # optionally: hlsgraph-mcp /path/to/project --snapshot-id snapshot_...
 ```
 
-The MCP server registers these read-only tools:
+The default MCP surface registers one read-only `explore` tool. It returns a
+bounded answer containing ranked facts, cited evidence, applicable guidance,
+explicit HLS flow, freshness, completeness, and confidence. Predictions and
+bounded private snippets both require explicit opt-in and remain labelled.
 
-- `overview`, `search`, and `context`;
-- `module_or_region` and `traverse`;
-- `impact`, which reports explicit dependency facts and never invents QoR
-  deltas; software-call and LLVM-CFG edges are excluded by default;
-- `evidence` and `compare`;
-- `feature_evidence`, which exposes selected static derivations only, and
-  `correspondences`, which preserves ambiguous candidate groups without
-  auto-resolution;
-- `health`, including degraded extraction, missing evidence, and staleness;
-- `runs`, which returns redacted execution/failure records, and `predictions`,
-  which returns explicitly labeled prediction envelopes outside the fact layer;
-- `variants`, which reports only explicitly recorded action, prediction, and
-  result-snapshot lineage and never infers whether a candidate was applied;
-- `render`, which returns an in-memory rendering and does not write files;
-- `knowledge`, whose results are labeled `authority_class=knowledge_rule`.
+Set `HLSGRAPH_MCP_TOOLS=all` before startup to expose the v0.2 narrow tools for
+compatibility: overview/search/context, module/traverse/impact,
+evidence/compare, feature evidence/correspondence, health/runs/predictions,
+variants/render, and knowledge. The default remains the single-tool surface.
 
 MCP has no tool for writing graph facts or promoting a prediction. Any external
 source/config change creates a new state that must be re-indexed or verified by
@@ -378,13 +397,24 @@ hlsgraph knowledge --project /path/to/project --vendor amd \
   --tool vitis_hls --stage schedule
 ```
 
-The local indexer hashes metadata for a document the user lawfully possesses;
-it does not copy or parse the document body:
+The private local metadata index hashes a document the user lawfully possesses;
+its default path is `.hlsgraph/private/knowledge/documents.json` and it is not
+part of the canonical SQLite ledger or exported bundle.
+An explicit private sidecar build can parse supported local documents without
+copying their chunks into the canonical bundle:
 
 ```bash
 hlsgraph knowledge index --project /path/to/project \
   --path /local/path/to/ug1399.pdf \
   --document-id amd.ug1399 --document-version 2024.2
+hlsgraph knowledge build-local-index --project /path/to/project
+hlsgraph knowledge coverage --project /path/to/project
 ```
 
-Knowledge rules are guidance and remain outside design observations.
+Text/Markdown/HTML use bounded built-in parsing. PDF requires an explicitly
+selected local `hlsgraph.knowledge_parsers.v1` plugin. Knowledge rules and local
+chunks remain guidance outside design observations; REST never returns chunks.
+As an alternative, users can convert a lawfully held PDF to UTF-8 Markdown with
+an external tool such as MinerU, retain its page/section markers, and index that
+Markdown through the built-in parser. The converted corpus stays local and is
+not reviewed, bundled, or redistributed by HLSGraph.

@@ -30,6 +30,7 @@ from .model import (
 )
 from .manifest import project_path
 from .query import CoreService, ExploreResult, ExploreSpec, QueryResult, QuerySpec, StatusResult
+from .retrieval import RetrievalAdapter, RetrievalResult, RetrievalSpec
 from .runner import (
     DeclaredOutput, Runner, RunnerExecution, RunnerInput, StageOrchestrator,
     StageResult, ToolRunRequest,
@@ -188,7 +189,11 @@ class Project:
         extractors.extend(load_extractors(plugin_names))
         extractor_identities = []
         for item in extractors:
-            identity: dict[str, Any] = {"name": item.name, "version": item.version}
+            identity: dict[str, Any] = {
+                "name": item.name, "version": item.version,
+                "implementation_module": type(item).__module__,
+                "implementation_qualname": type(item).__qualname__,
+            }
             runtime_identity = getattr(item, "runtime_identity", None)
             if callable(runtime_identity):
                 identity["runtime"] = runtime_identity()
@@ -286,7 +291,9 @@ class Project:
             allow_degraded=degraded, options=index_options,
         )
         started = utc_now()
-        result = ExtractionPipeline(extractors).run(context)
+        result = ExtractionPipeline(
+            extractors, extractor_identities=extractor_identities,
+        ).run(context)
         result.graph.metadata.update({
             "project_id": self.bundle.manifest.project_id,
             "top": self.bundle.manifest.build.top,
@@ -459,6 +466,14 @@ class Project:
     def query(self, query: str | QuerySpec, **kwargs: Any) -> QueryResult:
         spec = query if isinstance(query, QuerySpec) else QuerySpec(query=query, **kwargs)
         return self.service().query(spec)
+
+    def retrieve(self, spec: str | RetrievalSpec,
+                 *, adapters: Sequence[RetrievalAdapter] = (),
+                 **kwargs: Any) -> RetrievalResult:
+        """Retrieve ranked HLS facts, evidence, and guidance without mixing truth planes."""
+        request = (spec if isinstance(spec, RetrievalSpec)
+                   else RetrievalSpec(query=spec, **kwargs))
+        return self.service(request.snapshot_id).retrieve(request, adapters=adapters)
 
     def explore(self, spec: ExploreSpec | None = None, **kwargs: Any) -> ExploreResult:
         return self.service().explore(spec or ExploreSpec(**kwargs))
@@ -696,7 +711,9 @@ class Project:
                 completed_runs.append(run)
                 stopped = request.stage
                 break
-            partial = StageOrchestrator(runner).execute([request])
+            partial = StageOrchestrator(
+                runner, snapshot=snapshot, manifest=snapshot_manifest,
+            ).execute([request])
             execution = partial.executions[0]
             run = execution.run
             try:
@@ -717,7 +734,7 @@ class Project:
                 completed_runs.append(run)
                 runner_gate_failed = any(gate.status == GateStatus.FAIL for gate in run.gates)
                 if run.status not in {RunStatus.SUCCEEDED, RunStatus.CACHED}:
-                    self.bundle.store.add_run(run)
+                    self._commit_execution_only(run, execution)
                     stopped = request.stage
                     break
                 if output_specs:
@@ -746,7 +763,7 @@ class Project:
                         stopped = request.stage
                         break
                 else:
-                    self.bundle.store.add_run(run)
+                    self._commit_execution_only(run, execution)
                     if runner_gate_failed:
                         stopped = request.stage
                         break
@@ -834,6 +851,19 @@ class Project:
             verified=verified, stopped_after_stage=stopped,
         )
 
+    def _commit_execution_only(
+        self, run: ToolRun, execution: RunnerExecution,
+    ) -> None:
+        """Persist a no-output run without permitting caller-forged tool truth."""
+
+        if run.metadata.get("tool_truth") is True:
+            authorization = execution.authorize_tool_truth_commit(())
+            self.bundle.store.commit_run_result(
+                run=run, execution_authorization=authorization,
+            )
+        else:
+            self.bundle.store.add_run(run)
+
     def _commit_declared_run_outputs(
         self, snapshot: Any, manifest: Any, run: ToolRun, output_specs: Sequence[Any],
         execution: RunnerExecution,
@@ -860,12 +890,29 @@ class Project:
                 raise BundleError(f"staged output changed before commit: {output.path}") from exc
             if size != output.size or digest != output.sha256 or source != output.local_path:
                 raise BundleError(f"staged output identity changed before commit: {output.path}")
+            output_metadata = {
+                **spec.metadata,
+                "declared_output_path": spec.path,
+                "consumed_by_stages": sorted(spec.consumed_by),
+            }
+            for identity_key in ("workload_id", "testcase_id"):
+                run_identity = run.metadata.get(identity_key)
+                if run_identity is None:
+                    continue
+                if not isinstance(run_identity, str) or not run_identity:
+                    raise BundleError(
+                        f"run {identity_key} must be a non-empty string when declared"
+                    )
+                output_identity = output_metadata.get(identity_key)
+                if output_identity is not None and output_identity != run_identity:
+                    raise BundleError(
+                        f"declared output {identity_key} conflicts with the run identity"
+                    )
+                output_metadata[identity_key] = run_identity
             artifact, _stored_path, _created = self.bundle.prepare_managed_artifact(
                 source, kind=spec.kind, role=spec.role, access=spec.access,
                 producer_run_id=run.id, license=spec.license,
-                metadata={**spec.metadata,
-                          "declared_output_path": spec.path,
-                          "consumed_by_stages": sorted(spec.consumed_by)},
+                metadata=output_metadata,
             )
             managed.append(artifact)
 
@@ -979,6 +1026,10 @@ class Project:
             derivations=extraction.derivations,
             verifications=extraction.verifications,
             diagnostics=extraction.diagnostics,
+            execution_authorization=(
+                execution.authorize_tool_truth_commit(managed)
+                if run.metadata.get("tool_truth") is True else None
+            ),
         )
         return extraction
 

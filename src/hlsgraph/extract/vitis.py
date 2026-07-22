@@ -22,12 +22,16 @@ from ..model import (
     Stage,
     VerificationKind,
     VerificationResult,
+    _observation_source_commitment,
     safe_relative_path,
 )
 from .base import ExtractionContext, ExtractionResult
+from .directive_identity import directive_identity_metadata
 
 
 MAX_REPORT_BYTES = 32 * 1024 * 1024
+_PARSER_NAME = "amd.vitis.reports"
+_PARSER_VERSION = "1"
 _SCHEDULE_OBSERVATION_FIELDS = frozenset({
     "start_cycle", "end_cycle", "pipeline_stage", "latency", "achieved_ii", "target_ii",
 })
@@ -95,9 +99,30 @@ def _kernel(graph: CanonicalGraph, top: str | None) -> Entity | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _report_observation(artifact: Any, **values: Any) -> Observation:
+    """Create one observation committed to this exact Vitis report."""
+
+    artifact_id = values.setdefault("artifact_id", artifact.id)
+    if artifact_id != artifact.id:
+        raise ValueError("Vitis observation cannot cite a sibling report")
+    values.setdefault(
+        "anchor",
+        SourceAnchor(artifact_id=artifact.id, ir_location=artifact.kind),
+    )
+    values["source"] = _observation_source_commitment(
+        artifact=artifact,
+        parser_name=_PARSER_NAME,
+        parser_version=_PARSER_VERSION,
+        predicate=values["predicate"],
+        value=values["value"],
+        unit=values.get("unit"),
+    )
+    return Observation(**values)
+
+
 class VitisReportExtractor:
-    name = "amd.vitis.reports"
-    version = "1"
+    name = _PARSER_NAME
+    version = _PARSER_VERSION
 
     def supports(self, context: ExtractionContext) -> bool:
         return any(item.kind.startswith("amd.vitis.") for item in context.artifacts.values())
@@ -153,6 +178,10 @@ class VitisReportExtractor:
         if status not in {"pass", "fail"}:
             raise ValueError("C simulation status must be pass or fail")
         workload = data.get("workload_id") or artifact.metadata.get("workload_id")
+        testcase = data.get("testcase_id") or artifact.metadata.get("testcase_id")
+        dynamic_metadata = {"dynamic": True, "testbench_scoped": True}
+        if testcase:
+            dynamic_metadata["testcase_id"] = testcase
         subject = self._subject_or_artifact(existing, context.manifest.build.top, artifact.id)
         values = {
             "csim.exit_code": int(data.get("exit_code", 0 if status == "pass" else 1)),
@@ -161,14 +190,14 @@ class VitisReportExtractor:
         }
         evidence: list[str] = []
         for predicate, value in values.items():
-            observation = Observation(
+            observation = _report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject,
                 predicate=predicate, value=value, unit="count",
                 stage=Stage.CSIM.value,
                 authority=context.authority_for(artifact, AuthorityClass.VERIFICATION_EVIDENCE),
                 artifact_id=artifact.id, workload_id=workload,
                 completeness=Completeness.COMPLETE if workload else Completeness.PARTIAL,
-                metadata={"dynamic": True, "testbench_scoped": True},
+                metadata=dynamic_metadata,
             )
             result.observations.append(observation)
             evidence.append(observation.id)
@@ -223,7 +252,7 @@ class VitisReportExtractor:
         for predicate, value, unit in metrics:
             if value is None:
                 continue
-            result.observations.append(Observation(
+            result.observations.append(_report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject, predicate=predicate,
                 value=value, unit=unit, stage=Stage.SCHEDULE.value,
                 authority=context.authority_for(artifact, AuthorityClass.TOOL_OBSERVATION), artifact_id=artifact.id,
@@ -257,7 +286,7 @@ class VitisReportExtractor:
                     value = _number(_text(loop_element, tag))
                     if value is None:
                         continue
-                    result.observations.append(Observation(
+                    result.observations.append(_report_observation(artifact,
                         snapshot_id=context.snapshot.id, subject_id=loop_subject,
                         predicate=predicate, value=value, unit=unit,
                         stage=Stage.SCHEDULE.value,
@@ -280,9 +309,13 @@ class VitisReportExtractor:
             raise ValueError("no cosimulation result row found")
         status = row.group(1).lower()
         workload = artifact.metadata.get("workload_id")
+        testcase = artifact.metadata.get("testcase_id")
+        dynamic_metadata = {"dynamic": True, "testbench_scoped": True}
+        if testcase:
+            dynamic_metadata["testcase_id"] = testcase
         completeness = Completeness.COMPLETE if workload else Completeness.PARTIAL
         subject = self._subject_or_artifact(existing, context.manifest.build.top, artifact.id)
-        result.observations.append(Observation(
+        result.observations.append(_report_observation(artifact,
             snapshot_id=context.snapshot.id, subject_id=subject,
             predicate="cosim.status", value=status, stage=Stage.COSIM.value,
             authority=context.authority_for(
@@ -290,20 +323,20 @@ class VitisReportExtractor:
             ),
             artifact_id=artifact.id, workload_id=workload,
             completeness=completeness,
-            metadata={"dynamic": True, "testbench_scoped": True},
+            metadata=dynamic_metadata,
         ))
         values = [int(value) for value in row.groups()[1:]]
         for predicate, value in zip((
             "cosim.latency_min_cycles", "cosim.latency_avg_cycles", "cosim.latency_max_cycles",
             "cosim.interval_min_cycles", "cosim.interval_avg_cycles", "cosim.interval_max_cycles",
         ), values):
-            result.observations.append(Observation(
+            result.observations.append(_report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject, predicate=predicate,
                 value=value, unit="cycle", stage=Stage.COSIM.value,
                 authority=context.authority_for(artifact, AuthorityClass.VERIFICATION_EVIDENCE),
                 artifact_id=artifact.id, workload_id=workload,
                 completeness=completeness,
-                metadata={"dynamic": True, "testbench_scoped": True},
+                metadata=dynamic_metadata,
             ))
         result.verifications.append(VerificationResult(
             snapshot_id=context.snapshot.id, kind=VerificationKind.RTL_COSIM,
@@ -427,7 +460,7 @@ class VitisReportExtractor:
                 ("qor.target_ii", "target_ii", "cycle"),
             ):
                 if key in item:
-                    result.observations.append(Observation(
+                    result.observations.append(_report_observation(artifact,
                         snapshot_id=context.snapshot.id,
                         subject_id=architecture_target.id if architecture_target else operation.id,
                         predicate=predicate, value=item[key], unit=unit,
@@ -444,6 +477,7 @@ class VitisReportExtractor:
         if data.get("schema_version") != "hlsgraph.vitis.dataflow_profile.v1":
             raise ValueError("unsupported normalized dataflow profile schema")
         workload = data.get("workload_id") or artifact.metadata.get("workload_id")
+        testcase = data.get("testcase_id") or artifact.metadata.get("testcase_id")
         for channel in data.get("channels", []):
             name = str(channel.get("name", ""))
             matches = [item for item in existing.entities.values()
@@ -456,15 +490,20 @@ class VitisReportExtractor:
                 ("tokens", "profile.token_count", "token"),
             ):
                 if key in channel:
-                    result.observations.append(Observation(
+                    result.observations.append(_report_observation(artifact,
                         snapshot_id=context.snapshot.id, subject_id=subject,
                         predicate=predicate, value=channel[key], unit=unit,
                         stage=Stage.COSIM.value,
                         authority=context.authority_for(artifact, AuthorityClass.VERIFICATION_EVIDENCE),
                         artifact_id=artifact.id, workload_id=workload,
                         completeness=Completeness.COMPLETE if workload else Completeness.PARTIAL,
-                        metadata={"channel": name, "dynamic": True,
-                                  "mapping_status": "exact" if len(matches) == 1 else "unresolved"},
+                        metadata={
+                            "channel": name, "dynamic": True,
+                            "mapping_status": (
+                                "exact" if len(matches) == 1 else "unresolved"
+                            ),
+                            **({"testcase_id": testcase} if testcase else {}),
+                        },
                     ))
 
     def _directive_status(self, context: ExtractionContext, existing: CanonicalGraph,
@@ -496,10 +535,10 @@ class VitisReportExtractor:
                           and existing.entities[relation.src].kind == "hls.directive"
                           and str(existing.entities[relation.src].attrs.get(
                               "directive_kind", existing.entities[relation.src].name)).upper() == kind]
-            effective = [item for item in candidates
-                         if item.attrs.get("state") == "effective_declared"]
-            if len(effective) == 1:
-                candidates = effective
+            selected = [item for item in candidates
+                        if item.attrs.get("state") == "selected_declared"]
+            if len(selected) == 1:
+                candidates = selected
             elif candidates:
                 highest = max(int(item.attrs.get("precedence", 0)) for item in candidates)
                 declared_winners = [item for item in candidates
@@ -515,7 +554,9 @@ class VitisReportExtractor:
                 "tool": data.get("tool", "vitis_hls"),
                 "tool_version": data.get("tool_version"),
             }
-            result.observations.append(Observation(
+            if len(candidates) == 1:
+                common.update(directive_identity_metadata(candidates[0]))
+            result.observations.append(_report_observation(artifact,
                 snapshot_id=context.snapshot.id, subject_id=subject,
                 predicate="directive.tool_status", value=status,
                 stage=Stage.SCHEDULE.value,
@@ -528,7 +569,7 @@ class VitisReportExtractor:
                 ("achieved", "directive.achieved"),
             ):
                 if key in row:
-                    result.observations.append(Observation(
+                    result.observations.append(_report_observation(artifact,
                         snapshot_id=context.snapshot.id, subject_id=subject,
                         predicate=predicate, value=row[key],
                         stage=Stage.SCHEDULE.value,

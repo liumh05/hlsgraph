@@ -37,7 +37,7 @@ class BundleError(RuntimeError):
     pass
 
 
-_LEGACY_PUBLIC_VERSION = "0.1.0"
+_LEGACY_PUBLIC_VERSIONS = frozenset({"0.1.0", "0.2.0"})
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -185,7 +185,16 @@ class GraphBundle:
         # observations.  Loading them into the local ledger makes SDK/REST/MCP
         # consumers agree without redistributing source documents.
         from .knowledge import KnowledgeCatalog
-        bundle.store.add_knowledge_rules(KnowledgeCatalog.builtin().all_rules())
+        catalog = KnowledgeCatalog.builtin()
+        # Unreviewed citation-only packs remain useful lexical metadata, but a
+        # pack carrying executable bindings is not installed until its complete
+        # review attestation is present.  Explicit ``knowledge sync`` applies
+        # the same rule and reports the rejected pack instead of silently
+        # selecting it.
+        KnowledgeCatalog([
+            pack for pack in catalog.packs
+            if not pack.bindings or pack.review_ready
+        ]).install(bundle.store)
         return bundle
 
     @classmethod
@@ -204,7 +213,7 @@ class GraphBundle:
             raise BundleError(f"bundle migration metadata is invalid: {exc}") from exc
         if metadata.get("project_id") != manifest.get("project_id"):
             raise BundleError("bundle and manifest project identities disagree")
-        allowed_schema_versions = {_LEGACY_PUBLIC_VERSION, SCHEMA_VERSION}
+        allowed_schema_versions = set(_LEGACY_PUBLIC_VERSIONS) | {SCHEMA_VERSION}
         if metadata.get("schema_version") not in allowed_schema_versions:
             raise BundleError(
                 f"bundle schema {metadata.get('schema_version')!r} has no explicit "
@@ -215,7 +224,9 @@ class GraphBundle:
                 f"manifest schema {manifest.get('schema_version')!r} has no explicit "
                 f"migration to {SCHEMA_VERSION!r}"
             )
-        if metadata.get("bundle_version") not in {_LEGACY_PUBLIC_VERSION, BUNDLE_VERSION}:
+        if metadata.get("bundle_version") not in (
+            set(_LEGACY_PUBLIC_VERSIONS) | {BUNDLE_VERSION}
+        ):
             raise BundleError(
                 f"bundle version {metadata.get('bundle_version')!r} has no explicit "
                 f"migration to {BUNDLE_VERSION!r}"
@@ -267,7 +278,7 @@ class GraphBundle:
             source_format = source_path.suffix.casefold().lstrip(".")
             source_manifest = parse_manifest_text(source_text, format=source_format)
             if source_manifest.schema_version != SCHEMA_VERSION:
-                if source_manifest.schema_version != _LEGACY_PUBLIC_VERSION:
+                if source_manifest.schema_version not in _LEGACY_PUBLIC_VERSIONS:
                     raise BundleError(
                         f"manifest source schema {source_manifest.schema_version!r} has no "
                         f"explicit migration to {SCHEMA_VERSION!r}"
@@ -305,8 +316,12 @@ class GraphBundle:
             source_path: Path | None = state["source_path"]
             source_text = None
             if source_path is not None:
+                source_format = source_path.suffix.casefold().lstrip(".")
+                source_version = parse_manifest_text(
+                    source_path.read_text(encoding="utf-8"), format=source_format,
+                ).schema_version
                 source_text = _migrated_manifest_source(
-                    source_path, _LEGACY_PUBLIC_VERSION,
+                    source_path, source_version,
                 )
 
             store = LedgerStore(state["database_path"])

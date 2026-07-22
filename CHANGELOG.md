@@ -3,6 +3,29 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.3.0 — 2026-07-21
+
+Developer-preview retrieval and knowledge update:
+
+- add a deterministic hybrid retrieval contract over separate fact, evidence,
+  knowledge, local-document, and opt-in prediction planes;
+- combine exact/FTS/BM25/fuzzy candidates with typed, directed graph
+  propagation and versioned reciprocal-rank fusion without creating graph
+  facts or upgrading guidance to observations;
+- expose one read-only `explore` MCP tool by default while retaining the v0.2
+  narrow tools behind explicit compatibility opt-in;
+- add versioned knowledge bindings and machine-checkable coverage manifests,
+  including fail-closed tool, stage, workload, and activity applicability;
+- bind directive guidance to one explicit directive and its exact function,
+  loop, variable, or port identity; keep source-stage requested/selected
+  declarations separate from schedule-stage tool-effective and achieved data;
+- add a private project-local knowledge sidecar and bounded, hash-revalidated
+  source excerpts that never enter the canonical ledger, bundle, REST, or ML
+  export; and
+- provide the explicit additive `0.2.0 -> 0.3.0` migration while preserving
+  historical snapshot, entity, observation, artifact, run, and graph-hash
+  semantics.
+
 ## 0.2.0 — 2026-07-20
 
 Developer-preview contract update:

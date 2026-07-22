@@ -83,6 +83,25 @@ def test_unscoped_report_remains_artifact_evidence_and_cannot_gate(tmp_path):
     assert not any(item.predicate == "gate.post_route_timing" for item in result.derivations)
 
 
+def test_routed_checkpoint_is_validated_cold_evidence_not_parsed_as_report(tmp_path):
+    result = VivadoReportExtractor().extract(_context(tmp_path, [
+        (
+            "amd.vivado.routed_checkpoint", "opaque checkpoint fixture\n",
+            {"stage": "post_route", "scope": _scope()},
+        ),
+        (
+            "amd.vivado.post_route_timing", "WNS: 0.25\nTNS: 0\n",
+            {"scope": _scope()},
+        ),
+    ]))
+    assert not any(
+        item.code == "vivado.report_parse_error"
+        and "routed_checkpoint" in item.message
+        for item in result.diagnostics
+    )
+    assert any(item.predicate == "timing.wns_ns" for item in result.observations)
+
+
 def test_resource_gate_requires_complete_single_artifact_capacity_set(tmp_path):
     incomplete = VivadoReportExtractor().extract(_context(
         tmp_path / "incomplete",

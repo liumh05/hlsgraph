@@ -6,6 +6,8 @@ import json
 import pytest
 
 from hlsgraph.knowledge import (
+    LEGACY_PACK_SCHEMA_VERSIONS,
+    PACK_SCHEMA_VERSION,
     KnowledgeCatalog,
     KnowledgePackError,
     filter_rules,
@@ -20,10 +22,14 @@ from hlsgraph.knowledge import (
 
 def test_builtin_packs_are_citation_only_and_versioned():
     packs = load_builtin_packs()
-    assert packs
+    assert {pack.pack_id for pack in packs} == {
+        "hlsgraph.amd.public_guidance.2024_2",
+        "hlsgraph.axi.public_guidance.v1",
+        "hlsgraph.open_ir.public_guidance.2026_07_21",
+    }
     rule_ids: set[str] = set()
     for pack in packs:
-        assert pack.schema_version == "1.0"
+        assert pack.schema_version in LEGACY_PACK_SCHEMA_VERSIONS | {PACK_SCHEMA_VERSION}
         assert pack.documents
         for document in pack.documents:
             assert document.official_url.startswith("https://")
@@ -33,6 +39,51 @@ def test_builtin_packs_are_citation_only_and_versioned():
             assert rule.section
             assert rule.citation_url.startswith("https://")
             assert rule.summary and len(rule.summary) <= 500
+            assert all(
+                not isinstance(constraint, list)
+                for constraints in (rule.applicability, rule.condition)
+                for constraint in constraints.values()
+            )
+
+
+@pytest.mark.parametrize("field", ["applicability", "condition"])
+def test_rule_constraint_alternatives_require_explicit_one_of(field: str) -> None:
+    rule = {
+        "document_id": "test.spec", "document_version": "1",
+        "section": "Section", "rule_id": "test.rule", "title": "Test rule",
+        "applicability": {"stage": "source"},
+        "condition": {"mode": "one"},
+        # Lists in effect are ordinary result data, not match constraints.
+        "effect": {"ordered_roles": ["producer", "consumer"]},
+        "citation_url": "https://example.com/spec#section",
+        "summary": "A short project-authored paraphrase.",
+    }
+    rule[field] = {"mode": ["one", "two"]}
+    payload = {
+        "schema_version": "1.0", "pack_id": "test.constraint.pack",
+        "title": "Constraint syntax", "license": "Apache-2.0",
+        "documents": [{
+            "document_id": "test.spec", "document_version": "1",
+            "title": "Test specification", "official_url": "https://example.com/spec",
+            "publisher": "Example",
+        }],
+        "rules": [rule],
+    }
+    with pytest.raises(KnowledgePackError, match="explicit one_of"):
+        load_pack(payload)
+
+    rule[field] = {"mode": {"one_of": ["one", "two"]}}
+    loaded = load_pack(payload)
+    assert loaded.rules[0].effect["ordered_roles"] == ["producer", "consumer"]
+
+
+def test_mutated_rule_bare_applicability_list_fails_closed() -> None:
+    rule = KnowledgeCatalog.builtin().packs[0].rules[0]
+    rule.applicability["stage"] = ["source", "schedule"]
+    assert not matches_applicability(rule, {
+        "vendor": "amd", "tool": "vitis_hls",
+        "tool_version": "2024.2", "stage": "source",
+    })
 
 
 def test_version_and_applicability_filters_fail_closed():
@@ -42,16 +93,22 @@ def test_version_and_applicability_filters_fail_closed():
     assert catalog.filter(document_id="amd.ug1399", document_version="2023.1") == []
 
     cosim = catalog.filter(
-        applicability={"vendor": "amd", "tool": "vitis_hls", "stage": "cosim"}
+        applicability={
+            "vendor": "amd", "tool": "vitis_hls",
+            "tool_version": "2024.2", "stage": "cosim",
+        }
     )
     assert {rule.rule_id for rule in cosim} == {
         "dataflow.dynamic_results_are_workload_scoped",
-        "directive.requested_effective_achieved",
+        "verification.cosim_is_workload_scoped",
     }
     dataflow_rule = next(rule for rule in rules
                          if rule.rule_id == "dataflow.dynamic_results_are_workload_scoped")
     assert matches_applicability(
-        dataflow_rule, {"vendor": "AMD", "tool": "VITIS_HLS", "stage": "COSIM"}
+        dataflow_rule, {
+            "vendor": "AMD", "tool": "VITIS_HLS",
+            "tool_version": "2024.2", "stage": "COSIM",
+        }
     )
     assert not matches_applicability(dataflow_rule, {"vendor": "amd", "tool": "vitis_hls"})
     assert filter_rules([dataflow_rule], applicability={"vendor": "amd", "tool": "vivado"}) == []

@@ -45,5 +45,27 @@ def test_audited_vendor_symbol_does_not_trigger_short_marker() -> None:
     )
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-32", "utf-32-be"])
+def test_wide_unicode_cannot_bypass_public_boundary_scan(encoding: str) -> None:
+    private_marker = "hlsgraph" + "-research"
+    private_path = "D:" + "\\hlsgraph\\private-work"
+    payload = f"{private_marker}\n{private_path}".encode(encoding)
+    issues = AUDIT._scan("docs/wide.txt", payload)
+    assert any("non-public repository identifier" in issue for issue in issues)
+    assert any("Windows absolute path" in issue for issue in issues)
+
+
+def test_source_tree_scan_normalizes_utf16(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "wide.txt").write_text(
+        "research" + "-integration\nC:" + "\\Users\\private-user\\work",
+        encoding="utf-16",
+    )
+    issues = AUDIT._audit_source_tree(tmp_path)
+    assert any("non-public roadmap document" in issue for issue in issues)
+    assert any("Windows absolute path" in issue for issue in issues)
+
+
 def test_current_public_source_tree_passes_boundary_audit() -> None:
     assert AUDIT._audit_source_tree(ROOT) == []

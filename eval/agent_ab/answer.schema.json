@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HLSGraph public A/B evaluation answer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "claims", "uncertainties"],
+  "properties": {
+    "answer": {"type": "string", "minLength": 1, "maxLength": 12000},
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "criterion_id", "statement", "truth_plane", "stage", "authority", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-zA-Z0-9_.-]{1,64}$"},
+          "criterion_id": {"type": "string", "pattern": "^c[0-9]{2}$"},
+          "statement": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "^[^\\r\\n]+$"},
+          "truth_plane": {
+            "enum": ["design_fact", "synthetic_observation", "tool_observation", "knowledge_guidance", "prediction", "unknown"]
+          },
+          "stage": {"type": ["string", "null"], "maxLength": 64},
+          "authority": {"type": "string", "minLength": 1, "maxLength": 128},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line_start", "line_end"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                "line_start": {"type": "integer", "minimum": 1},
+                "line_end": {"type": "integer", "minimum": 1},
+                "evidence_id": {"type": ["string", "null"], "maxLength": 256}
+              }
+            }
+          }
+        }
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "maxLength": 1000}
+    }
+  }
+}

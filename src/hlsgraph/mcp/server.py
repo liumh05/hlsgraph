@@ -2,25 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any
 
 from .service import ReadOnlyMcpService
 
 
-def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> Any:
-    """Create a FastMCP server, importing the optional dependency only on demand."""
-    try:
-        from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:  # pragma: no cover - depends on optional environment
-        raise RuntimeError("MCP support requires `pip install hlsgraph[mcp]`") from exc
-
-    tools = ReadOnlyMcpService(project_root, snapshot_id=snapshot_id)
-    mcp = FastMCP(
-        "hlsgraph",
-        instructions=("Read-only deterministic HLS architecture facts. Never treat software calls "
-                      "as hardware topology or predictions as synthesis observations."),
-    )
+def _register_legacy_tools(mcp: Any, tools: ReadOnlyMcpService) -> None:
+    """Register the v0.2 narrow tools only under explicit operator opt-in."""
 
     @mcp.tool()
     def overview(depth: int = 1, top_k: int = 12) -> dict[str, Any]:
@@ -68,20 +58,15 @@ def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> A
                          stages: list[str] | None = None,
                          limit: int = 100) -> dict[str, Any]:
         """Read opt-in deterministic feature evidence without outcome data."""
-        return tools.feature_evidence(
-            entity_id, predicates or (), stages or (), limit,
-        )
+        return tools.feature_evidence(entity_id, predicates or (), stages or (), limit)
 
     @mcp.tool()
     def correspondences(entity_id: str | None = None,
                         other_snapshot_id: str | None = None,
                         kinds: list[str] | None = None,
-                        direction: str = "both",
-                        limit: int = 100) -> dict[str, Any]:
+                        direction: str = "both", limit: int = 100) -> dict[str, Any]:
         """Read explicit entity mappings; ambiguous candidates remain unresolved."""
-        return tools.correspondences(
-            entity_id, other_snapshot_id, kinds or (), direction, limit,
-        )
+        return tools.correspondences(entity_id, other_snapshot_id, kinds or (), direction, limit)
 
     @mcp.tool()
     def compare(other_snapshot_id: str) -> dict[str, Any]:
@@ -126,6 +111,42 @@ def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> A
         return tools.knowledge(query, document_id, document_version, vendor, tool,
                                tool_version, stage, limit)
 
+
+def create_mcp(project_root: str | Path, *, snapshot_id: str | None = None) -> Any:
+    """Create a FastMCP server with one strong retrieval tool by default."""
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:  # pragma: no cover - optional environment
+        raise RuntimeError("MCP support requires `pip install hlsgraph[mcp]`") from exc
+
+    mode = os.environ.get("HLSGRAPH_MCP_TOOLS", "explore").strip().casefold() or "explore"
+    if mode not in {"explore", "all"}:
+        raise ValueError("HLSGRAPH_MCP_TOOLS must be 'explore' or 'all'")
+    tools = ReadOnlyMcpService(project_root, snapshot_id=snapshot_id)
+    mcp = FastMCP(
+        "hlsgraph",
+        instructions=(
+            "Use explore first for one bounded, evidence-backed HLS answer. Facts, guidance, "
+            "and predictions are separate truth planes. Software calls and LLVM CFG are not "
+            "hardware topology. Re-read source only when explore reports stale, incomplete, "
+            "ambiguous, or low-confidence context."
+        ),
+    )
+
+    @mcp.tool()
+    def explore(query: str, snapshot_id: str | None = None,
+                scope_id: str | None = None, view: str = "architecture",
+                max_chars: int | None = None,
+                include_private_snippets: bool = False,
+                include_predictions: bool = False) -> dict[str, Any]:
+        """Retrieve ranked HLS facts, evidence, flow, and applicable guidance in one call."""
+        return tools.explore(
+            query, snapshot_id, scope_id, view, max_chars,
+            include_private_snippets, include_predictions,
+        )
+
+    if mode == "all":
+        _register_legacy_tools(mcp, tools)
     return mcp
 
 

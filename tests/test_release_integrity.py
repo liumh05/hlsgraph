@@ -25,6 +25,7 @@ from hlsgraph.model import (
     Relation,
     RunStatus,
     SourceAnchor,
+    ToolOutputSpec,
     ToolRun,
     ToolchainContext,
     VerificationKind,
@@ -36,6 +37,14 @@ from hlsgraph.query import CoreService, ExploreSpec, QuerySpec
 from hlsgraph.sdk import Project
 from hlsgraph.store import StoreError
 from hlsgraph.version import SCHEMA_VERSION
+from tests.attested_run_support import commit_attested
+from tests.typed_report_support import (
+    parsed_report_observation,
+    write_csim_json,
+    write_cosim_report,
+    write_vivado_timing,
+    write_vivado_utilization,
+)
 
 
 def _bundle(tmp_path, project_id: str = "test.release.integrity"):
@@ -54,6 +63,25 @@ def _bundle(tmp_path, project_id: str = "test.release.integrity"):
         id="amd.unified.2024_2", vendor="amd", name="unified", version="2024.2",
         environment_hash="e" * 64,
     )]
+    manifest.stage_outputs = {
+        "csim": [
+            ToolOutputSpec(path=name, kind="amd.vitis.csim_result", required=False)
+            for name in ("atomic-csim.json", "csim-a.rpt")
+        ],
+        "rtl_cosim": [ToolOutputSpec(
+            path="rtl_cosim-b.rpt", kind="amd.vitis.cosim_rpt", required=False,
+        )],
+        "post_route": [
+            ToolOutputSpec(
+                path="post-route-util.rpt",
+                kind="amd.vivado.post_route_utilization", required=False,
+            ),
+            ToolOutputSpec(
+                path="post-route-timing.rpt",
+                kind="amd.vivado.post_route_timing", required=False,
+            ),
+        ],
+    }
     bundle = GraphBundle.create(tmp_path, manifest)
     snapshot = bundle.snapshot()
     artifact = bundle.store.artifacts(snapshot.id)[0]
@@ -287,15 +315,15 @@ def test_run_output_artifact_and_gate_evidence_have_atomic_write_path(tmp_path):
     report = _managed_report(
         bundle, run, "atomic-csim.json", "amd.vitis.csim_result",
     )
-    observation = Observation(
-        snapshot.id, kernel.id, "csim.status", "pass", "csim",
-        AuthorityClass.VERIFICATION_EVIDENCE, run_id=run.id, artifact_id=report.id,
+    observation = parsed_report_observation(
+        bundle, report, predicate="csim.exit_code", value=0,
+        subject_id=kernel.id, run_id=run.id,
     )
     run.output_artifact_ids = [report.id]
     run.gates = [GateResult(
         GateKind.CORRECTNESS, GateStatus.PASS, evidence_ids=[observation.id],
     )]
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[report], observations=[observation],
     )
     assert bundle.store.runs(snapshot.id)[0].output_artifact_ids == [report.id]
@@ -304,14 +332,14 @@ def test_run_output_artifact_and_gate_evidence_have_atomic_write_path(tmp_path):
 
     spoof = _bound_tool_run(bundle, snapshot, "csim", "d")
     spoof.output_artifact_ids = [source_artifact.id]
-    with pytest.raises(StoreError, match="contract mismatch"):
+    with pytest.raises(StoreError, match="StageOrchestrator-issued authorization"):
         bundle.store.commit_run_result(run=spoof)
     undeclared_run = _bound_tool_run(bundle, snapshot, "csim", "e")
     undeclared = ArtifactRef(
         "tool.report", ".hlsgraph/artifacts/undeclared/report.json", "e" * 64, 1,
         producer_run_id=undeclared_run.id,
     )
-    with pytest.raises(StoreError, match="contract mismatch"):
+    with pytest.raises(StoreError, match="StageOrchestrator-issued authorization"):
         bundle.store.commit_run_result(run=undeclared_run, artifacts=[undeclared])
 
     missing = ArtifactRef(
@@ -362,10 +390,19 @@ def _bound_tool_run(bundle, snapshot, stage: str, request_char: str) -> ToolRun:
 
 def _managed_report(bundle, run, name, kind, metadata=None):
     source = bundle.project_root / f"fixture-{name}"
-    source.write_text(f"sanitized {name}\n", encoding="utf-8")
+    if kind == "amd.vitis.csim_result":
+        write_csim_json(source)
+    elif kind in {"amd.vitis.cosim_rpt", "amd.vitis.cosim_report"}:
+        write_cosim_report(source)
+    elif kind == "amd.vivado.post_route_utilization":
+        write_vivado_utilization(source, lut=10)
+    elif kind == "amd.vivado.post_route_timing":
+        write_vivado_timing(source, wns=0.1)
+    else:
+        source.write_text(f"sanitized {name}\n", encoding="utf-8")
     artifact, _path, _created = bundle.prepare_managed_artifact(
         source, kind=kind, role="tool_output", producer_run_id=run.id,
-        metadata=metadata or {},
+        metadata={**(metadata or {}), "declared_output_path": name},
     )
     return artifact
 
@@ -384,26 +421,24 @@ def _commit_verification_stage(
     run.output_artifact_ids = [artifact.id]
     if stage == "csim":
         observations = [
-            Observation(
-                snapshot.id, kernel.id, predicate, 0, "csim",
-                AuthorityClass.VERIFICATION_EVIDENCE, run_id=run.id,
-                artifact_id=artifact.id, workload_id=workload, unit="count",
+            parsed_report_observation(
+                bundle, artifact, predicate=predicate, value=0,
+                subject_id=kernel.id, run_id=run.id,
             )
             for predicate in (
                 "csim.exit_code", "csim.mismatches", "csim.assertions_failed",
             )
         ]
     else:
-        observations = [Observation(
-            snapshot.id, kernel.id, "cosim.status", "pass", "cosim",
-            AuthorityClass.VERIFICATION_EVIDENCE, run_id=run.id,
-            artifact_id=artifact.id, workload_id=workload,
+        observations = [parsed_report_observation(
+            bundle, artifact, predicate="cosim.status", value="pass",
+            subject_id=kernel.id, run_id=run.id,
         )]
     verification = VerificationResult(
         snapshot.id, kind, GateStatus.PASS, run_id=run.id,
         workload_id=workload, evidence_ids=[item.id for item in observations],
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[artifact], observations=observations,
         verifications=[verification],
     )
@@ -430,15 +465,13 @@ def test_verified_requires_recursive_real_tool_truth_and_failure_dominates(tmp_p
         {"scope": {**scope, "clock": "default"}},
     )
     run.output_artifact_ids = [utilization.id, timing_report.id]
-    resource = Observation(
-        snapshot.id, kernel.id, "resource.lut", 10, "post_route",
-        AuthorityClass.TOOL_OBSERVATION, run_id=run.id, artifact_id=utilization.id,
-        unit="count",
+    resource = parsed_report_observation(
+        bundle, utilization, predicate="resource.lut", value=10.0,
+        subject_id=kernel.id, run_id=run.id,
     )
-    timing = Observation(
-        snapshot.id, kernel.id, "timing.wns_ns", 0.1, "post_route",
-        AuthorityClass.TOOL_OBSERVATION, run_id=run.id, artifact_id=timing_report.id,
-        unit="ns",
+    timing = parsed_report_observation(
+        bundle, timing_report, predicate="timing.wns_ns", value=0.1,
+        subject_id=kernel.id, run_id=run.id,
     )
     fits = Derivation(
         snapshot.id, kernel.id, "gate.resource_fits", True,
@@ -449,7 +482,7 @@ def test_verified_requires_recursive_real_tool_truth_and_failure_dominates(tmp_p
         snapshot.id, kernel.id, "gate.post_route_timing", True,
         "hlsgraph.gate.wns_nonnegative", "1", [timing.id], stage="post_route",
     )
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=run, artifacts=[utilization, timing_report], observations=[resource, timing],
         derivations=[fits, met],
     )

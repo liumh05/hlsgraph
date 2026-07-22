@@ -23,6 +23,7 @@ from hlsgraph.model import (
     Relation,
     RunStatus,
     SourceAnchor,
+    ToolOutputSpec,
     ToolRun,
     ToolchainContext,
     VerificationKind,
@@ -32,6 +33,8 @@ from hlsgraph.model import (
 from hlsgraph.query import CoreService
 from hlsgraph.sdk import Project
 from hlsgraph.store import StoreError
+from tests.attested_run_support import commit_attested
+from tests.typed_report_support import parsed_report_observation, write_csim_json
 
 
 def _write_manifest(root: Path, *, project_id: str) -> Path:
@@ -158,6 +161,9 @@ def _two_snapshot_ledger(tmp_path):
         "test.evidence_integrity", "evidence", "dut", "kernel.cpp",
     )
     manifest.stage_commands = {"csim": ["vitis_hls", "--csim"]}
+    manifest.stage_outputs = {"csim": [ToolOutputSpec(
+        path="reports/valid-csim.json", kind="amd.vitis.csim_result",
+    )]}
     manifest.toolchains = [ToolchainContext(
         id="amd.vitis.2024_2", vendor="amd", name="vitis_hls", version="2024.2",
         environment_hash="e" * 64,
@@ -298,17 +304,19 @@ def test_derivation_and_verification_evidence_must_exist_in_the_same_snapshot(tm
         },
     )
     source = tmp_path / "valid-csim.json"
-    source.write_text('{"status":"pass"}\n', encoding="utf-8")
+    write_csim_json(source)
     report, _path, _created = bundle.prepare_managed_artifact(
         source, kind="amd.vitis.csim_result", role="tool_output",
-        producer_run_id=verified_run.id, metadata={"workload_id": "tb.valid"},
+        producer_run_id=verified_run.id, metadata={
+            "workload_id": "tb.valid",
+            "declared_output_path": "reports/valid-csim.json",
+        },
     )
     verified_observations = [
-        Observation(
-            snapshot_id=first.id, subject_id=first_entity.id,
-            predicate=predicate, value=0, unit="count", stage="csim",
-            authority=AuthorityClass.VERIFICATION_EVIDENCE,
-            run_id=verified_run.id, artifact_id=report.id, workload_id="tb.valid",
+        parsed_report_observation(
+            bundle, report, predicate=predicate, value=0,
+            subject_id=first_entity.id, run_id=verified_run.id,
+            snapshot_id=first.id,
         )
         for predicate in (
             "csim.exit_code", "csim.mismatches", "csim.assertions_failed",
@@ -320,7 +328,7 @@ def test_derivation_and_verification_evidence_must_exist_in_the_same_snapshot(tm
         evidence_ids=[item.id for item in verified_observations],
     )
     verified_run.output_artifact_ids = [report.id]
-    bundle.store.commit_run_result(
+    commit_attested(bundle,
         run=verified_run, artifacts=[report], observations=verified_observations,
         verifications=[valid_verification],
     )

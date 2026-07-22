@@ -22,6 +22,11 @@ from ..model import (
     stable_hash,
 )
 from .base import ExtractionContext, ExtractionResult
+from .directive_identity import (
+    bind_directive_identity,
+    directive_identity_metadata,
+    resolve_directive_variable_operand,
+)
 
 
 _TCL_DIRECTIVE = re.compile(r"^\s*set_directive_([A-Za-z0-9_]+)\s+(.+?)\s*$", re.I)
@@ -371,6 +376,21 @@ class ExternalDirectiveExtractor:
                                       start_column=1, end_line=line_number,
                                       end_column=len(line) + 1)
                 target = _resolve_scope(existing, scope)
+                if (directive_kind == "DEPENDENCE" and target is not None
+                        and target.kind not in {
+                            "hls.kernel", "hls.function", "hls.loop",
+                        }):
+                    target = None
+                operand_target = (
+                    resolve_directive_variable_operand(
+                        existing, target, options.get("variable"),
+                    )
+                    if directive_kind == "DEPENDENCE" else None
+                )
+                identity_complete = bool(
+                    target is not None
+                    and (directive_kind != "DEPENDENCE" or operand_target is not None)
+                )
                 directive = Entity(
                     kind="hls.directive", name=directive_kind,
                     qualified_name=f"{relative}:{line_number}:{directive_kind}",
@@ -385,8 +405,12 @@ class ExternalDirectiveExtractor:
                                if origin == "tcl" else "hlsgraph.config_literal_v1"
                            )},
                     anchors=[anchor],
-                    completeness=(Completeness.COMPLETE if target
+                    completeness=(Completeness.COMPLETE if identity_complete
                                   else Completeness.AMBIGUOUS),
+                )
+                bind_directive_identity(
+                    directive, target, scope_resolution="external_exact" if target else None,
+                    operand_target=operand_target,
                 )
                 graph.add_entity(directive)
                 if target:
@@ -404,7 +428,9 @@ class ExternalDirectiveExtractor:
                         stage=Stage.SOURCE.value,
                         authority=AuthorityClass.DECLARED_CONSTRAINT,
                         artifact_id=artifact.id, anchor=anchor,
-                        metadata={"directive_kind": directive_kind, "scope_id": target.id,
+                        completeness=directive.completeness,
+                        metadata={"directive_kind": directive_kind,
+                                  **directive_identity_metadata(directive),
                                   "origin": origin, "precedence": precedence,
                                   "parse_policy": directive.attrs["parse_policy"]},
                     ))
@@ -413,6 +439,17 @@ class ExternalDirectiveExtractor:
                         snapshot_id=context.snapshot.id, code="directive.unresolved_scope",
                         severity=DiagnosticSeverity.WARNING,
                         message=f"could not deterministically resolve external scope {scope!r}",
+                        stage=Stage.SOURCE.value, subject_id=directive.id,
+                        artifact_id=artifact.id, anchor=anchor,
+                    ))
+                if (target is not None and directive_kind == "DEPENDENCE"
+                        and operand_target is None):
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.unresolved_operand",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=("could not deterministically resolve DEPENDENCE operand "
+                                 f"{options.get('variable')!r} inside scope {scope!r}"),
                         stage=Stage.SOURCE.value, subject_id=directive.id,
                         artifact_id=artifact.id, anchor=anchor,
                     ))
@@ -428,18 +465,32 @@ class ExternalDirectiveExtractor:
 def resolve_directives(result: ExtractionResult) -> None:
     """Resolve only declared precedence; this never claims a tool applied a directive."""
     graph = result.graph
-    annotations: dict[str, Relation] = {
-        relation.src: relation for relation in graph.relations.values()
-        if relation.kind == "hls.annotates"
+    annotation_candidates: dict[str, list[Relation]] = defaultdict(list)
+    for relation in graph.relations.values():
+        if relation.kind == "hls.annotates":
+            annotation_candidates[relation.src].append(relation)
+    annotations = {
+        directive_id: values[0]
+        for directive_id, values in annotation_candidates.items()
+        if len(values) == 1
     }
-    groups: dict[tuple[str, str], list[Entity]] = defaultdict(list)
+    groups: dict[tuple[str, str, str], list[Entity]] = defaultdict(list)
     for entity in graph.entities.values():
         if entity.kind != "hls.directive" or entity.id not in annotations:
             continue
         kind = str(entity.attrs.get("directive_kind", entity.name)).upper()
-        groups[(annotations[entity.id].dst, kind)].append(entity)
-    existing_effective = {(item.subject_id, item.predicate) for item in result.observations}
-    for (scope_id, kind), directives in groups.items():
+        operand_id = ""
+        if kind == "DEPENDENCE":
+            raw_operand = entity.attrs.get("variable_id")
+            if (str(entity.completeness) != "complete"
+                    or not isinstance(raw_operand, str) or not raw_operand):
+                # An unresolved operand cannot participate in precedence or
+                # become a selected declaration for another variable.
+                continue
+            operand_id = raw_operand
+        groups[(annotations[entity.id].dst, kind, operand_id)].append(entity)
+    existing_selected = {(item.subject_id, item.predicate) for item in result.observations}
+    for (scope_id, kind, _operand_id), directives in groups.items():
         directives.sort(key=lambda item: (int(item.attrs.get("precedence", 0)), item.id))
         highest = max(int(item.attrs.get("precedence", 0)) for item in directives)
         top = [item for item in directives
@@ -456,23 +507,26 @@ def resolve_directives(result: ExtractionResult) -> None:
                 code="directive.ambiguous_same_precedence",
                 severity=DiagnosticSeverity.WARNING,
                 message=(f"{kind} on {scope_id} has conflicting declarations at the "
-                         "same precedence; no effective declaration was inferred"),
+                         "same precedence; no selected declaration was inferred"),
                 stage=Stage.SOURCE.value, subject_id=scope_id,
                 metadata={"candidate_directive_ids": sorted(item.id for item in top),
                           "resolution_policy": "hlsgraph.declared_precedence_v1"},
             ))
             continue
         winner = top[-1]
-        winner.attrs["state"] = "effective_declared"
-        key = (winner.id, "directive.effective")
-        if key not in existing_effective:
+        winner.attrs["state"] = "selected_declared"
+        key = (winner.id, "directive.declared_selected")
+        if key not in existing_selected:
             anchor = winner.anchors[0] if winner.anchors else None
             result.observations.append(Observation(
                 snapshot_id=winner.snapshot_id, subject_id=winner.id,
-                predicate="directive.effective", value=winner.attrs.get("options") or True,
+                predicate="directive.declared_selected",
+                value=winner.attrs.get("options") or True,
                 stage=Stage.SOURCE.value, authority=AuthorityClass.DECLARED_CONSTRAINT,
                 artifact_id=anchor.artifact_id if anchor else None, anchor=anchor,
-                metadata={"directive_kind": kind, "scope_id": scope_id,
+                completeness=winner.completeness,
+                metadata={"directive_kind": kind,
+                          **directive_identity_metadata(winner),
                           "resolution_policy": "hlsgraph.declared_precedence_v1",
                           "tool_applied": False},
             ))

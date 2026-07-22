@@ -1,6 +1,6 @@
 # Related systems and research references
 
-HLSGraph is an independently implemented infrastructure project. The v0.1
+HLSGraph is an independently implemented infrastructure project. The v0.3
 distribution does **not** vendor MLIR, LLVM, CIRCT, ScaleHLS, Dynamatic, Vitis,
 or Vivado source code or binaries. Names below identify interchange formats,
 optional adapters, and compiler or hardware-IR foundations; they do not imply
@@ -9,6 +9,27 @@ component's own terms.
 
 When publishing results produced with an adapter, cite the upstream system and
 the exact tool/version used in addition to HLSGraph's `CITATION.cff`.
+
+## AXI specification boundary
+
+The public AXI pack has one machine-applicable rule: the AMD Vitis HLS 2024.2
+`INTERFACE` directive is a requested mode attached to one exactly resolved port
+scope. The binding requires the current directive instance, its explicit
+operand link, the resolved port identity, source scope resolution, and the
+matching AMD tool context. It does not prove that an adapter was generated or
+that an external peer, address map, or platform connection exists.
+
+Arm IHI0022 H.c and IHI0051 B remain versioned document-and-section references
+only. The current extractors do not produce a closed interface contract with an
+exact Arm specification revision, interface instance, endpoint roles, channel
+or signal direction, and the corresponding evidence identities. In particular,
+the source extractor records a generic `hls.port` direction as `unknown`, a
+generic `hls.stream` does not prove AXI4-Stream, and `hls.streams_to` is an
+internal directional design-evidence relation rather than proof of an external
+AXI connection. Consequently those Arm sections are `citation_only`, while
+`hls.port`, `hls.stream`, and `hls.streams_to` remain explicitly
+`no_normative`. A future interface-contract extractor must emit all required
+instance-local evidence before those references can become fail-closed rules.
 
 ## Implementation specifications and version policy
 
@@ -33,9 +54,26 @@ or source commit, pass stage, target, and artifact hash. The HLSGraph extractor
 version identifies HLSGraph's parser contract; it must not be presented as an
 MLIR, LLVM, CIRCT, ScaleHLS, or Dynamatic specification version. A native plugin
 must publish the upstream revision and dialect set against which it was tested.
+The immutable revision recorded by a knowledge rule pins only the cited
+specification. It never supplies the `artifact_revision` of imported IR.
+The v0.3 public OpenIR pack deliberately contains no executable bindings. Its
+MLIR, LLVM, and CIRCT entries are citation metadata, and each supported target
+is explicitly `no_normative`. The default text readers emit structural
+evidence, not an exact language-spec compatibility claim. A parser name,
+artifact hash, dialect spelling, or even a caller-constructed attestation in
+graph metadata cannot authorize normative guidance. That remains fail-closed
+until a future persisted capability contract is designed and audited.
+
+Structural evidence keeps its narrower meaning: container presence is not CFG
+evidence, a generic instruction is not a memory access, and an MLIR mapping is
+usable only as an explicit typed mapping record, never as a language-rule
+activation. Unknown or unresolved locations remain diagnostics.
+`cross.projects_to` and `handshake.dataflow` do not acquire normative language
+bindings, and aggregate histograms remain deterministic feature evidence with
+their own completeness and provenance rather than specification conformance.
 
 ScaleHLS and Dynamatic are implementation references rather than bundled
-dependencies in v0.1:
+dependencies in v0.3:
 
 - ScaleHLS implementation and license:
   [source](https://github.com/UIUC-ChenLab/scalehls) and
@@ -54,6 +92,16 @@ Support for an operation name in the experimental text reader is not a claim of
 full conformance to any of these projects. ScaleHLS-, Dynamatic-, or
 CIRCT-specific semantic projection should be supplied by a separately versioned
 plugin and validated against fixtures produced by its pinned upstream revision.
+Accordingly, the built-in ScaleHLS and Dynamatic coverage entries are
+`citation_only`, not executable knowledge rules: the current public tree has no
+producer-specific adapter capable of satisfying the required provenance.
+The native `handshake.dataflow` evidence relation is explicitly
+`hardware_topology=false`; its artifact-anchored SSA def-use operands remain
+structural evidence and do not activate a CIRCT language rule. Metadata cannot
+upgrade that evidence.
+The current knowledge pack intentionally has no normative binding from this IR
+evidence to HLSGraph's canonical `hls.process`, `hls.buffer`, or
+`hls.streams_to` projection.
 
 ## Compiler and hardware-IR foundations
 

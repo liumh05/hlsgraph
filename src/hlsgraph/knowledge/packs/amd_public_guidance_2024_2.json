@@ -1,12 +1,14 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "pack_id": "hlsgraph.amd.public_guidance.2024_2",
-  "title": "AMD HLS and implementation interpretation rules (2024.2 references)",
+  "title": "AMD HLS and implementation interpretation rules for the supported 2024.2 surface",
   "license": "Apache-2.0",
   "metadata": {
-    "content_policy": "Project-authored paraphrases and citations only; referenced documents are not redistributed.",
-    "reviewed_by": "HLSGraph maintainers",
-    "review_status": "manual"
+    "binding_condition_contract": "hlsgraph.binding_condition_entailment.v1",
+    "content_policy": "Project-authored short paraphrases and citations only; referenced documents are not redistributed.",
+    "review_status": "unreviewed",
+    "coverage_boundary": "AMD Vitis HLS and Vivado 2024.2, one kernel/component, current public extractors",
+    "hlsgraph_local_derivation_policy": "Stable hashes and snapshot membership, fail-closed evidence closure, mapping ambiguity handling, and correctness/resource/timing gate construction are HLSGraph policies. Vendor citations establish only the source semantics stated by each rule."
   },
   "documents": [
     {
@@ -35,6 +37,24 @@
       "publisher": "Advanced Micro Devices, Inc.",
       "kind": "command_reference",
       "license_note": "Reference metadata only; the guide is not included in HLSGraph."
+    },
+    {
+      "document_id": "amd.ug906",
+      "document_version": "2024.2",
+      "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques",
+      "official_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/",
+      "publisher": "Advanced Micro Devices, Inc.",
+      "kind": "user_guide",
+      "license_note": "Reference metadata only; the guide is not included in HLSGraph."
+    },
+    {
+      "document_id": "amd.ug907",
+      "document_version": "2024.2",
+      "title": "Vivado Design Suite User Guide: Power Analysis and Optimization",
+      "official_url": "https://docs.amd.com/r/2024.2-English/ug907-vivado-power-analysis-optimization/",
+      "publisher": "Advanced Micro Devices, Inc.",
+      "kind": "user_guide",
+      "license_note": "Reference metadata only; the guide is not included in HLSGraph."
     }
   ],
   "rules": [
@@ -44,19 +64,155 @@
       "section": "Failure to Satisfy Optimization Directives",
       "rule_id": "directive.requested_effective_achieved",
       "title": "Keep requested directives separate from achieved behavior",
-      "applicability": {
-        "vendor": "amd",
-        "tool": "vitis_hls"
-      },
-      "condition": {
-        "requested_directive_present": true
-      },
-      "effect": {
-        "record_as": "declared_constraint",
-        "requires_separate_tool_observation": true
-      },
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": {"one_of": ["source", "schedule"]}},
+      "condition": {"requested_directive_present": true},
+      "effect": {"record_as": "declared_constraint", "requires_separate_tool_observation": true},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Failure-to-Satisfy-Optimization-Directives",
-      "summary": "An optimization request can be relaxed or remain unmet, so the request and the tool-reported result must be stored separately.",
+      "summary": "An optimization request can be relaxed or unmet, so its declared, tool-effective, and achieved states must remain separate.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS dataflow",
+      "rule_id": "directive.dataflow_has_explicit_scope",
+      "title": "Bind DATAFLOW to the region it transforms",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "DATAFLOW"},
+      "effect": {"requires_scope": true, "may_create_channels": true, "tool_confirmation_required": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-dataflow",
+      "summary": "DATAFLOW applies to a function or loop region and asks the tool to overlap eligible tasks through channels; the pragma alone does not prove the resulting topology.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS pipeline",
+      "rule_id": "directive.pipeline_ii_is_requested",
+      "title": "Treat pipeline II as a request until scheduling",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "PIPELINE"},
+      "effect": {"requires_scope": true, "separate_target_and_achieved_ii": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-pipeline",
+      "summary": "PIPELINE requests concurrent iterations or calls, but dependencies and resources can force an achieved II above the requested value.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS unroll",
+      "rule_id": "directive.unroll_requests_replication",
+      "title": "Scope UNROLL and distinguish its factor from achieved structure",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "UNROLL"},
+      "effect": {"requires_loop_scope": true, "may_replicate_operations": true, "tool_confirmation_required": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-unroll",
+      "summary": "UNROLL requests concurrent loop iterations and can replicate operations; its factor is a declaration until the transformed schedule is observed.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS array_partition",
+      "rule_id": "directive.array_partition_requests_banking",
+      "title": "Keep ARRAY_PARTITION scope, mode, dimension, and factor",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "ARRAY_PARTITION"},
+      "effect": {"requires_variable_scope": true, "may_create_memory_banks": true, "tool_confirmation_required": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-array_partition",
+      "summary": "ARRAY_PARTITION requests block, cyclic, or complete partitioning to expose parallel accesses, with a resource tradeoff that must be confirmed by tool evidence.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS interface",
+      "rule_id": "directive.interface_is_port_contract",
+      "title": "Bind INTERFACE to a concrete port",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "INTERFACE"},
+      "effect": {"requires_port_scope": true, "declares_protocol_request": true, "tool_confirmation_required": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-interface",
+      "summary": "INTERFACE selects a protocol for a named port; it is a scoped contract request, not proof of system connectivity.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS stream",
+      "rule_id": "directive.stream_depth_is_requested",
+      "title": "Treat STREAM depth as a scoped channel request",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "STREAM"},
+      "effect": {"requires_variable_scope": true, "separate_requested_and_reported_depth": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-stream",
+      "summary": "STREAM requests channel implementation details such as depth for a variable; reported FIFO structure and dynamic occupancy remain separate evidence.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS dependence",
+      "rule_id": "directive.dependence_is_user_assertion",
+      "title": "Do not turn DEPENDENCE into a proved dependence fact",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "DEPENDENCE"},
+      "effect": {"requires_enclosing_scope": ["hls.loop", "hls.function", "hls.kernel"], "authority": "declared_constraint", "proof_required_for_static_fact": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-dependence",
+      "summary": "DEPENDENCE supplies user information for an enclosing loop or function; its optional variable or class selector must not be represented as compiler-proved dependence evidence without independent proof.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "The declared-constraint authority and the prohibition on promotion to a proved static fact are HLSGraph truth-boundary policies."}
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS loop_tripcount",
+      "rule_id": "directive.tripcount_guides_estimates",
+      "title": "Keep LOOP_TRIPCOUNT separate from proved bounds",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "LOOP_TRIPCOUNT"},
+      "effect": {"requires_loop_scope": true, "authority": "declared_constraint", "does_not_change_functionality": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-loop_tripcount",
+      "summary": "LOOP_TRIPCOUNT supplies bounds for reporting and estimation; it is not a proof of the source loop's runtime bound.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "pragma HLS inline",
+      "rule_id": "directive.inline_changes_hierarchy",
+      "title": "Treat INLINE as a hierarchy-transform request",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "source"},
+      "condition": {"directive_kind": "INLINE"},
+      "effect": {"requires_function_scope": true, "may_remove_hierarchy_boundary": true, "tool_confirmation_required": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-inline",
+      "summary": "INLINE can remove a function boundary and expose operations to surrounding optimization; achieved hierarchy must come from compiler or report evidence.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Running C Simulation",
+      "rule_id": "verification.csim_is_workload_scoped",
+      "title": "Bind C simulation correctness to its testbench",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "csim"},
+      "condition": {"csim_result_present": true},
+      "effect": {"authority": "verification_evidence", "requires_workload_id": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Running-C-Simulation",
+      "summary": "A C simulation pass or failure is evidence for the executed testbench and inputs, not a universal correctness proof.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Running C/RTL Co-Simulation",
+      "rule_id": "verification.cosim_is_workload_scoped",
+      "title": "Bind RTL cosimulation results to their testbench",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "cosim"},
+      "condition": {"cosim_result_present": true},
+      "effect": {"authority": "verification_evidence", "requires_workload_id": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Running-C/RTL-Co-Simulation",
+      "summary": "RTL cosimulation status, latency, interval, mismatch, and deadlock evidence describe the executed testbench and inputs.",
       "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
     },
     {
@@ -65,20 +221,11 @@
       "section": "Dataflow Viewer",
       "rule_id": "dataflow.dynamic_results_are_workload_scoped",
       "title": "Scope dataflow profiling results to the cosimulation workload",
-      "applicability": {
-        "vendor": "amd",
-        "tool": "vitis_hls",
-        "stage": "cosim"
-      },
-      "condition": {
-        "dataflow_profiling_enabled": true
-      },
-      "effect": {
-        "requires_workload_id": true,
-        "authority": "verification_evidence"
-      },
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "cosim"},
+      "condition": {"dataflow_profiling_enabled": true},
+      "effect": {"requires_workload_id": true, "authority": "verification_evidence"},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Dataflow-Viewer",
-      "summary": "FIFO occupancy and stall measurements produced during RTL cosimulation describe that testbench run, not every possible input workload.",
+      "summary": "FIFO occupancy and stall measurements from RTL cosimulation describe that workload, not every possible input.",
       "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
     },
     {
@@ -86,21 +233,25 @@
       "document_version": "2024.2",
       "section": "Schedule Viewer",
       "rule_id": "schedule.control_steps_are_compiler_evidence",
-      "title": "Treat schedule control steps as compiler decisions",
-      "applicability": {
-        "vendor": "amd",
-        "tool": "vitis_hls",
-        "stage": "schedule"
-      },
-      "condition": {
-        "schedule_artifact_present": true
-      },
-      "effect": {
-        "authority": "compiler_decision",
-        "preserve_source_mapping": true
-      },
+      "title": "Treat schedule and binding as compiler decisions",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "schedule"},
+      "condition": {"schedule_artifact_present": true},
+      "effect": {"authority": "compiler_decision", "preserve_source_mapping": true},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Schedule-Viewer",
-      "summary": "Operation placement in control steps is compiler schedule evidence and should retain links back to the reported operation and source location.",
+      "summary": "Control steps, pipeline stages, limiting factors, and operation-to-resource bindings are compiler evidence and should retain source mappings.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug1399",
+      "document_version": "2024.2",
+      "section": "Performance Metrics Example",
+      "rule_id": "qor.latency_and_ii_are_distinct",
+      "title": "Keep latency, interval, and initiation interval distinct",
+      "applicability": {"vendor": "amd", "tool": "vitis_hls", "tool_version": "2024.2", "stage": "schedule"},
+      "condition": {"performance_report_present": true},
+      "effect": {"preserve_metric_identity": true, "preserve_units": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/Performance-Metrics-Example",
+      "summary": "Function latency, transaction interval, loop iteration latency, and loop initiation interval are separate reported measures and must not be collapsed.",
       "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
     },
     {
@@ -109,51 +260,286 @@
       "section": "About XDC Constraints",
       "rule_id": "xdc.constraints_are_design_inputs",
       "title": "Record XDC constraints as versioned design inputs",
-      "applicability": {
-        "vendor": "amd",
-        "tool": "vivado",
-        "stage": [
-          "post_synth",
-          "post_place",
-          "post_route"
-        ]
-      },
-      "condition": {
-        "timing_or_physical_result_present": true
-      },
-      "effect": {
-        "requires_constraint_artifact": true,
-        "authority": "declared_constraint"
-      },
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": {"one_of": ["post_synth", "post_place", "post_route"]}},
+      "condition": {"constraint_artifact_present": true},
+      "effect": {"requires_constraint_artifact": true, "authority": "declared_constraint"},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug903-vivado-using-constraints/About-XDC-Constraints",
-      "summary": "Implementation results depend on the applied XDC constraints, so their identity and hash belong in the design snapshot.",
-      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+      "summary": "Implementation results depend on the XDC constraints applied at the relevant flow stage; preserve the constraint artifact with those results.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Hashing the constraint artifact into snapshot identity is an HLSGraph provenance policy."}
     },
     {
       "document_id": "amd.ug835",
       "document_version": "2024.2",
       "section": "report_timing_summary",
       "rule_id": "timing.summary_keeps_wns_tns_distinct",
-      "title": "Preserve WNS, TNS, and endpoint counts as separate observations",
-      "applicability": {
-        "vendor": "amd",
-        "tool": "vivado",
-        "stage": "post_route"
-      },
-      "condition": {
-        "timing_summary_present": true
-      },
-      "effect": {
-        "predicates": [
-          "timing.wns_ns",
-          "timing.tns_ns",
-          "timing.failing_endpoints"
-        ],
-        "gate": "post_route_timing"
-      },
+      "title": "Preserve WNS and TNS as separate stage-scoped observations",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": {"one_of": ["post_synth", "post_place", "post_route"]}},
+      "condition": {"timing_summary_present": true},
+      "effect": {"predicates": ["timing.wns_ns", "timing.tns_ns"], "preserve_report_stage": true},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug835-vivado-tcl-commands/report_timing_summary",
-      "summary": "A timing summary reports multiple timing measures; do not collapse slack, total negative slack, and failing endpoint counts into one value.",
+      "summary": "WNS and TNS are different timing-summary measures; preserve both values and the stage of the report that produced them.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug906",
+      "document_version": "2024.2",
+      "section": "Verifying Timing Signoff",
+      "rule_id": "timing.post_route_observations_are_routed_evidence",
+      "title": "Keep routed timing observations scoped to their report and stage",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": "post_route"},
+      "condition": {"post_route_timing_result_present": true},
+      "effect": {"observation_only": true, "preserve_report_identity": true, "preserve_stage": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Verifying-Timing-Signoff",
+      "summary": "A routed timing report and its critical-path observations retain their routed-design, report, and stage identity; their presence alone does not decide a timing gate.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug906",
+      "document_version": "2024.2",
+      "section": "Verifying Timing Signoff",
+      "rule_id": "timing.post_route_signoff_requires_routed_design",
+      "title": "Use routed timing evidence for the post-route timing gate",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": "post_route"},
+      "condition": {"timing_gate_requested": true},
+      "effect": {"requires_routed_design": true, "requires_separate_bus_skew_check": true, "gate": "post_route_timing"},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Verifying-Timing-Signoff",
+      "summary": "Timing signoff is checked on a fully placed and routed design, and bus skew is checked separately from the timing summary.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "No executable post-route timing gate is published until routed-design, constraints, timing-summary, and separate bus-skew evidence can be closed together."}
+    },
+    {
+      "document_id": "amd.ug906",
+      "document_version": "2024.2",
+      "section": "Analyzing the Design Congestion",
+      "rule_id": "physical.congestion_is_stage_scoped",
+      "title": "Record congestion only with placed or routed context",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": {"one_of": ["post_place", "post_route"]}},
+      "condition": {"congestion_report_present": true},
+      "effect": {"allowed_stages": ["post_place", "post_route"], "observation_only": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Analyzing-the-Design-Congestion",
+      "summary": "Congestion reporting depends on placement or routing state, so it must retain its implementation stage and report scope.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
+    },
+    {
+      "document_id": "amd.ug906",
+      "document_version": "2024.2",
+      "section": "Report Utilization",
+      "rule_id": "resource.utilization_is_stage_scoped",
+      "title": "Preserve utilization report stage and scope",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": {"one_of": ["post_synth", "post_place", "post_route"]}},
+      "condition": {"utilization_report_present": true},
+      "effect": {"preserve_stage": true, "preserve_report_scope": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug906-vivado-design-analysis/Report-Utilization",
+      "summary": "Utilization values are tied to the selected design stage and report scope, which must remain attached to each observation.",
+      "license_note": "Short project-authored paraphrase; no vendor text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Resource fit is a separate HLSGraph derivation over stage-scoped utilization and matching target-capacity evidence; UG906 does not impose a post-route-only resource gate."}
+    },
+    {
+      "document_id": "amd.ug907",
+      "document_version": "2024.2",
+      "section": "Running Power Analysis from the Vivado IDE",
+      "rule_id": "power.requires_activity_context",
+      "title": "Bind power observations to their activity assumptions",
+      "applicability": {"vendor": "amd", "tool": "vivado", "tool_version": "2024.2", "stage": {"one_of": ["post_synth", "post_place", "post_route"]}, "activity_source": {"required": true}},
+      "condition": {"power_report_present": true},
+      "effect": {"requires_activity_source": true, "preserve_stage": true},
+      "citation_url": "https://docs.amd.com/r/2024.2-English/ug907-vivado-power-analysis-optimization/Running-Power-Analysis-from-the-Vivado-IDE",
+      "summary": "Power analysis combines design state with simulation, manual, or vectorless activity; dynamic and static power values must retain that activity source.",
       "license_note": "Short project-authored paraphrase; no vendor text is redistributed."
     }
-  ]
+  ],
+  "bindings": [
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.dataflow_has_explicit_scope","target_kind":"directive_kind","target":"DATAFLOW","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"one_of":["hls.kernel","hls.function"]},"function_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.dataflow_has_explicit_scope","target_kind":"directive_kind","target":"DATAFLOW","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.loop","loop_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.pipeline_ii_is_requested","target_kind":"directive_kind","target":"PIPELINE","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"one_of":["hls.kernel","hls.function"]},"function_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.pipeline_ii_is_requested","target_kind":"directive_kind","target":"PIPELINE","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.loop","loop_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.unroll_requests_replication","target_kind":"directive_kind","target":"UNROLL","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.loop","loop_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.array_partition_requests_banking","target_kind":"directive_kind","target":"ARRAY_PARTITION","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"one_of":["hls.memory","hls.stream","hls.port"]},"variable_id":{"required":true},"directive_operand_linked":"derived_from_current_directive_operand_link_v1","directive_operand_identity":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.interface_is_port_contract","target_kind":"directive_kind","target":"INTERFACE","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.port","port_id":{"required":true},"directive_operand_linked":"derived_from_current_directive_operand_link_v1","directive_operand_identity":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.stream_depth_is_requested","target_kind":"directive_kind","target":"STREAM","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"one_of":["hls.memory","hls.stream","hls.port"]},"variable_id":{"required":true},"directive_operand_linked":"derived_from_current_directive_operand_link_v1","directive_operand_identity":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.tripcount_guides_estimates","target_kind":"directive_kind","target":"LOOP_TRIPCOUNT","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.loop","loop_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.inline_changes_hierarchy","target_kind":"directive_kind","target":"INLINE","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"one_of":["hls.kernel","hls.function"]},"function_id":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.requested","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.declared_selected","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.tool_status","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true,"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_kind":"amd.vitis.directive_status","observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.reported_requested","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true,"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_kind":"amd.vitis.directive_status","observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.tool_effective","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true,"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_kind":"amd.vitis.directive_status","observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:directive.requested_effective_achieved","target_kind":"predicate","target":"directive.achieved","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":{"required":true},"requested_directive_present":true,"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_kind":"amd.vitis.directive_status","observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+
+    {"knowledge_rule_id":"amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence","target_kind":"artifact_kind","target":"amd.vitis.schedule_json","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","tool_artifact_evidence_qualified":"derived_from_declared_live_tool_output_v1","tool_artifact_identity":{"required":true},"tool_artifact_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.csim_is_workload_scoped","target_kind":"predicate","target":"csim.exit_code","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"csim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.csim_is_workload_scoped","target_kind":"predicate","target":"csim.mismatches","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"csim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.csim_is_workload_scoped","target_kind":"predicate","target":"csim.assertions_failed","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"csim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.status","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.latency_min_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.latency_avg_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.latency_max_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.interval_min_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.interval_avg_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"predicate","target":"cosim.interval_max_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.latency_best_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.latency_worst_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.interval_min_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.interval_max_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.latency_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:qor.latency_and_ii_are_distinct","target_kind":"predicate","target":"qor.iteration_latency_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence","target_kind":"predicate","target":"schedule.start_cycle","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence","target_kind":"predicate","target":"schedule.end_cycle","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence","target_kind":"predicate","target":"schedule.pipeline_stage","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence","target_kind":"predicate","target":"schedule.operation_latency","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"schedule","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+
+    {"knowledge_rule_id":"amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped","target_kind":"predicate","target":"profile.fifo_max_occupancy","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped","target_kind":"predicate","target":"profile.read_block_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped","target_kind":"predicate","target":"profile.write_block_cycles","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped","target_kind":"predicate","target":"profile.token_count","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+
+    {"knowledge_rule_id":"amd.ug903:2024.2:xdc.constraints_are_design_inputs","target_kind":"artifact_kind","target":"constraint.xdc","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","artifact_sha256":{"required":true},"constraint_hash":{"required":true},"constraint_input_evidence_qualified":"derived_from_unique_live_snapshot_input_v1","constraint_artifact_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static","identity_not_inferred":true}},
+    {"knowledge_rule_id":"amd.ug835:2024.2:timing.summary_keeps_wns_tns_distinct","target_kind":"artifact_kind","target":"amd.vivado.timing_summary","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","tool_artifact_evidence_qualified":"derived_from_declared_live_tool_output_v1","tool_artifact_identity":{"required":true},"tool_artifact_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:timing.post_route_observations_are_routed_evidence","target_kind":"artifact_kind","target":"amd.vivado.post_route_timing","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":"post_route","snapshot_association":"verified","tool_artifact_evidence_qualified":"derived_from_declared_live_tool_output_v1","tool_artifact_identity":{"required":true},"tool_artifact_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"artifact_kind","target":"amd.vivado.utilization","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","tool_artifact_evidence_qualified":"derived_from_declared_live_tool_output_v1","tool_artifact_identity":{"required":true},"tool_artifact_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"artifact_kind","target":"amd.vivado.post_route_utilization","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":"post_route","snapshot_association":"verified","tool_artifact_evidence_qualified":"derived_from_declared_live_tool_output_v1","tool_artifact_identity":{"required":true},"tool_artifact_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+
+    {"knowledge_rule_id":"amd.ug835:2024.2:timing.summary_keeps_wns_tns_distinct","target_kind":"predicate","target":"timing.wns_ns","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug835:2024.2:timing.summary_keeps_wns_tns_distinct","target_kind":"predicate","target":"timing.tns_ns","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:physical.congestion_is_stage_scoped","target_kind":"predicate","target":"physical.congestion_level","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:timing.post_route_observations_are_routed_evidence","target_kind":"predicate","target":"timing.critical_path_delay_ns","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":"post_route","snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug907:2024.2:power.requires_activity_context","target_kind":"predicate","target":"power.dynamic_w","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"activity_source":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug907:2024.2:power.requires_activity_context","target_kind":"predicate","target":"power.static_w","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"activity_source":{"required":true},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"predicate","target":"resource.lut","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"predicate","target":"resource.ff","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"predicate","target":"resource.dsp","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"predicate","target":"resource.bram_18k","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug906:2024.2:resource.utilization_is_stage_scoped","target_kind":"predicate","target":"resource.uram","required_context":{"vendor":"amd","tool":"vivado","tool_version":"2024.2","stage":{"one_of":["post_synth","post_place","post_route"]},"snapshot_association":"verified","observation_evidence_qualified":"derived_from_typed_observation_evidence_v1","observation_instance_id":{"required":true},"observation_artifact_identity":{"required":true},"observation_run_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1","metadata":{"dynamic_scope":"static"}},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.csim_is_workload_scoped","target_kind":"gate_kind","target":"correctness","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"csim","workload_id":{"required":true},"snapshot_association":"verified","gate_evidence_qualified":"derived_from_typed_evidence_v1","verification_observation_identity":{"required":true},"verification_report_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"},
+    {"knowledge_rule_id":"amd.ug1399:2024.2:verification.cosim_is_workload_scoped","target_kind":"gate_kind","target":"correctness","required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"cosim","workload_id":{"required":true},"snapshot_association":"verified","gate_evidence_qualified":"derived_from_typed_evidence_v1","verification_observation_identity":{"required":true},"verification_report_identity":{"required":true}},"producer":"hlsgraph.knowledge.binding","producer_version":"1"}
+  ],
+  "coverage": {
+    "pack_id": "hlsgraph.amd.public_guidance.2024_2",
+    "coverage_scope": "hlsgraph.supported_amd_2024_2_contract_surface",
+    "target_registry_version": "hlsgraph.knowledge_supported_targets.v1",
+    "review_status": "unreviewed",
+    "reviewers": [],
+    "source_hashes": {},
+    "entries": [
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Failure to Satisfy Optimization Directives","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.requested_effective_achieved"],"binding_ids":["knowledge_binding_537bec90e5ef7ab2ea3b3afd","knowledge_binding_7c6cb130400548da45ca2b93","knowledge_binding_a080068ad763e66d471077a3","knowledge_binding_a0fe7544a67f39e07f8c20f8","knowledge_binding_abec528d16293b5759cad239","knowledge_binding_c05bce2f5f3bd0fa2827786f"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS dataflow","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.dataflow_has_explicit_scope"],"binding_ids":["knowledge_binding_3cb6f418d539961985e0e8a9","knowledge_binding_4e72e5eef0b9f720df2ceaff"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS pipeline","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.pipeline_ii_is_requested"],"binding_ids":["knowledge_binding_56c8a59aa62c8b4aeed9bb01","knowledge_binding_8e4ddea9ab05fe34fb2dbfa4"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS unroll","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.unroll_requests_replication"],"binding_ids":["knowledge_binding_86ec95586ad1ed56bd8b370c"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS array_partition","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.array_partition_requests_banking"],"binding_ids":["knowledge_binding_cc6c4c723b6f33a91dd27bd6"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS interface","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.interface_is_port_contract"],"binding_ids":["knowledge_binding_c14e63b68baf419bad38e754"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS stream","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.stream_depth_is_requested"],"binding_ids":["knowledge_binding_361d44d2a7d789e17c6bc203"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS dependence","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.dependence_is_user_assertion"],"binding_ids":[]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS loop_tripcount","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.tripcount_guides_estimates"],"binding_ids":["knowledge_binding_3d50124186a9085ec3f0aa5c"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS inline","status":"rule","rule_ids":["amd.ug1399:2024.2:directive.inline_changes_hierarchy"],"binding_ids":["knowledge_binding_0aa92311a1f002d2ef76484d"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Running C Simulation","status":"rule","rule_ids":["amd.ug1399:2024.2:verification.csim_is_workload_scoped"],"binding_ids":["knowledge_binding_2eda6446aa23647d56d383f2","knowledge_binding_723f9e2078eadd0854ccaf06","knowledge_binding_88f3188053934b332f75b167","knowledge_binding_c7827d16ae4557346790cfba"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Running C/RTL Co-Simulation","status":"rule","rule_ids":["amd.ug1399:2024.2:verification.cosim_is_workload_scoped"],"binding_ids":["knowledge_binding_202c98ec532431a2f14715b8","knowledge_binding_789267a30731f9a210a11d1e","knowledge_binding_9774508fa7936d684897c953","knowledge_binding_9aaf7f43a8a8e988ac681f2c","knowledge_binding_a3c59bfcf892ece79260c293","knowledge_binding_aa9560c384d4b2d1f7eb1b7b","knowledge_binding_e663bfe1284627ba926b4343","knowledge_binding_fbd969a5001d676ce2ba4fb0"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Dataflow Viewer","status":"rule","rule_ids":["amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped"],"binding_ids":["knowledge_binding_5a258c852d01e0b88758083a","knowledge_binding_944b59f2cd1d05846e43dc07","knowledge_binding_98004e0c802e1fa60d8a0654","knowledge_binding_d2d3ca557ebea9742f4cb863"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Schedule Viewer","status":"rule","rule_ids":["amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence"],"binding_ids":["knowledge_binding_3a28f240de18873bc2e71db5","knowledge_binding_536e40a7132661ed2fb3aa95","knowledge_binding_6929a74b9b3bc258c5cfdb42","knowledge_binding_8f9a1ce7552592b212453a29","knowledge_binding_d9913456279f6434fc3c8f7d"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Performance Metrics Example","status":"rule","rule_ids":["amd.ug1399:2024.2:qor.latency_and_ii_are_distinct"],"binding_ids":["knowledge_binding_13fdba499775444bc8e2f137","knowledge_binding_2c512ecc7267b08a53d502a4","knowledge_binding_3932773bfa278cdd8d068072","knowledge_binding_8697bf9995e5182580b39c7e","knowledge_binding_cbe26c963558bdd7e748e8a8","knowledge_binding_e5f523571f7e20943b4b4eb0"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"Output of C Synthesis","status":"citation_only","rationale":"The cited section inventories C-synthesis outputs but does not establish that every parsed value is an estimate or define its relationship to implementation-stage observations; no executable rule is published."},
+      {"document_id":"amd.ug903","document_version":"2024.2","section":"About XDC Constraints","status":"rule","rule_ids":["amd.ug903:2024.2:xdc.constraints_are_design_inputs"],"binding_ids":["knowledge_binding_61660c9f2819c82b9e63dccf"]},
+      {"document_id":"amd.ug835","document_version":"2024.2","section":"report_timing_summary","status":"rule","rule_ids":["amd.ug835:2024.2:timing.summary_keeps_wns_tns_distinct"],"binding_ids":["knowledge_binding_1d65b5905ebdd9e651963051","knowledge_binding_8a4c62ee9926920d20919cef","knowledge_binding_ca7f8ef75b11835fa9859a46"]},
+      {"document_id":"amd.ug906","document_version":"2024.2","section":"Verifying Timing Signoff","status":"rule","rule_ids":["amd.ug906:2024.2:timing.post_route_observations_are_routed_evidence","amd.ug906:2024.2:timing.post_route_signoff_requires_routed_design"],"binding_ids":["knowledge_binding_124a9cbc1f9caa09f0aff225","knowledge_binding_39b2f10ece09889ed99b9990"]},
+      {"document_id":"amd.ug906","document_version":"2024.2","section":"Analyzing the Design Congestion","status":"rule","rule_ids":["amd.ug906:2024.2:physical.congestion_is_stage_scoped"],"binding_ids":["knowledge_binding_0d190339e8f002d276297994"]},
+      {"document_id":"amd.ug906","document_version":"2024.2","section":"Reporting the Waivers","status":"citation_only","rationale":"The public adapter does not preserve a self-validating waiver-set identity; this section remains a locator, not executable coverage."},
+      {"document_id":"amd.ug906","document_version":"2024.2","section":"Report Utilization","status":"rule","rule_ids":["amd.ug906:2024.2:resource.utilization_is_stage_scoped"],"binding_ids":["knowledge_binding_50324fad4ab16031143e78c0","knowledge_binding_6e9b77576542070f19a96a28","knowledge_binding_98947a3a66f577679d5eea14","knowledge_binding_9c8e5eac54b013894fc1d152","knowledge_binding_a11e76ad8e8c0fb8b0be4040","knowledge_binding_c7a998556e303d11e4997648","knowledge_binding_ea55cfc4979d4fabf046f180"]},
+      {"document_id":"amd.ug907","document_version":"2024.2","section":"Running Power Analysis from the Vivado IDE","status":"rule","rule_ids":["amd.ug907:2024.2:power.requires_activity_context"],"binding_ids":["knowledge_binding_b00b74bf5adca0e8ecae6c17","knowledge_binding_b370be0e582e58accc47057f"]}
+    ],
+    "target_inventory": [
+      {"target_kind":"directive_kind","target":"DATAFLOW","status":"bound","binding_ids":["knowledge_binding_3cb6f418d539961985e0e8a9","knowledge_binding_4e72e5eef0b9f720df2ceaff"]},
+      {"target_kind":"directive_kind","target":"PIPELINE","status":"bound","binding_ids":["knowledge_binding_56c8a59aa62c8b4aeed9bb01","knowledge_binding_8e4ddea9ab05fe34fb2dbfa4"]},
+      {"target_kind":"directive_kind","target":"UNROLL","status":"bound","binding_ids":["knowledge_binding_86ec95586ad1ed56bd8b370c"]},
+      {"target_kind":"directive_kind","target":"ARRAY_PARTITION","status":"bound","binding_ids":["knowledge_binding_cc6c4c723b6f33a91dd27bd6"]},
+      {"target_kind":"directive_kind","target":"INTERFACE","status":"bound","binding_ids":["knowledge_binding_c14e63b68baf419bad38e754"]},
+      {"target_kind":"directive_kind","target":"STREAM","status":"bound","binding_ids":["knowledge_binding_361d44d2a7d789e17c6bc203"]},
+      {"target_kind":"directive_kind","target":"DEPENDENCE","status":"no_normative","rationale":"The public directive contract cannot yet represent the legal mutually exclusive optional variable and class selectors, so this user assertion remains non-executable.","binding_ids":[]},
+      {"target_kind":"directive_kind","target":"LOOP_TRIPCOUNT","status":"bound","binding_ids":["knowledge_binding_3d50124186a9085ec3f0aa5c"]},
+      {"target_kind":"directive_kind","target":"INLINE","status":"bound","binding_ids":["knowledge_binding_0aa92311a1f002d2ef76484d"]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.csim_result","status":"no_normative","rationale":"The container artifact alone does not close one parsed observation to a workload, immutable run manifest, declared output, and live report bytes; query its emitted predicate or correctness gate.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.cosim_rpt","status":"no_normative","rationale":"The container artifact alone does not close one parsed observation to a workload, immutable run manifest, declared output, and live report bytes; query its emitted predicate or correctness gate.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.cosim_report","status":"no_normative","rationale":"The container artifact alone does not close one parsed observation to a workload, immutable run manifest, declared output, and live report bytes; query its emitted predicate or correctness gate.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.csynth_xml","status":"no_normative","rationale":"The cited output section identifies the container but does not establish the estimate-versus-implementation semantics needed for an executable binding.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.schedule_json","status":"bound","binding_ids":["knowledge_binding_3a28f240de18873bc2e71db5"]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.dataflow_profile","status":"no_normative","rationale":"The container artifact alone does not close one dynamic channel observation to a workload, immutable run manifest, declared output, and live report bytes; query its emitted profile predicate.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vitis.directive_status","status":"no_normative","rationale":"The container artifact alone does not identify one directive instance or resolved scope; its emitted directive predicates bind only with exact instance-and-scope evidence.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"constraint.xdc","status":"bound","binding_ids":["knowledge_binding_61660c9f2819c82b9e63dccf"]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.timing_summary","status":"bound","binding_ids":["knowledge_binding_1d65b5905ebdd9e651963051"]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.post_route_timing","status":"bound","binding_ids":["knowledge_binding_124a9cbc1f9caa09f0aff225"]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.utilization","status":"bound","binding_ids":["knowledge_binding_98947a3a66f577679d5eea14"]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.post_route_utilization","status":"bound","binding_ids":["knowledge_binding_c7a998556e303d11e4997648"]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.physical_summary","status":"no_normative","rationale":"The normalized container can carry congestion, timing, DRC/CDC, or power fields; the artifact kind alone does not satisfy any one field-specific rule condition.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.qor_summary","status":"no_normative","rationale":"The normalized container can carry congestion, timing, DRC/CDC, or power fields; the artifact kind alone does not satisfy any one field-specific rule condition.","binding_ids":[]},
+      {"target_kind":"artifact_kind","target":"amd.vivado.routed_checkpoint","status":"no_normative","rationale":"The checkpoint is a cold routed-design identity; no executable signoff binding is published until timing-summary, constraint, and separate bus-skew evidence are closed together.","binding_ids":[]},
+      {"target_kind":"gate_kind","target":"correctness","status":"bound","binding_ids":["knowledge_binding_723f9e2078eadd0854ccaf06","knowledge_binding_fbd969a5001d676ce2ba4fb0"]},
+      {"target_kind":"gate_kind","target":"resource_fits","status":"no_normative","rationale":"Resource fit is an HLSGraph local derivation over stage-scoped utilization and matching target capacities; UG906 does not define a post-route-only gate contract.","binding_ids":[]},
+      {"target_kind":"gate_kind","target":"post_route_timing","status":"no_normative","rationale":"UG906 requires a routed design and a separate bus-skew check; the current public gate evidence does not close the complete signoff contract.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"vitis.report_parse_error","status":"no_normative","rationale":"Parser failure classification is an HLSGraph infrastructure contract, not a vendor design rule.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"vivado.report_parse_error","status":"no_normative","rationale":"Parser failure classification is an HLSGraph infrastructure contract, not a vendor design rule.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"verification.missing_workload","status":"no_normative","rationale":"Missing-workload detection is an HLSGraph evidence-integrity policy; the diagnostic necessarily lacks the workload identity required for a workload-scoped vendor rule binding.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"mapping.unresolved_report_scope","status":"no_normative","rationale":"Fail-closed cross-layer mapping is an HLSGraph evidence policy rather than a vendor specification rule.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"mapping.ambiguous_report_scope","status":"no_normative","rationale":"Fail-closed cross-layer mapping is an HLSGraph evidence policy rather than a vendor specification rule.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"gate.resource_capacity_unknown","status":"no_normative","rationale":"This HLSGraph diagnostic records that the utilization/capacity evidence needed to apply the vendor rule is absent; absence cannot satisfy that rule's utilization-report condition.","binding_ids":[]},
+      {"target_kind":"diagnostic_code","target":"gate.resource_capacity_incomplete","status":"no_normative","rationale":"This HLSGraph diagnostic records an incomplete evidence closure; it must not activate a vendor rule whose utilization-report condition is not completely satisfied.","binding_ids":[]},
+      {"target_kind":"predicate","target":"directive.requested","status":"bound","binding_ids":["knowledge_binding_537bec90e5ef7ab2ea3b3afd"]},
+      {"target_kind":"predicate","target":"directive.declared_selected","status":"bound","binding_ids":["knowledge_binding_c05bce2f5f3bd0fa2827786f"]},
+      {"target_kind":"predicate","target":"directive.tool_status","status":"bound","binding_ids":["knowledge_binding_a0fe7544a67f39e07f8c20f8"]},
+      {"target_kind":"predicate","target":"directive.reported_requested","status":"bound","binding_ids":["knowledge_binding_7c6cb130400548da45ca2b93"]},
+      {"target_kind":"predicate","target":"directive.tool_effective","status":"bound","binding_ids":["knowledge_binding_abec528d16293b5759cad239"]},
+      {"target_kind":"predicate","target":"directive.achieved","status":"bound","binding_ids":["knowledge_binding_a080068ad763e66d471077a3"]},
+      {"target_kind":"predicate","target":"csim.exit_code","status":"bound","binding_ids":["knowledge_binding_2eda6446aa23647d56d383f2"]},
+      {"target_kind":"predicate","target":"csim.mismatches","status":"bound","binding_ids":["knowledge_binding_88f3188053934b332f75b167"]},
+      {"target_kind":"predicate","target":"csim.assertions_failed","status":"bound","binding_ids":["knowledge_binding_c7827d16ae4557346790cfba"]},
+      {"target_kind":"predicate","target":"cosim.status","status":"bound","binding_ids":["knowledge_binding_aa9560c384d4b2d1f7eb1b7b"]},
+      {"target_kind":"predicate","target":"cosim.latency_min_cycles","status":"bound","binding_ids":["knowledge_binding_a3c59bfcf892ece79260c293"]},
+      {"target_kind":"predicate","target":"cosim.latency_avg_cycles","status":"bound","binding_ids":["knowledge_binding_9774508fa7936d684897c953"]},
+      {"target_kind":"predicate","target":"cosim.latency_max_cycles","status":"bound","binding_ids":["knowledge_binding_9aaf7f43a8a8e988ac681f2c"]},
+      {"target_kind":"predicate","target":"cosim.interval_min_cycles","status":"bound","binding_ids":["knowledge_binding_e663bfe1284627ba926b4343"]},
+      {"target_kind":"predicate","target":"cosim.interval_avg_cycles","status":"bound","binding_ids":["knowledge_binding_202c98ec532431a2f14715b8"]},
+      {"target_kind":"predicate","target":"cosim.interval_max_cycles","status":"bound","binding_ids":["knowledge_binding_789267a30731f9a210a11d1e"]},
+      {"target_kind":"predicate","target":"clock.requested_period_ns","status":"no_normative","rationale":"The requested period is a declared constraint; the cited C-synthesis output section does not normatively define the extractor predicate.","binding_ids":[]},
+      {"target_kind":"predicate","target":"clock.estimated_period_ns","status":"no_normative","rationale":"The cited C-synthesis output section does not establish estimate semantics for this extractor predicate.","binding_ids":[]},
+      {"target_kind":"predicate","target":"qor.latency_best_cycles","status":"bound","binding_ids":["knowledge_binding_2c512ecc7267b08a53d502a4"]},
+      {"target_kind":"predicate","target":"qor.latency_worst_cycles","status":"bound","binding_ids":["knowledge_binding_8697bf9995e5182580b39c7e"]},
+      {"target_kind":"predicate","target":"qor.interval_min_cycles","status":"bound","binding_ids":["knowledge_binding_3932773bfa278cdd8d068072"]},
+      {"target_kind":"predicate","target":"qor.interval_max_cycles","status":"bound","binding_ids":["knowledge_binding_cbe26c963558bdd7e748e8a8"]},
+      {"target_kind":"predicate","target":"qor.trip_count","status":"no_normative","rationale":"The cited performance-metric section does not by itself define the extractor-specific trip-count predicate.","binding_ids":[]},
+      {"target_kind":"predicate","target":"qor.latency_cycles","status":"bound","binding_ids":["knowledge_binding_13fdba499775444bc8e2f137"]},
+      {"target_kind":"predicate","target":"qor.iteration_latency_cycles","status":"bound","binding_ids":["knowledge_binding_e5f523571f7e20943b4b4eb0"]},
+      {"target_kind":"predicate","target":"qor.target_ii","status":"no_normative","rationale":"Requested II is represented by the scoped PIPELINE declaration; this report predicate has no independently supported binding in the cited performance-metric section.","binding_ids":[]},
+      {"target_kind":"predicate","target":"qor.achieved_ii","status":"no_normative","rationale":"Achieved II requires a qualified schedule/report observation; the current cited sections do not close that extractor-specific binding.","binding_ids":[]},
+      {"target_kind":"predicate","target":"qor.pipeline_depth","status":"no_normative","rationale":"The cited performance-metric section does not by itself define the extractor-specific pipeline-depth predicate.","binding_ids":[]},
+      {"target_kind":"predicate","target":"schedule.start_cycle","status":"bound","binding_ids":["knowledge_binding_6929a74b9b3bc258c5cfdb42"]},
+      {"target_kind":"predicate","target":"schedule.end_cycle","status":"bound","binding_ids":["knowledge_binding_d9913456279f6434fc3c8f7d"]},
+      {"target_kind":"predicate","target":"schedule.pipeline_stage","status":"bound","binding_ids":["knowledge_binding_536e40a7132661ed2fb3aa95"]},
+      {"target_kind":"predicate","target":"schedule.operation_latency","status":"bound","binding_ids":["knowledge_binding_8f9a1ce7552592b212453a29"]},
+      {"target_kind":"predicate","target":"profile.fifo_max_occupancy","status":"bound","binding_ids":["knowledge_binding_5a258c852d01e0b88758083a"]},
+      {"target_kind":"predicate","target":"profile.read_block_cycles","status":"bound","binding_ids":["knowledge_binding_944b59f2cd1d05846e43dc07"]},
+      {"target_kind":"predicate","target":"profile.write_block_cycles","status":"bound","binding_ids":["knowledge_binding_d2d3ca557ebea9742f4cb863"]},
+      {"target_kind":"predicate","target":"profile.token_count","status":"bound","binding_ids":["knowledge_binding_98004e0c802e1fa60d8a0654"]},
+      {"target_kind":"predicate","target":"timing.wns_ns","status":"bound","binding_ids":["knowledge_binding_8a4c62ee9926920d20919cef"]},
+      {"target_kind":"predicate","target":"timing.tns_ns","status":"bound","binding_ids":["knowledge_binding_ca7f8ef75b11835fa9859a46"]},
+      {"target_kind":"predicate","target":"timing.critical_path_delay_ns","status":"bound","binding_ids":["knowledge_binding_39b2f10ece09889ed99b9990"]},
+      {"target_kind":"predicate","target":"physical.congestion_level","status":"bound","binding_ids":["knowledge_binding_0d190339e8f002d276297994"]},
+      {"target_kind":"predicate","target":"physical.slr_crossings","status":"no_normative","rationale":"The congestion-analysis rule does not normatively define the independent SLR-crossing count predicate.","binding_ids":[]},
+      {"target_kind":"predicate","target":"physical.drc_errors","status":"no_normative","rationale":"The current normalized physical-summary adapter does not preserve a self-validating waiver-set identity, so UG906 waiver guidance cannot be safely bound to this count.","binding_ids":[]},
+      {"target_kind":"predicate","target":"physical.cdc_critical","status":"no_normative","rationale":"The current normalized physical-summary adapter does not preserve a self-validating waiver-set identity, so UG906 waiver guidance cannot be safely bound to this count.","binding_ids":[]},
+      {"target_kind":"predicate","target":"power.dynamic_w","status":"bound","binding_ids":["knowledge_binding_b370be0e582e58accc47057f"]},
+      {"target_kind":"predicate","target":"power.static_w","status":"bound","binding_ids":["knowledge_binding_b00b74bf5adca0e8ecae6c17"]},
+      {"target_kind":"predicate","target":"resource.lut","status":"bound","binding_ids":["knowledge_binding_6e9b77576542070f19a96a28"]},
+      {"target_kind":"predicate","target":"resource.ff","status":"bound","binding_ids":["knowledge_binding_ea55cfc4979d4fabf046f180"]},
+      {"target_kind":"predicate","target":"resource.dsp","status":"bound","binding_ids":["knowledge_binding_a11e76ad8e8c0fb8b0be4040"]},
+      {"target_kind":"predicate","target":"resource.bram_18k","status":"bound","binding_ids":["knowledge_binding_9c8e5eac54b013894fc1d152"]},
+      {"target_kind":"predicate","target":"resource.uram","status":"bound","binding_ids":["knowledge_binding_50324fad4ab16031143e78c0"]}
+      ,{"target_kind":"predicate","target":"resource.available_lut","status":"no_normative","rationale":"Available capacity is target/device identity, not a C-synthesis estimate."}
+      ,{"target_kind":"predicate","target":"resource.available_ff","status":"no_normative","rationale":"Available capacity is target/device identity, not a C-synthesis estimate."}
+      ,{"target_kind":"predicate","target":"resource.available_dsp","status":"no_normative","rationale":"Available capacity is target/device identity, not a C-synthesis estimate."}
+      ,{"target_kind":"predicate","target":"resource.available_bram_18k","status":"no_normative","rationale":"Available capacity is target/device identity, not a C-synthesis estimate."}
+      ,{"target_kind":"predicate","target":"resource.available_uram","status":"no_normative","rationale":"Available capacity is target/device identity, not a C-synthesis estimate."}
+    ]
+  }
 }

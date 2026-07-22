@@ -9,7 +9,7 @@ from .model import (
     AuthorityClass, Entity, Relation, canonical_json, json_ready,
     reject_embedded_body_fields, stable_hash,
 )
-from .version import SCHEMA_VERSION
+from .version import SCHEMA_VERSION, SUPPORTED_GRAPH_SCHEMA_VERSIONS
 
 
 _NON_FACT_AUTHORITIES = frozenset({
@@ -35,10 +35,10 @@ class CanonicalGraph:
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_GRAPH_SCHEMA_VERSIONS:
             raise ValueError(
                 f"canonical graph schema {self.schema_version!r} is not supported by "
-                f"this build ({SCHEMA_VERSION!r})"
+                f"this build ({sorted(SUPPORTED_GRAPH_SCHEMA_VERSIONS)!r})"
             )
         if not self.snapshot_id:
             raise ValueError("canonical graph snapshot_id is required")

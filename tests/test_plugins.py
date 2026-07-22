@@ -8,7 +8,13 @@ import hlsgraph.plugins as plugins
 import hlsgraph.sdk as sdk
 from hlsgraph.bundle import GraphBundle
 from hlsgraph.manifest import minimal_manifest
-from hlsgraph.plugins import PluginError, load_extractors, load_runners
+from hlsgraph.plugins import (
+    PluginError,
+    load_embedder,
+    load_extractors,
+    load_knowledge_parser,
+    load_runners,
+)
 from hlsgraph.runner import FakeRunner, PROTOCOL_VERSION
 from hlsgraph.sdk import Project
 
@@ -58,6 +64,84 @@ def test_empty_runner_selection_does_not_discover_host_entry_points(monkeypatch)
 
     monkeypatch.setattr(plugins, "_entries", forbidden)
     assert load_runners([]) == []
+
+
+def test_empty_embedder_selection_does_not_discover_host_entry_points(monkeypatch) -> None:
+    def forbidden(group: str):
+        raise AssertionError(f"entry-point discovery was not expected for {group}")
+
+    monkeypatch.setattr(plugins, "_entries", forbidden)
+    assert load_embedder(None) is None
+
+
+def test_embedder_plugin_requires_local_only_contract(monkeypatch) -> None:
+    class LocalEmbedder:
+        name = "test.local"
+        version = "1"
+        fingerprint = "a" * 64
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": True, "network_access": False}
+
+        @staticmethod
+        def embed(texts):
+            return [[1.0] for _item in texts]
+
+    entry = FakeEntryPoint("local", "test:LocalEmbedder", LocalEmbedder)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    assert load_embedder("local").name == "test.local"
+
+    class RemoteEmbedder(LocalEmbedder):
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.embedder.v1",
+                    "local_only": False, "network_access": True}
+
+    remote = FakeEntryPoint("remote", "test:RemoteEmbedder", RemoteEmbedder)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [remote])
+    with pytest.raises(PluginError, match="local_only"):
+        load_embedder("remote")
+
+
+def test_knowledge_parser_is_explicit_and_local_only(monkeypatch) -> None:
+    def forbidden(group: str):
+        raise AssertionError(f"entry-point discovery was not expected for {group}")
+
+    monkeypatch.setattr(plugins, "_entries", forbidden)
+    assert load_knowledge_parser(None) is None
+
+    class PdfParser:
+        name = "test.pdf"
+        version = "1"
+        fingerprint = "b" * 64
+
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.knowledge_parser.v1",
+                    "local_only": True, "network_access": False,
+                    "media_types": ["application/pdf"]}
+
+        @staticmethod
+        def parse(data, metadata):
+            return "parsed"
+
+    entry = FakeEntryPoint("pdf", "test:PdfParser", PdfParser)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [entry])
+    assert load_knowledge_parser("pdf").name == "test.pdf"
+
+    class RemoteParser(PdfParser):
+        @staticmethod
+        def capabilities():
+            return {"protocol_version": "hlsgraph.knowledge_parser.v1",
+                    "local_only": False, "network_access": True,
+                    "media_types": ["application/pdf"]}
+
+    remote = FakeEntryPoint("remote_pdf", "test:RemoteParser", RemoteParser)
+    monkeypatch.setattr(plugins, "_entries", lambda group: [remote])
+    with pytest.raises(PluginError, match="local_only"):
+        load_knowledge_parser("remote_pdf")
 
 
 @pytest.mark.parametrize("names", [[""], [" plugin"], [1]])

@@ -944,6 +944,7 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
     runs_by_snapshot = {
         key: bundle.store.runs(key) for key in sorted(declared_snapshots)
     }
+    unattested_tooltruth_run_ids: set[str] = set()
     for key in sorted(declared_snapshots):
         for run in runs_by_snapshot[key]:
             if not run_claims_tool_truth(run):
@@ -962,6 +963,8 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
                     f"dataset snapshot {key} contains a tool-truth run {run.id} whose "
                     f"{identity_error}"
                 )
+            if not bundle.store.has_valid_execution_commit(key, run.id):
+                unattested_tooltruth_run_ids.add(run.id)
         run_ids = {item.id for item in runs_by_snapshot[key]}
         dangling_observations = sorted(
             item.id for item in observations_by_snapshot[key]
@@ -1031,6 +1034,12 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
                     f"dataset snapshot {key} contains invalid tool-truth observation "
                     f"{observation.id}: {evidence_error}"
                 )
+    if unattested_tooltruth_run_ids:
+        raise ValueError(
+            "dataset contains tool-truth runs without a valid pipeline-issued "
+            "execution attestation and commit receipt: "
+            + ", ".join(sorted(unattested_tooltruth_run_ids))
+        )
     label_keys = [(item.snapshot_id, item.label_id) for item in dataset.labels]
     if len(set(label_keys)) != len(label_keys):
         raise ValueError("dataset labels must be unique by snapshot_id and label_id")

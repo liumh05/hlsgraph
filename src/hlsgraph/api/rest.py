@@ -19,6 +19,7 @@ from ..bundle import GraphBundle
 from ..diagnostic_projection import public_diagnostic
 from ..model import json_ready, stable_hash
 from ..query import CoreService, ExploreSpec, QuerySpec
+from ..retrieval import RetrievalSpec
 from ..run_projection import (
     PUBLIC_FAILURE_CLASSES, PUBLIC_GATE_KINDS, PUBLIC_GATE_STATUSES,
     PUBLIC_RUN_STATUSES, public_enum, public_identifier,
@@ -287,6 +288,32 @@ class RestApplication:
                 "status": service.status().to_dict(),
                 "architecture": explored,
             })
+        if route == "/retrieve":
+            query = _one(params, "q")
+            if not query:
+                raise ValueError("query parameter 'q' is required")
+            raw_max_chars = _one(params, "max_chars")
+            try:
+                max_chars = int(raw_max_chars) if raw_max_chars is not None else None
+            except ValueError as exc:
+                raise ValueError("query parameter 'max_chars' must be an integer") from exc
+            # The unauthenticated REST surface never exposes project-private
+            # bodies.  Trusted bounded snippets remain an explicit local SDK or
+            # MCP-adapter capability.
+            result = service.retrieve(RetrievalSpec(
+                query=query,
+                snapshot_id=service.snapshot_id,
+                scope_id=_one(params, "scope_id"),
+                view=_one(params, "view", "architecture") or "architecture",
+                planes=tuple(_csv(params, "planes")
+                             or ("facts", "evidence", "knowledge", "local")),
+                profile=_one(params, "profile", "hls.default.v1") or "hls.default.v1",
+                top_k=_integer(params, "top_k", 8, 1, 50),
+                max_chars=max_chars,
+                include_private_snippets=False,
+                include_predictions=_boolean(params, "include_predictions", False),
+            ))
+            return self._ok(result.to_dict())
         if route == "/graph":
             return self._ok(service.graph().to_dict())
         if route == "/entities":
@@ -464,6 +491,9 @@ def openapi_document() -> dict[str, Any]:
     get_paths: dict[str, tuple[str, str]] = {
         "/api/v1/status": ("status", "Bundle, graph, run, and completeness status"),
         "/api/v1/overview": ("overview", "Architecture overview backed by CoreService.explore"),
+        "/api/v1/retrieve": (
+            "retrieve", "Unified deterministic GraphRAG over facts, evidence, and guidance",
+        ),
         "/api/v1/graph": ("graph", "Canonical graph for one immutable snapshot"),
         "/api/v1/entities": ("entities", "List or search canonical entities"),
         "/api/v1/entities/{entity_id}": ("entity", "Read one canonical entity"),
@@ -494,6 +524,16 @@ def openapi_document() -> dict[str, Any]:
             ("view", False, "string", "architecture or evidence view"),
             ("depth", False, "integer", "traversal depth, 0..8"),
             ("top_k", False, "integer", "maximum overview roots, 1..50"),
+        ],
+        "/api/v1/retrieve": [
+            ("q", True, "string", "retrieval question; raw text is not retained in traces"),
+            ("scope_id", False, "string", "explicit containing entity ID"),
+            ("view", False, "string", "architecture or evidence view"),
+            ("planes", False, "string", "comma-separated facts,evidence,knowledge,local"),
+            ("profile", False, "string", "versioned retrieval profile"),
+            ("top_k", False, "integer", "maximum items per truth plane, 1..50"),
+            ("max_chars", False, "integer", "response budget, 1000..24000"),
+            ("include_predictions", False, "boolean", "opt in a separate prediction plane"),
         ],
         "/api/v1/entities": [
             ("q", False, "string", "search text; omit to list"),

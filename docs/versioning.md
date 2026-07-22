@@ -7,12 +7,13 @@ silently reinterpret an older observation.
 
 HLSGraph tracks several versions independently:
 
-| Layer | Current v0.2 contract |
+| Layer | Current v0.3 contract |
 | --- | --- |
-| Python package | Semantic version `0.2.0`. |
+| Python package | Semantic version `0.3.0`. |
 | Canonical schema | `schema_version` on manifests, ledgers, graphs, and wire responses. |
 | Bundle format | `bundle_version` in `.hlsgraph/bundle.json`. |
 | Extraction profile | Hash of extractor names/versions, degraded selection, plugins, and options. |
+| Retrieval profile | Independent `RETRIEVAL_PROFILE_SCHEMA_VERSION` (`0.3.0`) plus an algorithm profile name and content hash. |
 | ML feature schema | Independent `FEATURE_SCHEMA_VERSION`, recorded as `feature_schema_version` in `DatasetManifest` and `feature_spec.json`. |
 | Plugin protocol | Versioned entry-point groups such as `hlsgraph.extractors.v1`. |
 | Knowledge pack/rule | Pack schema plus document ID/version/section and stable rule ID. |
@@ -103,7 +104,7 @@ read paths reject unsupported versions; they do not update the marker on open.
 Inspect a migration path without changing data:
 
 ```bash
-hlsgraph migrate --project /path/to/project --to-version 0.2.0
+hlsgraph migrate --project /path/to/project --to-version 0.3.0
 ```
 
 Apply only a registered path:
@@ -113,13 +114,16 @@ hlsgraph migrate --project /path/to/project --to-version X.Y.Z --apply
 ```
 
 The output states `implicit_migration: false` and lists every registered step.
-The registered `0.1.0 -> 0.2.0` path adds entity-correspondence and
-action-materialization tables, normalizes legacy derivation observation inputs
-to generic evidence references while preserving their stable IDs, updates graph
-view markers, and then updates bundle/current-manifest markers atomically. It
-does not rewrite historical snapshot manifests. The operation is lock-protected
-and resumable after a partially completed ledger or bundle step. If no path
-exists, HLSGraph fails closed; opening a legacy bundle never migrates it.
+The registered path is `0.1.0 -> 0.2.0 -> 0.3.0`; an existing v0.2 bundle uses
+only the second step. The v0.2 step adds correspondence/action materialization
+and generic derivation evidence references. The additive v0.3 step adds
+knowledge bindings, coverage manifests, and rebuildable FTS support. Historical
+snapshot, entity, relation, observation, artifact, run, derivation, and graph
+hash semantics are not rewritten. In particular, a retained v0.2 graph view
+keeps its serialized schema marker while new graphs use v0.3. The operation is
+lock-protected and resumable after a partially completed ledger or bundle step.
+If no path exists, HLSGraph fails closed; opening a legacy bundle never migrates
+it.
 
 Migration rules:
 

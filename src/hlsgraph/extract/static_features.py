@@ -59,6 +59,18 @@ _EXPLICIT_WIDTH = re.compile(
     re.I,
 )
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_LLVM_INDEX_OPCODES = frozenset({
+    "getelementptr", "extractelement", "insertelement",
+    "extractvalue", "insertvalue",
+})
+_LLVM_MEMORY_ACCESS_KINDS = {
+    "load": "load",
+    "store": "store",
+    "getelementptr": "address",
+    "atomicrmw": "atomic",
+    "cmpxchg": "atomic",
+    "fence": "ordering",
+}
 
 
 def _entity_ref(entity: Entity) -> EvidenceRef:
@@ -276,6 +288,7 @@ def _append_derivation(
     *,
     semantic: str,
     unit: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     entity_values = list({item.id: item for item in evidence_entities}.values())
     relation_values = list({item.id: item for item in evidence_relations}.values())
@@ -296,8 +309,155 @@ def _append_derivation(
         metadata={
             "semantic": semantic,
             "unknown_is_zero": False,
+            **(metadata or {}),
         },
     ))
+
+
+def _operation_histogram_metadata(
+    operations: list[Entity], completeness: Completeness,
+) -> dict[str, Any]:
+    """Declare an aggregate schema only for one complete, typed IR layer."""
+    incomplete = {"operation_histogram_qualification": "unknown_or_mixed"}
+    if completeness != Completeness.COMPLETE or not operations:
+        return incomplete
+    kinds = {item.kind for item in operations}
+    if kinds == {"ir.mlir.operation"}:
+        for item in operations:
+            operation = item.attrs.get("operation")
+            dialect = item.attrs.get("dialect")
+            if (not isinstance(operation, str) or not _SAFE_TOKEN.fullmatch(operation)
+                    or not isinstance(dialect, str) or "." not in operation
+                    or operation.split(".", 1)[0].casefold() != dialect.casefold()):
+                return incomplete
+        schema = "mlir.dialect_qualified_opcode_histogram.v1"
+        qualification = "dialect_qualified"
+    elif kinds == {"ir.llvm.operation"}:
+        if any(
+            not isinstance(item.attrs.get("opcode"), str)
+            or not _SAFE_TOKEN.fullmatch(str(item.attrs.get("opcode")))
+            for item in operations
+        ):
+            return incomplete
+        schema = "llvm.opcode_histogram.v1"
+        qualification = "opcode_qualified"
+    else:
+        return incomplete
+    return {
+        "operation_histogram_qualification": qualification,
+        "operation_histogram_schema": schema,
+        "operation_histogram_provenance": "typed_ir_entity_evidence.v1",
+        "operation_histogram_domain_complete": True,
+    }
+
+
+def _llvm_feature_histogram_metadata(
+    predicate: str,
+    value: dict[str, int] | None,
+    operations: list[Entity],
+    evidence_entities: Iterable[Entity],
+    completeness: Completeness,
+) -> dict[str, Any]:
+    """Certify one LLVM aggregate only after recomputing its typed domain.
+
+    These metadata fields are a versioned adapter contract, not a claim from
+    the cited LLVM specification.  Retrieval independently repeats the same
+    checks before a knowledge binding may use the aggregate.
+    """
+    prefix = {
+        "feature.index_histogram": "index_histogram",
+        "feature.bitwidth": "bitwidth",
+        "feature.memory_access": "memory_access",
+    }[predicate]
+    incomplete = {f"{prefix}_qualification": "unknown_or_mixed"}
+    entities = list({item.id: item for item in evidence_entities}.values())
+    if (completeness != Completeness.COMPLETE or value is None
+            or not operations or not entities
+            or any(not item.kind.startswith("ir.llvm.") for item in entities)
+            or any(item.kind != "ir.llvm.operation" for item in operations)):
+        return incomplete
+    opcodes = [item.attrs.get("opcode") for item in operations]
+    if any(not isinstance(item, str) or not _SAFE_TOKEN.fullmatch(item)
+           for item in opcodes):
+        return incomplete
+
+    if predicate == "feature.index_histogram":
+        index_values: list[str] = []
+        for operation, opcode in zip(operations, opcodes, strict=True):
+            raw = operation.attrs.get("index_kinds")
+            if raw is None:
+                raw = []
+            if (not isinstance(raw, list)
+                    or any(item not in {"constant", "dynamic"} for item in raw)
+                    or (opcode in _LLVM_INDEX_OPCODES) != bool(raw)):
+                return incomplete
+            index_values.extend(raw)
+        if value != _histogram(index_values):
+            return incomplete
+        return {
+            "index_histogram_qualification": "llvm_explicit_operand_kind",
+            "index_histogram_schema": (
+                "llvm.explicit_index_operand_kind_histogram.v1"
+            ),
+            "index_histogram_provenance": "typed_ir_entity_evidence.v1",
+            "index_operand_definition": (
+                "llvm.gep_extract_insert_explicit_operand.v1"
+            ),
+            "index_histogram_domain_complete": True,
+        }
+
+    if predicate == "feature.bitwidth":
+        for entity in entities:
+            raw = entity.attrs.get("bitwidths")
+            if raw is not None and (
+                not isinstance(raw, list) or any(
+                    not isinstance(item, int) or isinstance(item, bool)
+                    or not 0 < item <= 1_048_576 for item in raw
+                )
+            ):
+                return incomplete
+            if any(
+                entity.attrs.get(key) is not None
+                and not isinstance(entity.attrs.get(key), str)
+                for key in ("type", "element_type", "return_type")
+            ):
+                return incomplete
+        widths = [
+            width for entity in entities for width in _explicit_widths(entity)
+        ]
+        if value != _histogram(str(width) for width in widths):
+            return incomplete
+        return {
+            "bitwidth_qualification": "llvm_explicit_integer_occurrence",
+            "bitwidth_schema": (
+                "llvm.explicit_integer_width_occurrence_histogram.v1"
+            ),
+            "bitwidth_provenance": "typed_ir_entity_evidence.v1",
+            "bitwidth_definition": (
+                "llvm.explicit_integer_type_occurrence.v1"
+            ),
+            "bitwidth_domain_complete": True,
+        }
+
+    memory_values: list[str] = []
+    for operation, opcode in zip(operations, opcodes, strict=True):
+        expected = _LLVM_MEMORY_ACCESS_KINDS.get(opcode)
+        actual = operation.attrs.get("memory_access_kind")
+        if actual != expected:
+            return incomplete
+        if expected is not None:
+            memory_values.append(expected)
+    if value != _histogram(memory_values):
+        return incomplete
+    return {
+        "memory_access_qualification": "llvm_opcode_defined_kind",
+        "memory_access_schema": "llvm.memory_access_kind_histogram.v1",
+        "memory_access_provenance": "typed_ir_entity_evidence.v1",
+        "memory_access_opcode_definition": (
+            "llvm.load_store_gep_atomic_fence.v1"
+        ),
+        "memory_access_domain_complete": True,
+    }
 
 
 def _loop_fact(
@@ -417,6 +577,9 @@ def derive_static_features(result: ExtractionResult) -> None:
                 result, scope, _BASE_PREDICATES[0], operation_value,
                 operation_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_ir_operation_entities",
+                metadata=_operation_histogram_metadata(
+                    operations, operation_completeness,
+                ),
             )
 
         index_histogram = _histogram(
@@ -431,6 +594,10 @@ def derive_static_features(result: ExtractionResult) -> None:
                 result, scope, _BASE_PREDICATES[1], index_value,
                 index_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_constant_and_dynamic_index_operands",
+                metadata=_llvm_feature_histogram_metadata(
+                    _BASE_PREDICATES[1], index_value, operations,
+                    operation_entities, index_completeness,
+                ),
             )
 
         bitwidth_entities: dict[str, Entity] = {
@@ -462,6 +629,10 @@ def derive_static_features(result: ExtractionResult) -> None:
                 bitwidth_completeness, bitwidth_entities.values(),
                 bitwidth_relations.values(),
                 semantic="histogram_of_explicit_integer_type_width_occurrences",
+                metadata=_llvm_feature_histogram_metadata(
+                    _BASE_PREDICATES[2], bitwidth_value, operations,
+                    bitwidth_entities.values(), bitwidth_completeness,
+                ),
             )
 
         memory_histogram = _histogram(
@@ -477,6 +648,10 @@ def derive_static_features(result: ExtractionResult) -> None:
                 result, scope, _BASE_PREDICATES[3], memory_value,
                 memory_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_ir_memory_access_kinds",
+                metadata=_llvm_feature_histogram_metadata(
+                    _BASE_PREDICATES[3], memory_value, operations,
+                    operation_entities, memory_completeness,
+                ),
             )
 
         if (scope.kind in {"hls.kernel", "hls.function"}

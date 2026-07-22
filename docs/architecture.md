@@ -4,7 +4,7 @@ HLSGraph is an evidence infrastructure layer for HLS coding agents, LLM4HLS,
 and ML4HLS. It creates a deterministic, traceable view of an HLS design without
 asking an LLM to invent topology or QoR.
 
-The supported unit in v0.1 is one HLS kernel. The schema leaves room for
+The fully supported unit in v0.3.0 is one HLS kernel/component. The schema leaves room for
 component/system entities, host programs, multiple compute units, DDR/HBM
 banks, and platform interconnect, but HLSGraph does not yet provide complete
 collection for those entities.
@@ -76,12 +76,32 @@ explicit toolchain/environment probe whose stdout SHA-256 must match the pinned
 value before execution. Failed or unattested runs cannot be replayed as
 successful cache hits or reported as tool truth.
 
-Declared-output ingestion is a separate, fail-closed capability: a runner must
-explicitly advertise `provides_local_output_bytes` before HLSGraph will hash and
-import output bytes. An unknown or custom runner without that capability is
-rejected. The v0.1 SSH runner can execute attested commands, but cannot ingest
-declared outputs because it does not return independently transferred,
-hash-verified local bytes; external synchronization timing is not evidence.
+Declared-output ingestion is a separate, fail-closed Runner v2 capability. The
+SDK creates a unique run-scoped staging directory; a runner may return only
+declared outputs. An SSH runner creates a non-reusable remote run directory,
+verifies the active snapshot inputs, executes the declared stage, freezes the
+declared outputs, computes a remote size/SHA-256 manifest, and transfers those
+bytes directly into SDK-owned staging. The SDK then revalidates relative paths,
+links/reparse points, sizes, hashes, and file identity before atomically
+committing the artifacts and run ledger. Mutagen, rsync, shared mounts, and
+other asynchronous synchronization may support development, but their timing
+is never accepted as evidence transport.
+
+A real-tool claim also requires a pipeline-issued execution capability.  After
+`StageOrchestrator` validates an approved built-in Local/SSH runner (or an
+explicitly loaded trusted runner plugin), it creates a process-local, one-shot,
+non-serializable authorization.  The authorization binds the runner identity
+and fingerprint, request and stable run IDs, snapshot/manifest/build/target/
+constraint/toolchain hashes, and every declared output path/kind/content hash.
+The ledger consumes that authorization atomically and persists a public
+`ExecutionAttestation` plus `ExecutionCommitReceipt`.  Reconstructing the
+serializable records, setting provenance metadata, or calling `add_run()` /
+`commit_run_result()` directly cannot create tool truth.  Fake and replay
+runners never receive this capability. Read paths that can expose
+`tool_truth` or activate observation, report, or Gate knowledge bindings
+revalidate the attestation, receipt, and current managed output bytes; a legacy
+migration or direct row injection without the receipt therefore remains
+non-truth even when its metadata claims otherwise.
 
 ### 3. Observation Store
 
@@ -90,6 +110,16 @@ stage, authority class, run/artifact provenance, optional source or IR anchor,
 workload, and completeness. Conflicting observations can coexist. HLSGraph does
 not overwrite a csynth estimate with a post-route measurement, or turn a
 workload-specific stall count into an unconditional property.
+
+Run-backed report observations additionally carry one `ObservationSource`.
+Their observation artifact, sole anchor artifact, and source artifact must be
+identical. The source hashes the report plus the fixed parser's
+predicate/value/unit output; it is a content commitment rather than a signature.
+The ledger and retriever replay the pinned built-in parser over the live managed
+report and require exactly one match as well as a valid execution commit receipt.
+This prevents a caller from attaching a self-consistent but fabricated value to
+a real or sibling report. Source-less legacy observations retain their historical
+identity but do not gain the v0.3 tool-truth qualification.
 
 Deterministic computations are stored separately as `Derivation` records that
 name the algorithm/version and cite their input observation IDs. Verification
@@ -114,6 +144,12 @@ Knowledge packs contain versioned, project-authored rules with
 They interpret public documentation but do not describe a particular design.
 The repository does not redistribute vendor PDFs, extracted full text, or large
 quotes. See [the knowledge pack policy](governance/KNOWLEDGE_PACK_POLICY.md).
+Each pack declares a versioned coverage scope whose target inventory must match
+an independent canonical registry exactly. Rule and binding IDs are explicit
+and covered exactly once. Unreviewed citation-only packs may be searched, but
+an executable binding is installable and selectable only after immutable
+review evidence makes the pack `review_ready`; catalog, store, and retrieval
+all enforce that boundary.
 
 ## Extraction architecture
 
@@ -129,13 +165,22 @@ quotes. See [the knowledge pack policy](governance/KNOWLEDGE_PACK_POLICY.md).
   scoped, and resolved by declared precedence. Declared effectiveness is not
   the same as proof that a tool applied the directive. Inactive source regions,
   Tcl control blocks, command substitutions, and other non-literal contexts are
-  diagnostic-only rather than guessed declarations.
+  diagnostic-only rather than guessed declarations. Retrieval treats graph
+  records as caller-constructible: source/requested/scope/operand capabilities
+  are emitted only after an ephemeral replay by the fixed libclang and literal
+  external-directive parsers reproduces the full options, anchor, exact scope,
+  exact operand, annotation, and unique request from unchanged snapshot inputs.
+  Regex-degraded extraction and missing parser environments fail closed.
 - **MLIR/HLS IR:** text adapters preserve dialect operation and location
   evidence. Hardware/dataflow projection occurs only for supported semantics,
   such as explicit Handshake relations; generic SSA flow is not promoted to
-  hardware topology.
+  hardware topology. The default text adapters do not assert compatibility
+  with an exact upstream language-spec revision.
 - **LLVM IR:** operations, blocks, CFG, memory access, calls, and debug locations
   are evidence. LLVM CFG edges remain LLVM relations, not HLS dataflow edges.
+  In v0.3, caller-writable graph metadata is never accepted as a semantic
+  adapter authorization, so the public OpenIR knowledge surface is
+  citation-only/`no_normative` and has no executable bindings.
 - **Schedule/binding and reports:** Vitis HLS/Vivado are the first supplied
   adapters. They import achieved II/latency/resource, directive status,
   schedule, cosim/dataflow workload evidence, and post-route summaries when
@@ -144,6 +189,9 @@ quotes. See [the knowledge pack policy](governance/KNOWLEDGE_PACK_POLICY.md).
   matching the current top instance, target part/platform, and timing clock;
   unscoped values remain artifact evidence. Resource fit requires one scoped
   post-route utilization artifact with a complete one-to-one capacity key set.
+  A declared `amd.vivado.routed_checkpoint` is retained as a cold artifact: its
+  bytes are not expanded into the graph, but its content hash can close the
+  routed-design identity required by post-route knowledge applicability.
 - **Plugins:** explicitly selected `hlsgraph.extractors.v1` entry points can add
   dialect or vendor adapters. Installed plugins are not executed merely by
   opening a bundle. Entity, relation, artifact, and predicate kinds are
@@ -155,8 +203,16 @@ AMD concepts the universal schema.
 
 ## Service architecture
 
-The Python SDK, CLI, REST adapter, and MCP facade delegate graph search and
-evidence exploration to the same `CoreService`. REST and MCP are read-only.
+The Python SDK, CLI, REST adapter, and MCP facade delegate graph search,
+evidence exploration, and unified retrieval to the same `CoreService`. The
+retrieval layer fuses deterministic lexical channels with typed graph ranking,
+while preserving facts, guidance, private local metadata, and predictions as
+separate planes. Facts/evidence have their own lexical corpus, BM25 statistics,
+graph seeds, RRF, and score normalization; knowledge, local unreviewed text,
+and predictions cannot change fact ordering. Executable knowledge bindings
+must prove every rule condition from the same target-instance context, with
+missing or ambiguous premises failing closed. REST and MCP are read-only; MCP exposes one `explore` tool by
+default and keeps the v0.2 narrow surface behind explicit compatibility opt-in.
 The human view is a separate self-contained HTML presentation of the canonical
 graph, with stage/authority filtering and evidence details. ML export emits
 deterministic JSONL (and optional Parquet/PyG) while keeping static features,
@@ -164,7 +220,7 @@ observations, labels, and predictions physically distinct.
 
 ## Current implementation boundary
 
-v0.1 can index a single-kernel manifest, parse the supplied source/IR/report
+v0.3.0 can index a single-kernel manifest, parse the supplied source/IR/report
 formats, persist an append-oriented SQLite ledger, query and render an active
 snapshot, run explicitly configured generic local/SSH stages, and export ML
 tables. CI uses synthetic fixtures and no vendor installation.

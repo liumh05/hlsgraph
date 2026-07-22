@@ -421,22 +421,19 @@ def test_orchestrator_requires_one_explicit_correctness_campaign_and_evidence_va
             run.metadata["tool_truth"] = True
             return run
 
-    without_validator = StageOrchestrator(
-        ToolTruthRunner(script("campaign.default", "campaign.default"))
-    ).execute(requests)
-    assert without_validator.gates_complete is True
-    assert without_validator.tool_truth is False
-    assert without_validator.verified is False
-
-    validated = StageOrchestrator(
-        ToolTruthRunner(script("campaign.default", "campaign.default")),
-        evidence_validator=lambda _run, evidence_id: evidence_id.startswith(
-            ("verification.", "derivation.")
-        ),
-    ).execute(requests)
-    assert validated.gates_complete is True
-    assert validated.tool_truth is True
-    assert validated.verified is True
+    # Synthetic/fake runners cannot be upgraded by mutating public metadata,
+    # regardless of whether a caller also supplies an evidence callback.
+    with pytest.raises(RunnerProtocolError, match="not trusted"):
+        StageOrchestrator(
+            ToolTruthRunner(script("campaign.default", "campaign.default"))
+        ).execute(requests)
+    with pytest.raises(RunnerProtocolError, match="not trusted"):
+        StageOrchestrator(
+            ToolTruthRunner(script("campaign.default", "campaign.default")),
+            evidence_validator=lambda _run, evidence_id: evidence_id.startswith(
+                ("verification.", "derivation.")
+            ),
+        ).execute(requests)
 
 
 def test_sqlite_ledger_is_append_only_and_read_connections_are_query_only(tmp_path):

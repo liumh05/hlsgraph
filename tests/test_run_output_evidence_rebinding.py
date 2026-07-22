@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 
 import hlsgraph.sdk as sdk_module
-from hlsgraph.bundle import GraphBundle
+import pytest
+
+from hlsgraph.bundle import BundleError, GraphBundle
 from hlsgraph.extract import ExtractionResult
 from hlsgraph.graph import CanonicalGraph
 from hlsgraph.manifest import minimal_manifest
@@ -118,6 +120,7 @@ def test_declared_run_output_rebinds_typed_evidence_before_atomic_commit(
         backend="runner.fixture",
         request_hash="a" * 64,
         status=RunStatus.SUCCEEDED,
+        metadata={"workload_id": "tb.default", "testcase_id": "case.default"},
     )
     output = ToolOutputSpec(
         path="reports/fixture.rpt",
@@ -134,10 +137,25 @@ def test_declared_run_output_rebinds_typed_evidence_before_atomic_commit(
         staging_directory=staging,
     )
 
+    conflicting_output = ToolOutputSpec(
+        path=output.path, kind=output.kind,
+        metadata={"workload_id": "tb.other"},
+    )
+    with pytest.raises(BundleError, match="workload_id conflicts"):
+        project._commit_declared_run_outputs(
+            snapshot, manifest, run, [conflicting_output], execution,
+        )
+
     result = project._commit_declared_run_outputs(
         snapshot, manifest, run, [output], execution,
     )
 
+    managed = next(
+        item for item in project.bundle.store.artifacts(snapshot.id)
+        if item.producer_run_id == run.id
+    )
+    assert managed.metadata["workload_id"] == "tb.default"
+    assert managed.metadata["testcase_id"] == "case.default"
     observation = result.observations[0]
     direct, chained = result.derivations
     assert observation.id != captured["observation"]

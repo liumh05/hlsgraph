@@ -44,6 +44,13 @@ Run-backed tool truth is checked by the versioned policy
 Both boundaries replay the run's stage, toolchain, environment, command, and
 working directory against the immutable snapshot manifest; metadata booleans
 alone cannot establish tool truth. Index runs cannot claim external tool truth.
+In addition, each present tool-truth run must have a pipeline-issued
+`ExecutionAttestation` and ledger `ExecutionCommitReceipt`.  The attestation
+closes the runner identity/fingerprint, request and canonical run ID, immutable
+snapshot identity hashes, toolchain, output declarations, and exact managed
+artifact IDs/paths/kinds/sizes/SHA-256 values.  Its serializable form is public
+audit data, not a write credential; the initial commit requires a private
+one-shot StageOrchestrator capability.
 The canonical producer mappings include `csynth -> schedule|csynth`,
 `rtl_cosim|cosim -> cosim`, `rtl_export|rtl -> rtl`,
 `vivado_synth|post_synth -> post_synth`, and exact `post_place`, `post_route`,
@@ -73,7 +80,7 @@ opt into the same policy with this complete metadata contract:
 Kinds already known to the policy cannot use this extension contract to acquire
 a different stage meaning.
 
-## Requested, effective/applied, and achieved
+## Requested, selected declaration, tool-applied, and achieved
 
 These states must remain distinct:
 
@@ -82,9 +89,10 @@ These states must remain distinct:
   `authority=declared_constraint`. Inactive preprocessor regions and Tcl whose
   control/substitution context cannot be proven literal are diagnostics, not
   directive facts.
-- **Effective declared** is the winner after deterministic precedence among
-  declarations. `directive.effective` means HLSGraph resolved the declarations;
-  its metadata explicitly says `tool_applied=false`.
+- **Selected declaration** is the winner after deterministic precedence among
+  declarations. `directive.declared_selected` records only that deterministic
+  declaration choice; its metadata explicitly says `tool_applied=false`. The
+  source stage never emits an observation named "effective".
 - **Applied/effective by tool** requires tool evidence, such as
   `directive.tool_status` and `directive.tool_effective`. A tool may report
   `applied`, `ignored`, `unmet`, `rejected`, or `unknown`.
@@ -93,6 +101,25 @@ These states must remain distinct:
 
 No precedence rule upgrades a declaration into a compiler decision. Likewise,
 an achieved csynth value is not silently replaced by a post-route value.
+
+Each resolved directive entity and each of its directive observations carries
+its own `directive_instance_id`, `scope_id`, and `scope_kind`. Depending on the
+directive, it also carries the exact `function_id`, `loop_id`, `variable_id`, or
+`port_id`, plus the proven `scope_resolution`. Knowledge retrieval reads these
+fields only from that current record;
+it does not reconstruct scope by symbol name or combine fields from different
+directive records. Ambiguous or unresolved scope therefore remains incomplete
+and cannot activate scoped guidance. The explicit regex-degraded scanner records
+`scope_resolution=regex_degraded`; only standard AST or exact external scope
+resolution can activate the built-in AMD/AXI directive rules.
+
+Two scoped-option cases are deliberately explicit. `INTERFACE` stores the
+source option under `options.mode`; retrieval projects that same value to the
+canonical applicability field `interface_mode` (`m_axi`, `s_axilite`, or
+`axis`). `DEPENDENCE` uses an enclosing `hls.loop`, `hls.function`, or
+`hls.kernel` as `scope_id`; its named operand has a separate `variable_id` in
+the same uniquely identified function. A variable or port is never accepted as
+the DEPENDENCE scope, and either missing identity makes guidance inapplicable.
 
 ## Core contracts
 
@@ -129,15 +156,35 @@ both manifest and toolchain snapshot hashes.
 | `Relation` | Explicit typed edge with endpoints, stage, authority, anchors, mapping kind, and completeness. |
 | `Anchor` (`SourceAnchor`) | Artifact and source/IR location plus mapping kind and ambiguity. |
 | `Observation` | Atomic subject/predicate/value statement with unit, stage, authority, run, artifact, workload, and completeness. |
+| `ObservationSource` | One canonical report commitment tying its artifact SHA-256 and fixed parser identity to the observation's predicate/value/unit payload. |
 | `EvidenceRef` | Typed reference to an observation, derivation, artifact, entity anchor, or explicit relation, with an explicit snapshot and optional anchor. |
 | `Derivation` | Recomputable deterministic output with algorithm/version and generic `EvidenceRef` inputs. Legacy observation-ID inputs normalize to evidence references without changing legacy stable IDs. |
 | `EntityCorrespondence` | Explicit evidence-backed entity mapping across snapshots, with mapping kind, producer/version, authority, and completeness. It never arises from name matching. |
 | `Diagnostic` | Structured extraction/tool health event with stage, severity, subject/artifact, and guidance. |
 | `VerificationResult` | Independent correctness evidence for a specific method and optional workload. |
 | `ToolRun` | Immutable stage request/result with backend, command, status, failure class, artifacts, and gates. |
+| `ExecutionAttestation` | Publicly re-verifiable binding from a pipeline-validated real execution to immutable snapshot/toolchain/request/output identities. |
+| `ExecutionCommitReceipt` | Ledger-issued receipt proving that the corresponding attestation entered through the one-shot capability-gated transaction. |
 | `KnowledgeRule` | Versioned documentation rule and citation, stored outside design observations. |
+| `KnowledgeBinding` | Review-gated, target-specific selector for one rule; never a design fact. |
+| `CoverageEntry` | One explicitly classified document section; only `rule` entries may list rule/binding IDs. |
+| `KnowledgeTargetCoverage` | `bound` or `no_normative` classification for one key in the canonical supported-target registry. |
+| `CoverageManifest` | Versioned coverage scope, exact target inventory, review provenance, and explicit rule/binding ownership. |
 | `PredictionEnvelope` | Model output with model/data/schema version, uncertainty, applicability, OOD metadata, and an optional action link; it remains outside the fact layer. |
 | `LabelSpec` | Snapshot-scoped ML label reference to a real observation, including stage, unit, mask, and missing/censoring state. |
+| `RetrievalTrace` | Query hash, snapshot/graph identity, algorithm profile name, independent `profile_schema_version`, deterministic `profile_hash`, channel counts, timing, budget, and truncation state. |
+
+For a run-backed tool or compiler observation, `artifact_id`, the sole
+`SourceAnchor.artifact_id`, and `ObservationSource.artifact_id` must be the same
+canonical report. The source record is a deterministic content commitment, not
+a signature and not a write credential. At commit and retrieval time HLSGraph
+requires the valid execution attestation/receipt, live managed-CAS bytes, a
+unique declared output path, and an exact replay of the pinned built-in
+Vitis/Vivado parser; the replayed predicate, value, unit, parser identity, and
+artifact hash must yield exactly one matching output. A sibling or second report
+cannot donate provenance. Legacy v0.1/v0.2 source-less observations remain
+readable with their original IDs, but cannot acquire this v0.3 executable-evidence
+qualification merely from metadata.
 
 When a prediction carries `action_id`, that action must belong to the
 prediction's input snapshot. `Project.index_variant(action_id)` refuses an
@@ -171,6 +218,16 @@ The default architecture projection excludes software-call and LLVM-CFG edges
 from impact semantics. Those edges remain queryable evidence but are not
 hardware topology.
 
+Serialized v0.3 coverage manifests must explicitly name
+`target_registry_version`. For a canonical scope, `target_inventory` must equal
+that independently versioned registry exactly. Every rule and binding appears
+in exactly one `rule` entry, while non-rule entries carry neither ID type.
+These fields are parsed, not inferred. Coverage completeness alone does not
+authorize execution: bindings require an installed `review_ready` pack and are
+re-gated when read. The public OpenIR pack has no bindings; MLIR/LLVM parsing
+still emits structural evidence, but neither parser output nor caller-written
+graph metadata is a trusted language-spec attestation.
+
 ## Deterministic static feature derivations
 
 Indexing derives versioned scope-level ML evidence directly from canonical
@@ -181,6 +238,13 @@ entities and relations. The built-in predicates are
 `feature.dependence_distance` has the same stable per-scope row contract, but
 its value remains `null` unless an entity or relation explicitly records a
 proven distance.
+
+Static derivation evidence and normative guidance are separate contracts. In
+particular, the generic MLIR Regions rule does not prove
+`feature.trip_count` or `feature.loop_bounds`. Those predicates require an
+explicitly recognized loop operation and bound provenance from the extractor;
+the v0.3 public knowledge inventory classifies their generic specification
+binding as `no_normative`.
 
 Every row records its algorithm/version, stage, authority, completeness, and
 typed evidence references. Unknown values are `null` with `missing` or
@@ -226,7 +290,8 @@ observation's identity. Conflicts are evidence to inspect, not rows to overwrite
 Each gate is `pass`, `fail`, or `unknown` and cites evidence IDs. A design is
 reported as verified only when all three gates pass and none is supported only
 by synthetic evidence. A successful process exit is not automatically a passed
-gate. In v0.1, a trusted correctness `pass` specifically requires both CSim and
+gate. Under the current gate contract, a trusted correctness `pass`
+specifically requires both CSim and
 RTL cosim `pass` evidence from trusted tool runs, bound to the same explicit
 campaign and workload. Other verification methods may coexist as independent
 evidence, but they do not silently substitute for either required result. The
@@ -238,6 +303,17 @@ capacity keys are part of that closure. A `StageResult` is verified only when
 the current invocation itself contains the eligible CSim/cosim cohort and that
 eligible physical run, so a partial rerun cannot inherit unrelated historical
 passes.
+
+Normative knowledge applicability is stricter than merely finding a gate name.
+The retriever requires an evidence-qualified, snapshot-local gate context.
+Correctness includes typed workload observations and report identity; resource
+fit includes complete utilization plus target/device/capacity identity; routed
+timing guidance additionally includes timing-report, constraint, and routed
+checkpoint identities. The retriever validates every leaf against the immutable
+stage-output declaration and live managed bytes; timing additionally validates
+all XDC snapshot inputs and includes their artifact IDs and hashes in the
+constraint evidence identity. These hashes qualify guidance only and never
+create or upgrade a verification fact.
 
 ## ML truth separation
 

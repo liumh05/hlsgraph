@@ -370,6 +370,13 @@ def test_explicit_v01_to_v02_sqlite_migration_preserves_derivation_id(tmp_path) 
             "add typed feature evidence, entity correspondence, and action "
             "materialization contracts"
         ),
+    }, {
+        "from_version": "0.2.0",
+        "to_version": "0.3.0",
+        "description": (
+            "add knowledge pack inventory, fail-closed bindings, coverage "
+            "manifests, and rebuildable knowledge FTS"
+        ),
     }]
     assert store.migration_plan() == planned
     assert store.migrate() == planned
@@ -377,7 +384,7 @@ def test_explicit_v01_to_v02_sqlite_migration_preserves_derivation_id(tmp_path) 
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_info WHERE key='schema_version'"
-        ).fetchone()[0] == "0.2.0"
+        ).fetchone()[0] == "0.3.0"
         assert connection.execute(
             "SELECT schema_version FROM graph_views"
         ).fetchone()[0] == "0.2.0"

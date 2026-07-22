@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+namespace std {
+class string {
+ public:
+  using size_type = decltype(sizeof(0));
+};
+class ostream {
+ public:
+  template <typename T> ostream& operator<<(const T&) { return *this; }
+};
+inline ostream cout;
+inline ostream& endl(ostream& value) { return value; }
+}  // namespace std
+
+inline void srand(unsigned int) {}
+inline int rand() { return 4; }

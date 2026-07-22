@@ -26,19 +26,19 @@ async def smoke(project_root: Path) -> None:
             initialized = await session.initialize()
             listed = await session.list_tools()
             names = sorted(tool.name for tool in listed.tools)
-            required = {"overview", "search", "health", "evidence", "knowledge"}
+            required = {"explore"}
             missing = sorted(required - set(names))
             if missing:
                 raise RuntimeError(f"MCP server is missing tools: {', '.join(missing)}")
-            health = await session.call_tool("health", {})
-            overview = await session.call_tool("overview", {"depth": 1, "top_k": 4})
-            if health.isError or overview.isError:
-                raise RuntimeError("health or overview returned an MCP tool error")
+            explored = await session.call_tool(
+                "explore", {"query": "top kernel architecture", "max_chars": 13_000},
+            )
+            if explored.isError:
+                raise RuntimeError("explore returned an MCP tool error")
             print(json.dumps({
                 "server": initialized.serverInfo.name,
                 "tools": names,
-                "health_content_blocks": len(health.content),
-                "overview_content_blocks": len(overview.content),
+                "explore_content_blocks": len(explored.content),
                 "status": "MCP_SMOKE_OK",
             }, ensure_ascii=False, sort_keys=True))
 

@@ -1,0 +1,783 @@
+{
+  "schema_version": "2.0",
+  "pack_id": "hlsgraph.open_ir.public_guidance.2026_07_21",
+  "title": "Open IR interpretation rules for the supported MLIR, LLVM, and CIRCT surface",
+  "license": "Apache-2.0",
+  "metadata": {
+    "binding_condition_contract": "hlsgraph.binding_condition_entailment.v1",
+    "content_policy": "Project-authored short paraphrases and citations only; referenced specifications and repositories are not redistributed.",
+    "review_status": "unreviewed",
+    "coverage_boundary": "Current MLIR/LLVM text parsers preserve structural evidence; no executable language-spec compatibility binding is published.",
+    "truth_boundary": "Default text parsing is not a language-spec attestation. OpenIR rules remain lexical guidance until a capability-authorized, persisted semantic-adapter contract exists.",
+    "hlsgraph_local_derivation_policy": "Complete-domain aggregation and masks, artifact-revision attestation, ambiguity handling, stable evidence identity, and prohibitions on promoting IR containment, CFG, calls, SSA uses, or dialect operations directly to hardware topology are HLSGraph policies. The pinned sources establish only the native IR syntax and semantics named by each rule."
+  },
+  "documents": [
+    {
+      "document_id": "llvm.mlir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "title": "MLIR Language Reference",
+      "official_url": "https://mlir.llvm.org/docs/LangRef/",
+      "publisher": "LLVM Project",
+      "kind": "specification",
+      "license_note": "Reference metadata only; the documentation is not included in HLSGraph."
+    },
+    {
+      "document_id": "llvm.mlir.builtin",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "title": "MLIR Builtin Location Attribute Definitions",
+      "official_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+      "publisher": "LLVM Project",
+      "kind": "specification",
+      "license_note": "Reference metadata only; the documentation is not included in HLSGraph."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "title": "LLVM Language Reference Manual",
+      "official_url": "https://llvm.org/docs/LangRef.html",
+      "publisher": "LLVM Project",
+      "kind": "specification",
+      "license_note": "Reference metadata only; the documentation is not included in HLSGraph."
+    },
+    {
+      "document_id": "llvm.ir.debug",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "title": "Source Level Debugging with LLVM",
+      "official_url": "https://llvm.org/docs/SourceLevelDebugging.html",
+      "publisher": "LLVM Project",
+      "kind": "specification",
+      "license_note": "Reference metadata only; the documentation is not included in HLSGraph."
+    },
+    {
+      "document_id": "circt.handshake",
+      "document_version": "git-ef03d45c960607315a8b62903b92d072d8542e30",
+      "title": "CIRCT Handshake Operation Definitions",
+      "official_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
+      "publisher": "LLVM CIRCT Project",
+      "kind": "dialect_reference",
+      "license_note": "Reference metadata only; the documentation is not included in HLSGraph."
+    },
+    {
+      "document_id": "scalehls.paper",
+      "document_version": "arxiv-2107.11673v4",
+      "title": "ScaleHLS: A New Scalable High-Level Synthesis Framework on Multi-Level Intermediate Representation",
+      "official_url": "https://arxiv.org/abs/2107.11673v4",
+      "publisher": "ScaleHLS authors",
+      "kind": "primary_publication",
+      "license_note": "Citation metadata only; the paper and repository are not redistributed."
+    },
+    {
+      "document_id": "dynamatic.mlir_primer",
+      "document_version": "git-4dd0bbc86aa55d01854b93fbbc8b818cc318ea80",
+      "title": "Dynamatic MLIR Primer",
+      "official_url": "https://github.com/EPFL-LAP/dynamatic/blob/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+      "publisher": "EPFL LAP",
+      "kind": "project_documentation",
+      "license_note": "Reference metadata only; the documentation and repository are not included in HLSGraph."
+    }
+  ],
+  "rules": [
+    {
+      "document_id": "llvm.mlir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Blocks and Regions",
+      "rule_id": "mlir.containers_preserve_ir_scope",
+      "title": "Preserve MLIR module and function scope as IR evidence",
+      "applicability": {
+        "ir": "mlir",
+        "stage": "mlir"
+      },
+      "condition": {
+        "mlir_container_present": true
+      },
+      "effect": {
+        "preserve_ir_scope": true,
+        "hardware_instance_not_implied": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
+      "summary": "MLIR module and function containers preserve compiler IR scope; their presence does not establish an HLS hardware instance.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.mlir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Dialects",
+      "rule_id": "mlir.multiple_dialects_keep_native_semantics",
+      "title": "Preserve dialect identity and pass stage",
+      "applicability": {
+        "ir": "mlir",
+        "stage": "mlir"
+      },
+      "condition": {
+        "mlir_operation_present": true
+      },
+      "effect": {
+        "preserve_dialect": true,
+        "preserve_pass_stage": true,
+        "generic_topology_projection_forbidden": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
+      "summary": "MLIR modules may contain multiple dialects whose operations retain dialect-defined semantics; a generic operation cannot be promoted to hardware topology.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.mlir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Regions",
+      "rule_id": "mlir.region_semantics_come_from_owner",
+      "title": "Do not assign one topology meaning to every MLIR region",
+      "applicability": {
+        "ir": "mlir",
+        "stage": "mlir"
+      },
+      "condition": {
+        "mlir_containment_or_ssa_relation_present": true
+      },
+      "effect": {
+        "preserve_containment": true,
+        "dialect_semantics_required_for_hardware_projection": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
+      "summary": "A region's semantics are defined by its owner, so containment or SSA use alone does not establish HLS connectivity.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.mlir.builtin",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Location Attributes",
+      "rule_id": "mlir.locations_are_mapping_evidence",
+      "title": "Use typed MLIR Location as mapping evidence",
+      "applicability": {
+        "ir": "mlir",
+        "stage": "mlir"
+      },
+      "condition": {
+        "typed_mlir_location_present": true
+      },
+      "effect": {
+        "preserve_location_kind": true,
+        "many_to_many_mapping_allowed": true,
+        "name_guessing_forbidden": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+      "summary": "Structured MLIR locations are mapping evidence; unresolved or ambiguous mappings remain explicit and names are never used to invent an edge.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Allowing explicit many-to-many mappings, retaining ambiguity, and forbidding name-based edge invention are HLSGraph mapping policies; the source defines the typed location forms."}
+    },
+    {
+      "document_id": "llvm.mlir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Operations",
+      "rule_id": "mlir.operation_histograms_require_dialect_schema",
+      "title": "Require dialect-qualified operation aggregates",
+      "applicability": {
+        "ir": "mlir",
+        "stage": "mlir"
+      },
+      "condition": {
+        "dialect_qualified_operation_histogram_present": true
+      },
+      "effect": {
+        "aggregate_requires_complete_domain": true,
+        "dialect_qualified_schema_required": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
+      "summary": "An MLIR operation aggregate is meaningful only with dialect-qualified operation names and an explicitly complete current artifact domain.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Functions",
+      "rule_id": "llvm.containers_are_ir_scope_evidence",
+      "title": "Treat LLVM modules and functions as IR scope",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "llvm_container_present": true
+      },
+      "effect": {
+        "authority": "compiler_decision",
+        "hardware_instance": false,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
+      "summary": "LLVM modules and functions delimit low-level IR scope and do not by themselves identify instantiated HLS hardware.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Instruction Reference",
+      "rule_id": "llvm.instructions_are_typed_operation_evidence",
+      "title": "Preserve LLVM instructions as typed operation evidence",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "llvm_instruction_present": true
+      },
+      "effect": {
+        "authority": "compiler_decision",
+        "preserve_opcode": true,
+        "hardware_operation_not_implied": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
+      "summary": "LLVM instructions are typed low-level compiler operations; an instruction is evidence, not a scheduled or bound hardware operation.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Basic Blocks and Terminators",
+      "rule_id": "llvm.cfg_is_low_level_control_evidence",
+      "title": "Keep LLVM CFG out of HLS topology",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "basic_blocks_or_branches_present": true
+      },
+      "effect": {
+        "authority": "compiler_decision",
+        "hardware_topology": false,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
+      "summary": "LLVM basic blocks and branch successors are low-level control evidence and are never promoted directly to HLS hardware edges.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Call Instruction",
+      "rule_id": "llvm.calls_are_low_level_ir_evidence",
+      "title": "Keep resolved LLVM calls out of hardware topology",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "resolved_call_like_instruction_present": true
+      },
+      "effect": {
+        "authority": "compiler_decision",
+        "hardware_topology": false,
+        "hardware_instance": false,
+        "callee_resolution_must_be_explicit": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
+      "summary": "A resolved LLVM call-like instruction is low-level compiler evidence and does not establish an HLS hardware instance or topology edge.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.debug",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Debugging Information Format",
+      "rule_id": "llvm.debug_metadata_is_source_mapping_evidence",
+      "title": "Preserve LLVM debug locations without claiming uniqueness",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "debug_metadata_present": true
+      },
+      "effect": {
+        "preserve_debug_location": true,
+        "many_to_many_mapping_allowed": true,
+        "hardware_identity_not_implied": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
+      "summary": "LLVM debug metadata can relate IR to source but may be transformed or incomplete; it is mapping evidence rather than unique hardware identity.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Instruction Reference / Opcode Aggregate",
+      "rule_id": "llvm.operation_histograms_require_opcode_schema",
+      "title": "Require opcode-qualified LLVM operation aggregates",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "opcode_qualified_operation_histogram_present": true
+      },
+      "effect": {
+        "aggregate_requires_complete_domain": true,
+        "opcode_schema_required": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
+      "summary": "An LLVM operation histogram must be recomputed over a complete current operation domain using explicit opcodes.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "GetElementPtr Instruction",
+      "rule_id": "llvm.index_histograms_require_explicit_operand_schema",
+      "title": "Require explicit LLVM GEP index operand aggregates",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "typed_gep_index_histogram_present": true
+      },
+      "effect": {
+        "gep_aggregate_requires_complete_domain": true,
+        "explicit_gep_index_operand_schema_required": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
+      "summary": "A GEP index aggregate covers only explicitly represented getelementptr index operands over a declared complete current operation domain.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Requiring a complete aggregation domain and treating absent evidence as unknown rather than zero are HLSGraph derivation policies."}
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Integer Type",
+      "rule_id": "llvm.bitwidth_histograms_require_integer_width_schema",
+      "title": "Require explicit LLVM integer width aggregates",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "typed_bitwidth_histogram_present": true
+      },
+      "effect": {
+        "aggregate_requires_complete_domain": true,
+        "explicit_integer_width_schema_required": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
+      "summary": "Bitwidth aggregates count explicit integer type occurrences and do not infer widths absent from the current LLVM evidence domain.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "llvm.ir.langref",
+      "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+      "section": "Memory Access and Addressing Instructions",
+      "rule_id": "llvm.memory_access_histograms_require_opcode_schema",
+      "title": "Require typed LLVM memory-access aggregates",
+      "applicability": {
+        "ir": "llvm",
+        "stage": "llvm"
+      },
+      "condition": {
+        "typed_memory_access_histogram_present": true
+      },
+      "effect": {
+        "aggregate_requires_complete_domain": true,
+        "memory_bank_not_implied": true,
+        "port_binding_not_implied": true,
+        "specification_revision": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "artifact_revision_required_for_binding": true,
+        "specification_revision_does_not_imply_artifact_revision": true
+      },
+      "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
+      "summary": "Memory-access aggregates are recomputed from explicit LLVM opcodes and do not identify eventual HLS banks or ports.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+    },
+    {
+      "document_id": "circt.handshake",
+      "document_version": "git-ef03d45c960607315a8b62903b92d072d8542e30",
+      "section": "Handshake operation and FuncOp definitions",
+      "rule_id": "circt.handshake_has_dataflow_semantics",
+      "title": "Retain native Handshake dataflow-region evidence",
+      "applicability": {
+        "ir": "mlir",
+        "dialect": "handshake",
+        "stage": "mlir"
+      },
+      "condition": {
+        "handshake_operation_present": true
+      },
+      "effect": {
+        "native_ir_evidence_only": true,
+        "hardware_topology": false,
+        "preserve_operation_kind": true,
+        "unsupported_operations_remain_evidence_only": true
+      },
+      "citation_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
+      "summary": "Handshake operations belong to fine-grained dataflow graph regions; this native compiler evidence is not itself post-synthesis hardware topology.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Keeping native Handshake evidence separate from post-synthesis topology and leaving unsupported operations evidence-only are HLSGraph truth-boundary policies."}
+    }
+  ],
+  "bindings": [],
+  "coverage": {
+    "pack_id": "hlsgraph.open_ir.public_guidance.2026_07_21",
+    "coverage_scope": "hlsgraph.supported_open_ir_contract_surface",
+    "review_status": "unreviewed",
+    "reviewers": [],
+    "source_hashes": {},
+    "entries": [
+      {
+        "document_id": "llvm.mlir.langref",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "section": "Blocks, Regions, Dialects, and Operations",
+        "status": "rule",
+        "rule_ids": [
+          "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.containers_preserve_ir_scope",
+          "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.multiple_dialects_keep_native_semantics",
+          "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.region_semantics_come_from_owner",
+          "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.operation_histograms_require_dialect_schema"
+        ],
+        "binding_ids": []
+      },
+      {
+        "document_id": "llvm.mlir.builtin",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "section": "Location Attributes",
+        "status": "rule",
+        "rule_ids": [
+          "llvm.mlir.builtin:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.locations_are_mapping_evidence"
+        ],
+        "binding_ids": []
+      },
+      {
+        "document_id": "llvm.ir.langref",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "section": "Functions, Instructions, Types, Control Flow, Calls, and Memory Access",
+        "status": "rule",
+        "rule_ids": [
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.containers_are_ir_scope_evidence",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.instructions_are_typed_operation_evidence",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.cfg_is_low_level_control_evidence",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.calls_are_low_level_ir_evidence",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.operation_histograms_require_opcode_schema",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.index_histograms_require_explicit_operand_schema",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.bitwidth_histograms_require_integer_width_schema",
+          "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.memory_access_histograms_require_opcode_schema"
+        ],
+        "binding_ids": []
+      },
+      {
+        "document_id": "llvm.ir.debug",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "section": "Debugging Information Format",
+        "status": "rule",
+        "rule_ids": [
+          "llvm.ir.debug:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.debug_metadata_is_source_mapping_evidence"
+        ],
+        "binding_ids": []
+      },
+      {
+        "document_id": "circt.handshake",
+        "document_version": "git-ef03d45c960607315a8b62903b92d072d8542e30",
+        "section": "Handshake operation and FuncOp definitions",
+        "status": "rule",
+        "rule_ids": [
+          "circt.handshake:git-ef03d45c960607315a8b62903b92d072d8542e30:circt.handshake_has_dataflow_semantics"
+        ],
+        "binding_ids": []
+      },
+      {
+        "document_id": "scalehls.paper",
+        "document_version": "arxiv-2107.11673v4",
+        "section": "Multi-level HLS IR",
+        "status": "citation_only",
+        "rationale": "The publication describes ScaleHLS but does not define HLSGraph's adapter or semantic-attestation contract; no executable public rule is inferred."
+      },
+      {
+        "document_id": "dynamatic.mlir_primer",
+        "document_version": "git-4dd0bbc86aa55d01854b93fbbc8b818cc318ea80",
+        "section": "Handshake Dialect",
+        "status": "citation_only",
+        "rationale": "The project documentation provides adapter context but does not define HLSGraph's semantic-attestation contract; no executable public rule is inferred."
+      }
+    ],
+    "target_inventory": [
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.mlir.module",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.mlir.function",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.mlir.operation",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.llvm.module",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.llvm.function",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.llvm.block",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "ir.llvm.operation",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "hls.process",
+        "status": "no_normative",
+        "rationale": "A projected process requires adapter-specific hardware semantics and cannot be established by the cited generic IR specification.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "entity_kind",
+        "target": "hls.buffer",
+        "status": "no_normative",
+        "rationale": "A projected buffer requires adapter-specific hardware semantics and cannot be established by the cited generic IR specification.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "ir.contains",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "ir.ssa_use",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "cross.maps_to",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "llvm.cfg",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "llvm.calls",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "handshake.dataflow",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "cross.projects_to",
+        "status": "no_normative",
+        "rationale": "Hardware projection is an HLSGraph adapter decision and is not a normative consequence of generic MLIR syntax.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "relation_kind",
+        "target": "hls.streams_to",
+        "status": "no_normative",
+        "rationale": "An HLS stream edge requires explicit dialect or tool evidence beyond generic MLIR or LLVM structure.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.operation_histogram",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.index_histogram",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.bitwidth",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.memory_access",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.debug_location",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.trip_count",
+        "status": "no_normative",
+        "rationale": "Trip counts require a proven loop-bound interpretation; generic region syntax alone is insufficient.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.loop_bounds",
+        "status": "no_normative",
+        "rationale": "Loop bounds require a proven operation-specific interpretation; generic region syntax alone is insufficient.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.dependence_distance",
+        "status": "no_normative",
+        "rationale": "The derivation reports only distances proved by upstream evidence; HLSGraph does not define a dependence-analysis theorem.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "predicate",
+        "target": "feature.software_call_targets",
+        "status": "no_normative",
+        "rationale": "Software-call targets are explicitly non-hardware ML evidence and have no HLS architecture rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "mapping.ambiguous_mlir_location",
+        "status": "no_normative",
+        "binding_ids": [],
+        "rationale": "The default text parser preserves this structure as evidence but has no capability-authorized language-spec compatibility contract; normative OpenIR guidance remains lexical-only."
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "mapping.unresolved_mlir_location",
+        "status": "no_normative",
+        "rationale": "Unresolved mapping is an HLSGraph evidence-completeness diagnostic rather than an externally normative language rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "mlir.unsupported_dialect",
+        "status": "no_normative",
+        "rationale": "Supported-dialect selection is an adapter capability rather than an MLIR language rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "mlir.experimental_text_parser",
+        "status": "no_normative",
+        "rationale": "Experimental parser status is an implementation diagnostic rather than an external specification rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "mlir.operation_limit",
+        "status": "no_normative",
+        "rationale": "The operation limit is a local resource guard with no external normative rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "llvm.bitcode_requires_plugin",
+        "status": "no_normative",
+        "rationale": "Native bitcode support is a plugin capability boundary rather than an LLVM semantic rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "diagnostic_code",
+        "target": "llvm.instruction_limit",
+        "status": "no_normative",
+        "rationale": "The instruction limit is a local resource guard with no external normative rule.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "hlsgraph.plugin_contract",
+        "target": "scalehls.adapter",
+        "status": "no_normative",
+        "rationale": "The ScaleHLS publication does not define HLSGraph's public Python adapter contract.",
+        "binding_ids": []
+      },
+      {
+        "target_kind": "hlsgraph.plugin_contract",
+        "target": "dynamatic.adapter",
+        "status": "no_normative",
+        "rationale": "The Dynamatic project does not define HLSGraph's public Python adapter contract.",
+        "binding_ids": []
+      }
+    ],
+    "target_registry_version": "hlsgraph.knowledge_supported_targets.v1"
+  }
+}
