@@ -370,6 +370,7 @@ def test_replay_rejects_forged_options(tmp_path: Path) -> None:
     ("pragma", "expected_mode"),
     [
         ("#pragma HLS pipeline II=2", "pipeline.explicit_ii.enabled"),
+        ("#pragma HLS pipeline II=2 rewind", "pipeline.explicit_ii.enabled"),
         ("#pragma HLS pipeline off", None),
         ("#pragma HLS pipeline II=2 unknown_option=1", None),
     ],
@@ -420,6 +421,55 @@ def test_only_reviewed_replayed_options_mint_semantic_mode(
             "derived_from_current_directive_options_v1",
         }
         assert len(context["directive_options_identity"]) == 1
+
+
+def test_function_pipeline_rewind_cannot_activate_loop_only_semantics(
+    tmp_path: Path,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n#pragma HLS pipeline II=2 rewind\n  int value = 0;\n}\n",
+    )
+    directive = next(
+        item for item in result.graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    assert directive.attrs["scope_kind"] == "hls.kernel"
+    _persist(bundle, result.graph, result.observations)
+    context = _context(bundle, snapshot, result.graph, directive)
+    assert "directive_semantic_mode" not in context
+    assert "directive_options_qualified" not in context
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_mode"),
+    [
+        ("variable=data", "array_partition.complete.enabled"),
+        ("variable=data type=complete", "array_partition.complete.enabled"),
+        ("variable=data complete", None),
+        ("variable=data type=complete dim=1", None),
+    ],
+)
+def test_array_partition_mode_requires_reviewed_option_shape(
+    tmp_path: Path, options: str, expected_mode: str | None,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n  int data[4];\n"
+        f"#pragma HLS array_partition {options}\n"
+        "  data[0] = 1;\n}\n",
+    )
+    directive = next(
+        item for item in result.graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    assert directive.attrs["scope_kind"] == "hls.memory"
+    _persist(bundle, result.graph, result.observations)
+    context = _context(bundle, snapshot, result.graph, directive)
+    if expected_mode is None:
+        assert "directive_semantic_mode" not in context
+    else:
+        assert context["directive_semantic_mode"] == {expected_mode}
 
 
 @pytest.mark.parametrize(

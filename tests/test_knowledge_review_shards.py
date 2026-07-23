@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "8765539f5ab34c3110969b9bb12bf2b46ca59919747da0fecf8724dd7f7e1bc6"
+    "99b94e5bb48f83244eccd79d11b5d00e7d6eb39f97c5569e81b27156b2fbfa2d"
 )
 
 

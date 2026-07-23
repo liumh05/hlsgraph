@@ -172,6 +172,9 @@ def _directive_semantic_mode(directive: Entity) -> str | None:
             return None
         if not positive_integer(options.get("ii")):
             return None
+        rewind = "rewind" in bare or options.get("rewind") is True
+        if rewind and directive.attrs.get("scope_kind") != "hls.loop":
+            return None
         return "pipeline.explicit_ii.enabled"
 
     if kind == "UNROLL":
@@ -200,7 +203,7 @@ def _directive_semantic_mode(directive: Entity) -> str | None:
             return None
         if keys - {"variable", "type", "factor", "dim", "off", "flags"}:
             return None
-        bare = flags(frozenset({"off", "block", "cyclic", "complete"}))
+        bare = flags(frozenset({"off"}))
         if bare is None or not true_options(frozenset({"off"}), bare):
             return None
         if "off" in bare or options.get("off") is True:
@@ -211,22 +214,17 @@ def _directive_semantic_mode(directive: Entity) -> str | None:
         ):
             return None
         dimension = options.get("dim")
-        if dimension is not None and (
-            not isinstance(dimension, int)
-            or isinstance(dimension, bool)
-            or dimension < 0
-        ):
+        # The cited rule permits only dimensions in [0, array rank].  The
+        # current AST entity does not carry a reviewed rank proof, so an
+        # explicit dimension remains a declaration but cannot activate the
+        # effect rule.
+        if dimension is not None:
             return None
         explicit_type = options.get("type")
-        bare_types = bare & {"block", "cyclic", "complete"}
-        if len(bare_types) > 1 or (
-            explicit_type is not None and bare_types
-        ):
-            return None
         partition_type = (
             explicit_type
             if explicit_type is not None
-            else next(iter(bare_types), None)
+            else "complete"
         )
         if not isinstance(partition_type, str):
             return None
