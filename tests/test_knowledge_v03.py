@@ -31,6 +31,7 @@ from hlsgraph.knowledge import (
     LocalDocumentMetadata,
     LocalKnowledgeSidecar,
     index_local_document,
+    knowledge_activation_hash,
     load_pack,
     matches_binding_constraints,
     migrate_pack,
@@ -418,6 +419,33 @@ def test_retrieval_regates_injected_unreviewed_bindings(
     )
     assert retriever._review_ready_binding_ids() == set()
 
+    # Even a recomputed inventory activation hash cannot make a changed rule
+    # executable when its condition is no longer entailed by the reviewed
+    # binding evidence contract. This exercises the independent read-side
+    # entailment replay rather than relying on the inventory hash alone.
+    condition_changed_rules = list(reviewed.rules)
+    condition_changed = type(condition_changed_rules[0])(
+        **json_ready(condition_changed_rules[0])
+    )
+    condition_changed.condition = {
+        **condition_changed.condition,
+        "protocol": "axis",
+    }
+    condition_changed_rules[0] = condition_changed
+    forged_inventory = dict(reviewed.inventory())
+    forged_inventory["activation_hash"] = knowledge_activation_hash(
+        condition_changed_rules, reviewed.bindings, reviewed.coverage,
+    )
+    monkeypatch.setattr(
+        bundle.store, "installed_knowledge_packs",
+        lambda: [forged_inventory],
+    )
+    monkeypatch.setattr(
+        bundle.store, "knowledge_rules",
+        lambda: list(condition_changed_rules),
+    )
+    assert retriever._review_ready_binding_ids() == set()
+
 
 def test_builtin_binding_boolean_discriminators_use_json_booleans() -> None:
     def scalar_values(value: object):
@@ -459,7 +487,13 @@ def test_binding_alternatives_require_explicit_one_of_in_both_matchers() -> None
         explicit, target_kind="test.target", target="test.value",
         context=scalar_context,
     )
-    assert HybridRetriever._binding_constraints_match_values(
+    assert HybridRetriever._constraint_matches(
+        explicit.required_context["stage"], retrieval_context["stage"],
+    )
+    # A generic target remains lexical-only even when its scalar constraints
+    # happen to match. Executable activation is closed to reviewed target
+    # evidence contracts.
+    assert not HybridRetriever._binding_constraints_match_values(
         explicit, retrieval_context, targets,
     )
 

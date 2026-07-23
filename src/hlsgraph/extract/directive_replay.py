@@ -34,7 +34,7 @@ from .directives import ExternalDirectiveExtractor
 from .source import LibClangExtractor
 
 
-DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v3"
+DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,12 +164,26 @@ def _snapshot_identity_valid(
     )
 
 
-def _source_line_hash(
+def _source_anchor_spelling_hash(
     project_root: Path,
     artifact: ArtifactRef,
-    line_number: int | None,
+    anchor: Any,
+    *,
+    require_pragma: bool,
 ) -> str | None:
-    if not isinstance(line_number, int) or line_number < 1:
+    line_number = getattr(anchor, "start_line", None)
+    end_line = getattr(anchor, "end_line", None)
+    start_column = getattr(anchor, "start_column", None)
+    end_column = getattr(anchor, "end_column", None)
+    if (
+        not isinstance(line_number, int)
+        or line_number < 1
+        or end_line != line_number
+        or not isinstance(start_column, int)
+        or start_column < 1
+        or not isinstance(end_column, int)
+        or end_column <= start_column
+    ):
         return None
     try:
         data = project_path(project_root, artifact.uri).read_bytes()
@@ -180,11 +194,19 @@ def _source_line_hash(
         return None
     if line_number > len(lines):
         return None
+    source_line = lines[line_number - 1]
+    if end_column - 1 > len(source_line):
+        return None
+    spelling = source_line[start_column - 1:end_column - 1]
+    if not spelling.strip():
+        return None
+    if require_pragma and not spelling.lstrip().startswith("#"):
+        return None
     # The raw spelling is intentionally consumed only inside this hash.
     return stable_hash({
         "artifact_sha256": artifact.sha256,
-        "line": line_number,
-        "spelling": lines[line_number - 1],
+        "anchor": json_ready(anchor),
+        "spelling": spelling,
     })
 
 
@@ -281,8 +303,11 @@ def _proof_for_directive(
     artifact = artifacts.get(observation.artifact_id)
     if artifact is None or artifact.producer_run_id is not None:
         return None
-    spelling_hash = _source_line_hash(
-        project_root, artifact, observation.anchor.start_line,
+    spelling_hash = _source_anchor_spelling_hash(
+        project_root,
+        artifact,
+        observation.anchor,
+        require_pragma=scope_resolution == "source_ast",
     )
     if spelling_hash is None:
         return None
@@ -438,7 +463,7 @@ def replay_directive_declarations(
     if (
         type(source) is not LibClangExtractor
         or source.name != "source.libclang"
-        or source.version != "3"
+        or source.version != "4"
         or type(external) is not ExternalDirectiveExtractor
         or external.name != "directive.external"
         or external.version != "3"

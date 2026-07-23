@@ -16,7 +16,8 @@ from hlsgraph.bundle import GraphBundle
 from hlsgraph.cli import main as cli_main
 from hlsgraph.graph import CanonicalGraph
 from hlsgraph.knowledge import (
-    KnowledgeCatalog, LocalKnowledgeSidecar, index_local_document, matches_binding_constraints,
+    KnowledgeCatalog, LocalKnowledgeSidecar, binding_entails_rule_condition,
+    index_local_document, matches_binding_constraints,
 )
 from hlsgraph.knowledge.activation import BindingActivationSession
 from hlsgraph.manifest import minimal_manifest
@@ -279,6 +280,54 @@ def test_rule_conditions_are_evaluated_on_one_instance_context() -> None:
         )
 
 
+def test_generic_metadata_cannot_authorize_a_rule_condition_or_session() -> None:
+    rule = KnowledgeRule(
+        document_id="test.generic", document_version="1",
+        section="Protocol", rule_id="protocol_condition",
+        title="Generic protocol condition",
+        applicability={"stage": "hls_ir"},
+        condition={"protocol": "axis"},
+        effect={"guidance": "must remain lexical-only"},
+        citation_url="https://example.com/generic#protocol",
+    )
+    binding = KnowledgeBinding(
+        knowledge_rule_id=rule.id,
+        target_kind="entity_kind", target="hls.kernel",
+        required_context={"stage": "hls_ir", "protocol": "axis"},
+        producer="test.binding", producer_version="1",
+        metadata={"dynamic_scope": "static"},
+    )
+
+    entailed, errors = binding_entails_rule_condition(rule, binding)
+    assert not entailed
+    assert errors == (
+        "condition 'protocol' has no registered direct evidence source",
+    )
+    with pytest.raises(ValueError, match="unproved rule condition"):
+        BindingActivationSession(
+            snapshot_id="snapshot.test", graph_hash="graph.test",
+            allowed_ids=[], bindings=[binding], rules=[rule],
+            raw_contexts={
+                ("entity_kind", "hls.kernel"): [{
+                    "stage": {"hls_ir"}, "protocol": {"axis"},
+                }],
+            },
+        )
+
+
+def test_runtime_constraint_matching_rejects_conflicting_values() -> None:
+    assert HybridRetriever._constraint_matches("axis", {"axis"})
+    assert not HybridRetriever._constraint_matches(
+        "axis", {"axis", "ap_memory"},
+    )
+    assert not HybridRetriever._constraint_matches(
+        {"one_of": ["axis", "m_axi"]}, {"axis", "m_axi"},
+    )
+    assert not HybridRetriever._constraint_matches(
+        {"one_of": ["axis", "m_axi"]}, {"axis", "ap_memory"},
+    )
+
+
 def test_executable_binding_requires_current_retriever_session(
     retrieval_project: dict[str, object],
 ) -> None:
@@ -463,12 +512,10 @@ def test_issued_binding_claims_cannot_be_retargeted_or_rescoped(
         required_context=dict(binding_a.required_context),
         producer="hlsgraph.test.binding", producer_version="1",
     )
-    binding_c = KnowledgeBinding(
-        knowledge_rule_id=rule_a.id,
-        target_kind=binding_a.target_kind,
-        target="csim.return_code",
-        required_context=dict(binding_a.required_context),
-        producer="hlsgraph.test.binding", producer_version="1",
+    binding_c = next(
+        item for item in pack.bindings
+        if item.knowledge_rule_id == rule_a.id
+        and item.target == "csim.mismatches"
     )
     raw_context = {
         "vendor": {"amd"}, "tool": {"vitis_hls"},
@@ -666,25 +713,31 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
     retrieval_project: dict[str, object],
 ) -> None:
     rule_id = retrieval_project["bundle"].store.knowledge_rules()[0].id
-    targets = {"predicate": {"schedule.achieved_ii", "profile.fifo_max_occupancy"}}
-    context = {
+    targets = {"predicate": {"qor.achieved_ii", "profile.fifo_max_occupancy"}}
+    schedule_context = {
         "vendor": {"amd"}, "tool": {"vitis_hls"},
-        "tool_version": {"2024.2"}, "stage": {"schedule", "cosim"},
+        "tool_version": {"2024.2"}, "stage": {"schedule"},
+    }
+    cosim_context = {
+        "vendor": {"amd"}, "tool": {"vitis_hls"},
+        "tool_version": {"2024.2"}, "stage": {"cosim"},
         "workload_id": {"tb.default"},
     }
 
     missing_version = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
-        target="schedule.achieved_ii",
+        target="qor.achieved_ii",
         required_context={"vendor": "amd", "tool": "vitis_hls", "stage": "schedule"},
         producer="hlsgraph.builtin", producer_version="0.3",
         metadata={"dynamic_scope": "static"},
     )
-    assert not HybridRetriever._binding_constraints_match_values(missing_version, context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(
+        missing_version, schedule_context, targets,
+    )
 
     static = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
-        target="schedule.achieved_ii",
+        target="qor.achieved_ii",
         required_context={
             "vendor": "amd", "tool": "vitis_hls",
             "tool_version": "2024.2", "stage": "schedule",
@@ -692,7 +745,45 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
         metadata={"dynamic_scope": "static"},
     )
-    assert HybridRetriever._binding_constraints_match_values(static, context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(
+        static, schedule_context, targets,
+    )
+
+    static_closed = KnowledgeBinding(
+        knowledge_rule_id=rule_id, target_kind="predicate",
+        target="qor.achieved_ii",
+        required_context={
+            "vendor": "amd", "tool": "vitis_hls",
+            "tool_version": "2024.2", "stage": "schedule",
+            "snapshot_association": "verified",
+            "observation_evidence_qualified": (
+                "derived_from_typed_observation_evidence_v1"
+            ),
+            "observation_instance_id": {"required": True},
+            "observation_artifact_identity": {"required": True},
+            "observation_run_identity": {"required": True},
+        },
+        producer="hlsgraph.builtin", producer_version="0.3",
+        metadata={"dynamic_scope": "static"},
+    )
+    closed_schedule_context = {
+        **schedule_context,
+        "snapshot_association": {"verified"},
+        "observation_evidence_qualified": {
+            "derived_from_typed_observation_evidence_v1",
+        },
+        "observation_instance_id": {"observation.schedule"},
+        "observation_artifact_identity": {"artifact.schedule"},
+        "observation_run_identity": {"run.schedule"},
+    }
+    assert HybridRetriever._binding_constraints_match_values(
+        static_closed, closed_schedule_context, targets,
+    )
+    assert not HybridRetriever._binding_constraints_match_values(
+        static_closed,
+        {**closed_schedule_context, "stage": {"schedule", "cosim"}},
+        targets,
+    )
 
     dynamic_missing_workload = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
@@ -704,7 +795,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
     )
     assert not HybridRetriever._binding_constraints_match_values(
-        dynamic_missing_workload, context, targets,
+        dynamic_missing_workload, cosim_context, targets,
     )
 
     dynamic = KnowledgeBinding(
@@ -724,7 +815,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
     )
     closed_context = {
-        **context,
+        **cosim_context,
         "snapshot_association": {"verified"},
         "observation_evidence_qualified": {
             "derived_from_typed_observation_evidence_v1",
@@ -737,7 +828,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
 
     unknown_operator = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
-        target="schedule.achieved_ii",
+        target="qor.achieved_ii",
         required_context={
             "vendor": "amd", "tool": "vitis_hls",
             "tool_version": "2024.2", "stage": {"typo_equals": "schedule"},
@@ -746,7 +837,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         metadata={"dynamic_scope": "static"},
     )
     assert not HybridRetriever._binding_constraints_match_values(
-        unknown_operator, context, targets,
+        unknown_operator, schedule_context, targets,
     )
 
 
@@ -771,9 +862,8 @@ def test_source_tool_context_never_cross_pairs_tool_and_version(
     base, toolchains = retriever._manifest_context()
     assert "tool" not in base and "tool_version" not in base
     source = retriever._source_tool_context(base, toolchains)
-    assert source["tool"] == {
-        "vitis_hls", "amd.vitis_hls.2023_2",
-    }
+    assert source["tool"] == {"vitis_hls"}
+    assert source["toolchain_id"] == {"amd.vitis_hls.2023_2"}
     assert source["tool_version"] == {"2023.2"}
     assert "2024.2" not in source["tool_version"]
 

@@ -33,7 +33,9 @@ from .extract.directive_replay import (
 )
 from .graph import CanonicalGraph
 from .knowledge.core import (
+    binding_entails_rule_condition,
     canonical_context_scalar,
+    direct_condition_source,
     knowledge_activation_hash,
     target_derived_condition_source,
 )
@@ -134,6 +136,7 @@ _RESERVED_DERIVED_CONTEXT_KEYS = frozenset({
     "extractor_identity",
     "extractor_name",
     "extractor_version",
+    "toolchain_id",
     "location_kind",
     "mapping_kind",
     "mapping_provenance",
@@ -2474,6 +2477,12 @@ class HybridRetriever:
                 binding_id not in bindings_by_id
                 or bindings_by_id[binding_id].knowledge_rule_id
                 not in binding_entries[binding_id].rule_ids
+                or not binding_entails_rule_condition(
+                    rules_by_id[
+                        bindings_by_id[binding_id].knowledge_rule_id
+                    ],
+                    bindings_by_id[binding_id],
+                )[0]
                 for binding_id in declared_bindings
             ):
                 continue
@@ -3454,7 +3463,7 @@ class HybridRetriever:
         if len(manifest.toolchains) == 1:
             toolchain = manifest.toolchains[0]
             self._context_add(context, "tool", toolchain.name)
-            self._context_add(context, "tool", toolchain.id)
+            self._context_add(context, "toolchain_id", toolchain.id)
             self._context_add(context, "tool_version", toolchain.version)
             self._context_add(context, "version", toolchain.version)
         return context, {item.id: item for item in manifest.toolchains}
@@ -3477,7 +3486,7 @@ class HybridRetriever:
             return context
         toolchain = candidates[0]
         self._context_add(context, "tool", toolchain.name)
-        self._context_add(context, "tool", toolchain.id)
+        self._context_add(context, "toolchain_id", toolchain.id)
         self._context_add(context, "tool_version", toolchain.version)
         self._context_add(context, "version", toolchain.version)
         return context
@@ -3494,7 +3503,7 @@ class HybridRetriever:
         }
         self._context_add(context, "stage", run.stage)
         if run.toolchain_id:
-            self._context_add(context, "tool", run.toolchain_id)
+            self._context_add(context, "toolchain_id", run.toolchain_id)
             toolchain = toolchains.get(run.toolchain_id)
             if toolchain is not None:
                 self._context_add(context, "tool", toolchain.name)
@@ -3600,7 +3609,7 @@ class HybridRetriever:
             if len(matches) == 1:
                 toolchain = matches[0]
                 self._context_add(context, "tool", toolchain.name)
-                self._context_add(context, "tool", toolchain.id)
+                self._context_add(context, "toolchain_id", toolchain.id)
                 self._context_add(context, "tool_version", toolchain.version)
                 self._context_add(context, "version", toolchain.version)
         artifact_metadata = artifact.metadata
@@ -3676,6 +3685,8 @@ class HybridRetriever:
                     }
                     context["tool"] = {
                         canonical_context_scalar(selected.name),
+                    }
+                    context["toolchain_id"] = {
                         canonical_context_scalar(selected.id),
                     }
                     context["tool_version"] = {
@@ -5304,8 +5315,14 @@ class HybridRetriever:
             key = str(raw_key)
             actual = context.get(key, set())
             if actual:
-                if len(actual) != 1 or not HybridRetriever._constraint_matches(
-                    expected, actual,
+                source = direct_condition_source(binding, key, expected)
+                if (
+                    source is None
+                    or len(actual) != 1
+                    or not HybridRetriever._constraint_matches(expected, actual)
+                    or not HybridRetriever._direct_condition_witnessed(
+                        binding, key, source, context,
+                    )
                 ):
                     return False
                 continue
@@ -5315,6 +5332,67 @@ class HybridRetriever:
             ):
                 return False
         return True
+
+    @staticmethod
+    def _direct_condition_witnessed(
+        binding: Any,
+        key: str,
+        source: str,
+        context: Mapping[str, set[str]],
+    ) -> bool:
+        def singleton(name: str) -> bool:
+            return len(context.get(name, set())) == 1
+
+        if source == "hlsgraph.condition.directive_interface_mode.v1":
+            return (
+                key == "interface_mode"
+                and str(binding.target_kind) == "directive_kind"
+                and str(binding.target) == "INTERFACE"
+                and context.get(_DIRECTIVE_SOURCE_CONTEXT_KEY, set())
+                == {_DIRECTIVE_SOURCE_CONTEXT_VALUE}
+                and all(singleton(name) for name in (
+                    "directive_instance_id", "scope_id", "port_id",
+                    "directive_source_identity", "interface_mode",
+                ))
+                and context["scope_id"] == context["port_id"]
+            )
+        if source == "hlsgraph.condition.directive_port_ownership.v1":
+            return (
+                key == _PORT_OWNERSHIP_CONTEXT_KEY
+                and str(binding.target_kind) == "directive_kind"
+                and str(binding.target) == "INTERFACE"
+                and context.get(_PORT_OWNERSHIP_CONTEXT_KEY, set())
+                == {_PORT_OWNERSHIP_CONTEXT_VALUE}
+                and context.get(_DIRECTIVE_SOURCE_CONTEXT_KEY, set())
+                == {_DIRECTIVE_SOURCE_CONTEXT_VALUE}
+                and all(singleton(name) for name in (
+                    "scope_id", "port_id", "port_owner_id",
+                    "configured_component_id", "port_ownership_identity",
+                    "directive_source_identity",
+                ))
+                and context["scope_id"] == context["port_id"]
+                and context["port_owner_id"]
+                == context["configured_component_id"]
+            )
+        if source == "hlsgraph.condition.requested_directive.v1":
+            source_proved = (
+                context.get(_DIRECTIVE_SOURCE_CONTEXT_KEY, set())
+                == {_DIRECTIVE_SOURCE_CONTEXT_VALUE}
+                or context.get(_DEPENDENCE_OPERAND_CONTEXT_KEY, set())
+                == {_DEPENDENCE_OPERAND_CONTEXT_VALUE}
+            )
+            return (
+                key == _REQUESTED_DIRECTIVE_CONTEXT_KEY
+                and str(binding.target_kind) == "predicate"
+                and str(binding.target).startswith("directive.")
+                and context.get(_REQUESTED_DIRECTIVE_CONTEXT_KEY, set())
+                == {"true"}
+                and source_proved
+                and all(singleton(name) for name in (
+                    "directive_instance_id", "scope_id", "scope_kind",
+                ))
+            )
+        return False
 
     @staticmethod
     def _target_condition_witnessed(
@@ -5972,6 +6050,32 @@ class HybridRetriever:
                         )):
                     return False
 
+        # v0.3 executable activation is deliberately closed to the reviewed
+        # AMD/AXI evidence contracts below.  Other public knowledge remains
+        # searchable citation guidance, but a generic entity/relation metadata
+        # field cannot become an executable premise merely because a custom
+        # pack labels itself reviewed.
+        if not amd_tool:
+            return False
+        if target_kind == "predicate" and (
+            target not in _AMD_TYPED_OBSERVATION_PREDICATES
+            and target not in {
+                "directive.requested", "directive.declared_selected",
+                "directive.tool_status", "directive.reported_requested",
+                "directive.tool_effective", "directive.achieved",
+            }
+        ):
+            return False
+        if target_kind == "artifact_kind" and (
+            target != "constraint.xdc"
+            and target not in _TOOL_ARTIFACT_STAGE_POLICY
+        ):
+            return False
+        if target_kind not in {
+            "directive_kind", "predicate", "artifact_kind", "gate_kind",
+        }:
+            return False
+
         if (amd_tool and target_kind == "artifact_kind"
                 and target == "constraint.xdc"):
             if (not HybridRetriever._constraint_mentions(
@@ -6117,6 +6221,12 @@ class HybridRetriever:
         canonical_actual = {canonical_context_scalar(item) for item in actual}
         if not canonical_actual:
             return False
+        # One activation context must identify one value for every constrained
+        # field.  ``one_of`` describes alternative admissible singleton
+        # values; it is not permission to accept an aggregate context that
+        # simultaneously carries several stages, protocols, or tool aliases.
+        if len(canonical_actual) != 1:
+            return False
         if isinstance(constraint, (list, tuple)):
             return False
         if isinstance(constraint, Mapping):
@@ -6158,8 +6268,8 @@ class HybridRetriever:
             if "max_version" in constraint:
                 maximum = version_key(str(constraint["max_version"]))
                 candidates = {item for item in candidates if version_key(item) <= maximum}
-            return bool(candidates)
-        return canonical_context_scalar(constraint) in canonical_actual
+            return bool(candidates) and candidates == canonical_actual
+        return canonical_actual == {canonical_context_scalar(constraint)}
 
     @staticmethod
     def _view_graph(graph: CanonicalGraph, view: str) -> CanonicalGraph:

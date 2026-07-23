@@ -19,7 +19,7 @@ model-readable private evidence.
 - `codex-cli 0.144.0`, model `gpt-5.6-sol`, reasoning effort `medium`.
 - The official self-contained Linux musl Codex ELF, SHA-256
   `901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429`.
-  The independently checked official release tar SHA-256 is
+  The independently checked standalone release asset SHA-256 is
   `725883fc20ab4af3072829aaa0edf6d12c216238f9f7315a6656b950fb05c8bb`.
 - `tiktoken==0.13.0`, encoding `o200k_base`, with the complete tokenizer-table
   contract SHA-256 fixed by `tools/knowledge_review_shards.py`.  The formal
@@ -137,11 +137,15 @@ printf '%s  %s\n' \
 chmod 0500 "$CODEX_RUNTIME/codex-resources" "$CODEX_RUNTIME"
 ```
 
-The tarball is the `@openai/codex@0.144.0-linux-x64` platform package.  The
-runtime must contain exactly `codex` and `codex-resources/bwrap`, with the
-intermediate directory shown above and no other entry.  Files may not be
-symlinks, hard links, package-manager shims, or writable installations.  The
-executor freezes both component hashes and sets the initial process path to
+`CODEX_PACKAGE` in the example is the
+`@openai/codex@0.144.0-linux-x64` npm platform package; its package-tar SHA-256
+is `391a3793d21feff08da2d9132f01107dd56fa5a48a158e23d15c6d56e34f7cb2`.
+It is a different container from the standalone release asset identified
+above, but both yield the same pinned Codex ELF.  The runtime must contain
+exactly `codex` and `codex-resources/bwrap`, with the intermediate directory
+shown above and no other entry.  Files may not be symlinks, hard links,
+package-manager shims, or writable installations.  The executor freezes both
+component hashes and sets the initial process path to
 `$CODEX_RUNTIME/codex-resources:/usr/bin:/bin`, so the pinned bundled bwrap is
 selected ahead of an unrecorded host version.  `code_mode`, `code_mode_host`,
 and `code_mode_only` are explicitly disabled, so tool execution cannot request

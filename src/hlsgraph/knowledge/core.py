@@ -87,6 +87,15 @@ _TARGET_CONDITION_SOURCE_DIRECTIVE = "hlsgraph.target.directive_instance.v1"
 _TARGET_CONDITION_SOURCE_ARTIFACT = "hlsgraph.target.qualified_artifact.v1"
 _TARGET_CONDITION_SOURCE_OBSERVATION = "hlsgraph.target.qualified_observation.v1"
 _TARGET_CONDITION_SOURCE_GATE = "hlsgraph.target.qualified_gate.v1"
+_DIRECT_CONDITION_SOURCE_INTERFACE_MODE = (
+    "hlsgraph.condition.directive_interface_mode.v1"
+)
+_DIRECT_CONDITION_SOURCE_PORT_OWNERSHIP = (
+    "hlsgraph.condition.directive_port_ownership.v1"
+)
+_DIRECT_CONDITION_SOURCE_REQUESTED_DIRECTIVE = (
+    "hlsgraph.condition.requested_directive.v1"
+)
 
 _TARGET_DIRECTIVE_KINDS = frozenset({
     "DATAFLOW", "PIPELINE", "UNROLL", "ARRAY_PARTITION", "INTERFACE",
@@ -681,6 +690,43 @@ def target_derived_condition_source(
     return None
 
 
+def direct_condition_source(
+    binding: KnowledgeBinding, key: str, condition: Any,
+) -> str | None:
+    """Return the closed evidence source for one explicitly bound premise.
+
+    An arbitrary metadata field is not an executable condition capability.
+    v0.3 registers only the direct premises used by the reviewed AMD/AXI
+    surface; extending this table requires a matching runtime witness.
+    """
+
+    target_kind = str(binding.target_kind)
+    target = str(binding.target)
+    if (
+        target_kind == "directive_kind"
+        and target == "INTERFACE"
+        and key == "interface_mode"
+    ):
+        return _DIRECT_CONDITION_SOURCE_INTERFACE_MODE
+    if (
+        target_kind == "directive_kind"
+        and target == "INTERFACE"
+        and key == "port_ownership_qualified"
+        and _same(
+            condition, "derived_from_unique_current_component_port_v1",
+        )
+    ):
+        return _DIRECT_CONDITION_SOURCE_PORT_OWNERSHIP
+    if (
+        target_kind == "predicate"
+        and target.startswith("directive.")
+        and key == "requested_directive_present"
+        and _same(condition, True)
+    ):
+        return _DIRECT_CONDITION_SOURCE_REQUESTED_DIRECTIVE
+    return None
+
+
 def _constraint_mentions_exact(constraint: Any, expected: Any) -> bool:
     if isinstance(constraint, Mapping):
         if set(constraint) - {"equals", "one_of", "min_version", "max_version", "required"}:
@@ -756,6 +802,48 @@ def _target_condition_source_closed(
     return False
 
 
+def _direct_condition_source_closed(
+    binding: KnowledgeBinding, source: str,
+) -> bool:
+    required = binding.required_context
+    if source == _DIRECT_CONDITION_SOURCE_INTERFACE_MODE:
+        return (
+            _constraint_mentions_exact(
+                required.get("directive_source_declaration_qualified"),
+                "derived_from_current_directive_source_declaration_v1",
+            )
+            and _requires_value(required.get("directive_source_identity"))
+            and _requires_value(required.get("directive_instance_id"))
+            and _requires_value(required.get("scope_id"))
+            and _requires_value(required.get("port_id"))
+        )
+    if source == _DIRECT_CONDITION_SOURCE_PORT_OWNERSHIP:
+        return (
+            _constraint_mentions_exact(
+                required.get("port_ownership_qualified"),
+                "derived_from_unique_current_component_port_v1",
+            )
+            and _constraint_mentions_exact(
+                required.get("directive_source_declaration_qualified"),
+                "derived_from_current_directive_source_declaration_v1",
+            )
+            and all(_requires_value(required.get(key)) for key in (
+                "port_owner_id", "configured_component_id",
+                "port_ownership_identity", "directive_source_identity",
+            ))
+        )
+    if source == _DIRECT_CONDITION_SOURCE_REQUESTED_DIRECTIVE:
+        return (
+            _constraint_mentions_exact(
+                required.get("requested_directive_present"), True,
+            )
+            and _requires_value(required.get("directive_instance_id"))
+            and _requires_value(required.get("scope_id"))
+            and "scope_kind" in required
+        )
+    return False
+
+
 def binding_entails_rule_condition(
     rule: KnowledgeRule, binding: KnowledgeBinding,
 ) -> tuple[bool, tuple[str, ...]]:
@@ -771,6 +859,16 @@ def binding_entails_rule_condition(
         if key in binding.required_context:
             if not _constraint_entails(binding.required_context[key], condition):
                 errors.append(f"condition {key!r} is weakened or contradicted")
+                continue
+            source = direct_condition_source(binding, key, condition)
+            if source is None:
+                errors.append(
+                    f"condition {key!r} has no registered direct evidence source"
+                )
+            elif not _direct_condition_source_closed(binding, source):
+                errors.append(
+                    f"condition {key!r} direct premise lacks {source} evidence closure"
+                )
             continue
         source = target_derived_condition_source(binding, key, condition)
         if source is None:

@@ -7,7 +7,7 @@ similarly named loop, variable, or port while answering a query.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from ..graph import CanonicalGraph
 from ..model import Entity
@@ -79,6 +79,11 @@ def resolve_directive_variable_operand(
     graph: CanonicalGraph,
     scope: Entity | None,
     variable_name: Any,
+    *,
+    artifact_id: str,
+    pragma_line: int,
+    pragma_scope_path: tuple[str, ...] | None,
+    entity_lexical_paths: Mapping[str, tuple[str, ...]],
 ) -> Entity | None:
     """Resolve one DEPENDENCE operand inside the exact enclosing function.
 
@@ -86,31 +91,56 @@ def resolve_directive_variable_operand(
     spelling.  It never falls back to a repository-global same-name match.
     Shadowing or missing containment therefore remains ambiguous.
     """
-    if scope is None or not isinstance(variable_name, str) or not variable_name:
+    def static_entity(entity: Entity) -> bool:
+        return bool(
+            entity.snapshot_id == graph.snapshot_id
+            and entity.stage == "ast"
+            and str(entity.authority) == "static_fact"
+            and str(entity.completeness) == "complete"
+        )
+
+    def parent(entity_id: str) -> Entity | None:
+        relations = [
+            relation for relation in graph.relations.values()
+            if relation.kind == "hls.contains" and relation.dst == entity_id
+        ]
+        if len(relations) != 1:
+            return None
+        relation = relations[0]
+        value = graph.entities.get(relation.src)
+        if (
+            value is None
+            or relation.snapshot_id != graph.snapshot_id
+            or relation.stage != "ast"
+            or str(relation.authority) != "static_fact"
+            or str(relation.completeness) != "complete"
+            or not static_entity(value)
+        ):
+            return None
+        return value
+
+    if (
+        scope is None
+        or not static_entity(scope)
+        or not isinstance(variable_name, str)
+        or not variable_name
+        or pragma_scope_path is None
+    ):
         return None
     if scope.kind in {"hls.kernel", "hls.function"}:
         owners = [scope]
     elif scope.kind == "hls.loop":
-        frontier = {scope.id}
-        visited = set(frontier)
-        owner_ids: set[str] = set()
-        while frontier:
-            parents = {
-                relation.src for relation in graph.relations.values()
-                if relation.kind == "hls.contains" and relation.dst in frontier
-                and relation.src in graph.entities
-            } - visited
-            visited.update(parents)
-            found = {
-                item for item in parents
-                if graph.entities[item].kind in {"hls.kernel", "hls.function"}
-            }
-            owner_ids.update(found)
-            # Stop each ancestry path at its nearest function-like owner, but
-            # continue unresolved sibling paths so a second owner cannot be
-            # hidden behind a different containment depth.
-            frontier = parents - found
-        owners = [graph.entities[item] for item in sorted(owner_ids)]
+        current = scope
+        visited: set[str] = set()
+        while current.kind not in {"hls.kernel", "hls.function"}:
+            if current.id in visited:
+                return None
+            visited.add(current.id)
+            value = parent(current.id)
+            if value is None:
+                return None
+            current = value
+        owners = [current]
     else:
         return None
     if len(owners) != 1:
@@ -119,19 +149,51 @@ def resolve_directive_variable_operand(
     descendants = {owner.id}
     frontier = {owner.id}
     while frontier:
-        children = {
-            relation.dst for relation in graph.relations.values()
-            if relation.kind == "hls.contains" and relation.src in frontier
-            and relation.dst in graph.entities
-        } - descendants
+        children: set[str] = set()
+        for relation in graph.relations.values():
+            if (
+                relation.kind != "hls.contains"
+                or relation.src not in frontier
+                or relation.dst not in graph.entities
+                or relation.snapshot_id != graph.snapshot_id
+                or relation.stage != "ast"
+                or str(relation.authority) != "static_fact"
+                or str(relation.completeness) != "complete"
+                or parent(relation.dst) is None
+            ):
+                continue
+            children.add(relation.dst)
+        children -= descendants
         descendants.update(children)
         frontier = children
     allowed_kinds = {"hls.memory", "hls.stream", "hls.port", "source.variable"}
-    matches = [
-        graph.entities[item] for item in sorted(descendants)
-        if graph.entities[item].kind in allowed_kinds
-        and graph.entities[item].name == variable_name
-    ]
+    matches: list[Entity] = []
+    for item in sorted(descendants):
+        candidate = graph.entities[item]
+        if (
+            candidate.kind not in allowed_kinds
+            or candidate.name != variable_name
+            or not static_entity(candidate)
+        ):
+            continue
+        if candidate.kind == "hls.port":
+            if parent(candidate.id) == owner:
+                matches.append(candidate)
+            continue
+        starts = [
+            anchor.start_line for anchor in candidate.anchors
+            if anchor.artifact_id == artifact_id
+            and anchor.start_line is not None
+        ]
+        declaration_path = entity_lexical_paths.get(candidate.id)
+        if (
+            starts
+            and min(starts) < pragma_line
+            and declaration_path is not None
+            and len(declaration_path) <= len(pragma_scope_path)
+            and pragma_scope_path[:len(declaration_path)] == declaration_path
+        ):
+            matches.append(candidate)
     return matches[0] if len(matches) == 1 else None
 
 

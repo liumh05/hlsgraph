@@ -160,8 +160,9 @@ predicates and correctness gate remain queryable.
 reserved `directive_operand_linked` marker and a derived operand identity. A
 stable ID and a self-consistent `hls.annotates` relation are necessary but are
 not proof: before minting either value, retrieval independently replays the
-fixed `source.libclang` v3 and `directive.external` v3 parsers over the exact
-live snapshot inputs. The current directive, complete option map, source
+fixed `source.libclang` v4 and `directive.external` v3 parsers under
+`hlsgraph.directive_parser_replay.v4` over the exact live snapshot inputs. The
+current directive, complete option map, source
 spelling hash, anchor, resolved scope/operand entity, annotation, and unique
 `directive.requested` observation must match the replay byte-for-byte at the
 canonical-record level. A copied scope ID, sibling relation, changed option, or

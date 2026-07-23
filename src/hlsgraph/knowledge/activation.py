@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, NamedTuple, Sequence, TypeVar
 
 from ..model import KnowledgeBinding, KnowledgeRule, json_ready, stable_hash
+from .core import binding_entails_rule_condition
 
 
 BINDING_ACTIVATION_CONTRACT = "hlsgraph.knowledge_binding_activation.v1"
@@ -300,6 +301,16 @@ class BindingActivationSession:
             self._rules[rule_id] = (
                 rule, fingerprint, canonical,
             )
+        for binding, _fingerprint, _canonical in self._bindings.values():
+            rule = self._rules.get(binding.knowledge_rule_id)
+            if (
+                rule is None
+                or not binding_entails_rule_condition(rule[0], binding)[0]
+            ):
+                self.close()
+                raise ValueError(
+                    "binding activation surface has an unproved rule condition"
+                )
 
     @property
     def active(self) -> bool:

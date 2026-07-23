@@ -11,7 +11,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from ..graph import CanonicalGraph
 from ..manifest import project_path, resolve_compiler_arguments
@@ -66,6 +66,90 @@ def _blank_match(match: re.Match[str]) -> str:
     return "".join("\n" if character == "\n" else " " for character in match.group(0))
 
 
+def _masked_source_text(text: str) -> str:
+    """Blank comments and literals without changing physical positions."""
+
+    return _COMMENT_OR_LITERAL.sub(
+        _blank_match,
+        _RAW_STRING.sub(_blank_match, text),
+    )
+
+
+def _source_pragma_lines(text: str) -> set[int]:
+    """Return physical lines containing lexically visible one-line pragmas.
+
+    Translation phase two runs before comments are recognized.  A continued
+    physical line therefore cannot be authorized by this line-oriented
+    adapter; libclang token evidence is checked separately below.
+    """
+
+    return {
+        line_number
+        for line_number, line in enumerate(
+            _masked_source_text(text).splitlines(), 1,
+        )
+        if _PRAGMA.match(line)
+    }
+
+
+def _libclang_hls_pragma_lines(
+    cindex: Any,
+    translation_unit: Any,
+    filename: Path,
+    source_text: str,
+) -> set[int]:
+    """Authorize literal ``# pragma HLS`` tokens from one translated file.
+
+    Raw text is never sufficient evidence: comments, raw strings, and
+    line-spliced ``//`` comments may contain pragma-looking physical lines.
+    Libclang's token stream reflects the language translation phases and omits
+    those pseudo directives.  Only a single-line token sequence whose ``#`` is
+    preceded by whitespace is accepted.
+    """
+
+    lines = source_text.splitlines()
+    if not lines:
+        return set()
+    source_file = cindex.File.from_name(translation_unit, str(filename))
+    start = cindex.SourceLocation.from_position(
+        translation_unit, source_file, 1, 1,
+    )
+    end = cindex.SourceLocation.from_position(
+        translation_unit,
+        source_file,
+        len(lines),
+        len(lines[-1]) + 1,
+    )
+    extent = cindex.SourceRange.from_locations(start, end)
+    tokens = list(translation_unit.get_tokens(extent=extent))
+    result: set[int] = set()
+    resolved = filename.resolve()
+    for index in range(max(0, len(tokens) - 3)):
+        selected = tokens[index:index + 4]
+        spellings = [item.spelling.casefold() for item in selected]
+        if spellings[:3] != ["#", "pragma", "hls"]:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", selected[3].spelling):
+            continue
+        locations = [item.location for item in selected]
+        line_number = int(locations[0].line)
+        if (
+            any(location.file is None for location in locations)
+            or any(Path(str(location.file)).resolve() != resolved
+                   for location in locations)
+            or any(int(location.line) != line_number for location in locations)
+            or line_number < 1
+            or line_number > len(lines)
+            or re.search(r"(?:\\|\?\?/)\s*$", lines[line_number - 1])
+        ):
+            continue
+        prefix = lines[line_number - 1][:max(0, int(locations[0].column) - 1)]
+        if prefix.strip():
+            continue
+        result.add(line_number)
+    return result
+
+
 def _unsafe_preprocessor_tokens(text: str) -> set[str]:
     # Translation phases replace trigraphs and splice physical lines before
     # comments, literals, and preprocessing tokens are recognized.  Mirror
@@ -78,8 +162,7 @@ def _unsafe_preprocessor_tokens(text: str) -> set[str]:
     ):
         text = text.replace(source, replacement)
     text = re.sub(r"\\\r?\n", "", text)
-    code = _RAW_STRING.sub(_blank_match, text)
-    code = _COMMENT_OR_LITERAL.sub(_blank_match, code)
+    code = _masked_source_text(text)
     result = {match.group(0).strip().split()[0]
               for match in _UNTRACKED_PREPROCESSOR_TOKEN.finditer(code)}
     if "##" in code:
@@ -175,12 +258,21 @@ def _degraded_pragma_activity(artifact_id: str, text: str) -> dict[tuple[str, in
     non-literal branches remain unknown, and their pragmas are withheld by the
     caller with an explicit diagnostic.
     """
-    code = _RAW_STRING.sub(_blank_match, text)
-    code = _COMMENT_OR_LITERAL.sub(_blank_match, code)
+    code = _masked_source_text(text)
     raw_lines = text.splitlines()
     code_lines = code.splitlines()
     if len(code_lines) < len(raw_lines):
         code_lines.extend([""] * (len(raw_lines) - len(code_lines)))
+    # Translation phase two can change comment/literal boundaries before this
+    # intentionally small degraded scanner sees them.  Without libclang token
+    # evidence, even a splice several lines earlier can turn ``/`` + ``*`` into
+    # a block-comment opener that hides a later pragma-looking physical line.
+    # Fail closed for every pragma in such an artifact rather than inventing a
+    # requested directive from either a continued pragma or continued prose.
+    has_physical_line_splice = any(
+        re.search(r"(?:\\|\?\?/)\s*$", raw_line)
+        for raw_line in raw_lines
+    )
     current: bool | None = True
     stack: list[dict[str, bool | None]] = []
     result: dict[tuple[str, int], bool | None] = {}
@@ -213,8 +305,10 @@ def _degraded_pragma_activity(artifact_id: str, text: str) -> dict[tuple[str, in
                 # subsequent pragma in the degraded scanner.
                 current = None
             continue
-        if _PRAGMA.match(raw_line):
-            result[(artifact_id, line_number)] = current
+        if _PRAGMA.match(code_line):
+            result[(artifact_id, line_number)] = (
+                None if has_physical_line_splice else current
+            )
     return result
 
 
@@ -398,17 +492,33 @@ def _unit_args(context: ExtractionContext, unit: TranslationUnit) -> list[str]:
     return result
 
 
-def _tokens_to_options(text: str) -> dict[str, Any]:
+def _tokens_to_options(text: str) -> dict[str, Any] | None:
     options: dict[str, Any] = {}
     positional: list[str] = []
+    seen_flags: set[str] = set()
     for token in re.findall(r'"[^"]*"|\S+', text):
         token = token.strip('"')
         if "=" in token:
             key, value = token.split("=", 1)
-            options[key.lower()] = _number(value)
+            key = key.lower()
+            if (
+                not key
+                or not value
+                or "=" in value
+                or key in options
+                or key in seen_flags
+            ):
+                return None
+            options[key] = _number(value)
         else:
+            folded = token.casefold()
+            if not token or folded in seen_flags or folded in options:
+                return None
+            seen_flags.add(folded)
             positional.append(token)
     if positional:
+        if "flags" in options:
+            return None
         options["flags"] = positional
     return options
 
@@ -565,7 +675,7 @@ def _constant_for_loop_facts(cursor: Any) -> dict[str, Any]:
 
 class LibClangExtractor:
     name = "source.libclang"
-    version = "3"
+    version = "4"
 
     def supports(self, context: ExtractionContext) -> bool:
         # Being unsupported would silently omit the source plane.  The standard
@@ -703,6 +813,10 @@ class LibClangExtractor:
         function_by_name: dict[str, list[str]] = defaultdict(list)
         pending_calls: list[tuple[str, str, SourceAnchor | None]] = []
         cursor_entity: dict[int, str] = {}
+        lexical_scopes: dict[
+            str, list[tuple[tuple[str, ...], int, int]]
+        ] = defaultdict(list)
+        entity_lexical_paths: dict[str, tuple[str, ...]] = {}
         untracked_project_inputs: set[str] = set()
         untracked_external_inputs = 0
         pragma_activity: dict[tuple[str, int], set[bool | None]] = defaultdict(set)
@@ -847,10 +961,46 @@ class LibClangExtractor:
                         metadata={"error_type": type(exc).__name__, "tu": unit.file},
                     ))
                     continue
-                for line_number, line in enumerate(
-                    compiler_text[artifact.id].splitlines(), 1,
-                ):
-                    if not _PRAGMA.match(line):
+                source_text = compiler_text[artifact.id]
+                lexical_pragma_lines = _source_pragma_lines(source_text)
+                try:
+                    token_pragma_lines = _libclang_hls_pragma_lines(
+                        cindex, tu, processed_path, source_text,
+                    )
+                except Exception as exc:
+                    token_pragma_lines = set()
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="source.pragma_token_evidence_unavailable",
+                        severity=DiagnosticSeverity.ERROR,
+                        message=("libclang could not authorize source pragma tokens; "
+                                 "pragma facts for this translated input were withheld"),
+                        stage=Stage.AST.value,
+                        artifact_id=artifact.id,
+                        metadata={"error_type": type(exc).__name__, "tu": unit.file},
+                    ))
+                if lexical_pragma_lines != token_pragma_lines:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="source.pragma_token_mismatch",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=("raw source and libclang token evidence disagree on "
+                                 "one-line HLS pragmas; unmatched declarations were withheld"),
+                        stage=Stage.AST.value,
+                        artifact_id=artifact.id,
+                        metadata={
+                            "lexical_only_count": len(
+                                lexical_pragma_lines - token_pragma_lines
+                            ),
+                            "token_only_count": len(
+                                token_pragma_lines - lexical_pragma_lines
+                            ),
+                            "tu": unit.file,
+                        },
+                    ))
+                for line_number in sorted(lexical_pragma_lines):
+                    if line_number not in token_pragma_lines:
+                        pragma_activity[(artifact.id, line_number)].add(None)
                         continue
                     inactive = any(
                         start <= line_number <= end for start, end in skipped_ranges
@@ -878,7 +1028,8 @@ class LibClangExtractor:
 
             def visit(cursor: Any, parent_entity: str | None = None,
                       current_function_id: str | None = None,
-                      current_function_qname: str | None = None) -> None:
+                      current_function_qname: str | None = None,
+                      lexical_scope_path: tuple[str, ...] = ()) -> None:
                 nonlocal untracked_external_inputs
                 location_file = str(cursor.location.file) if cursor.location.file else None
                 relative = _relative_file(context, location_file)
@@ -899,12 +1050,46 @@ class LibClangExtractor:
                 attrs: dict[str, Any] = {}
                 entity_kind: str | None = None
                 display_name = cursor.spelling or cursor.displayname or kind_name.lower()
+                child_lexical_scope_path = lexical_scope_path
+                if (
+                    kind_name in {
+                        "COMPOUND_STMT",
+                        "FOR_STMT",
+                        "CXX_FOR_RANGE_STMT",
+                        "WHILE_STMT",
+                        "DO_STMT",
+                        "IF_STMT",
+                        "SWITCH_STMT",
+                        "CXX_CATCH_STMT",
+                        "LAMBDA_EXPR",
+                    }
+                    and anchor is not None
+                    and anchor.start_line is not None
+                    and anchor.end_line is not None
+                ):
+                    scope_identity = hashlib.sha256(
+                        (
+                            f"{kind_name}:{anchor.artifact_id}:{anchor.start_line}:"
+                            f"{anchor.start_column}:{anchor.end_line}:"
+                            f"{anchor.end_column}"
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    child_lexical_scope_path = (
+                        *lexical_scope_path, scope_identity,
+                    )
+                    lexical_scopes[anchor.artifact_id].append((
+                        child_lexical_scope_path,
+                        anchor.start_line,
+                        anchor.end_line,
+                    ))
 
                 if kind_name in {"FUNCTION_DECL", "CXX_METHOD", "FUNCTION_TEMPLATE"} and cursor.is_definition():
                     entity_kind = "hls.kernel" if cursor.spelling == context.manifest.build.top else "hls.function"
                     attrs = {"return_type": getattr(cursor.result_type, "spelling", None),
                              "display_name": cursor.displayname}
-                elif kind_name in {"FOR_STMT", "WHILE_STMT", "DO_STMT"}:
+                elif kind_name in {
+                    "FOR_STMT", "CXX_FOR_RANGE_STMT", "WHILE_STMT", "DO_STMT",
+                }:
                     entity_kind = "hls.loop"
                     line = anchor.start_line if anchor else 0
                     display_name = self._loop_label(context, relative, line) or f"loop@{line}"
@@ -935,6 +1120,7 @@ class LibClangExtractor:
                                     anchors=[anchor] if anchor else [])
                     graph.add_entity(entity)
                     cursor_entity[cursor.hash] = entity.id
+                    entity_lexical_paths[entity.id] = lexical_scope_path
                     if parent_entity:
                         graph.add_relation(Relation(
                             src=parent_entity, dst=entity.id, kind="hls.contains",
@@ -954,7 +1140,13 @@ class LibClangExtractor:
                         pending_calls.append((owner_id, callee, anchor))
 
                 for child in cursor.get_children():
-                    visit(child, parent_entity, current_function_id, current_function_qname)
+                    visit(
+                        child,
+                        parent_entity,
+                        current_function_id,
+                        current_function_qname,
+                        child_lexical_scope_path,
+                    )
 
             visit(tu.cursor)
 
@@ -1017,6 +1209,8 @@ class LibClangExtractor:
         self._attach_source_pragmas(
             context, result,
             pragma_activity if pragma_activity_available else None,
+            lexical_scopes=lexical_scopes,
+            entity_lexical_paths=entity_lexical_paths,
         )
         result.coverage = {
             "translation_units": len(context.manifest.build.translation_units),
@@ -1053,8 +1247,14 @@ class LibClangExtractor:
         activity: dict[tuple[str, int], set[bool | None]] | None,
         *,
         activity_mode: str = "libclang",
+        lexical_scopes: Mapping[
+            str, list[tuple[tuple[str, ...], int, int]]
+        ] | None = None,
+        entity_lexical_paths: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         graph = result.graph
+        lexical_scopes = lexical_scopes or {}
+        entity_lexical_paths = entity_lexical_paths or {}
         for artifact in sorted(context.artifacts.values(), key=lambda item: item.uri):
             if (not artifact.metadata.get("hlsgraph.compiler_reachable_text")
                     and not artifact.kind.startswith("source.")):
@@ -1062,8 +1262,15 @@ class LibClangExtractor:
             path = project_path(context.project_root, artifact.uri)
             if not path.is_file():
                 continue
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            masked_lines = _masked_source_text(text).splitlines()
+            if len(masked_lines) < len(lines):
+                masked_lines.extend([""] * (len(lines) - len(masked_lines)))
+            pragma_lines = _source_pragma_lines(text)
             for line_number, line in enumerate(lines, 1):
+                if line_number not in pragma_lines:
+                    continue
                 match = _PRAGMA.match(line)
                 if not match:
                     continue
@@ -1123,12 +1330,51 @@ class LibClangExtractor:
                 # them here would leak private source through graph/REST/MCP/ML
                 # exports and could also invent bogus directive flags.
                 options = _tokens_to_options(_strip_inline_comments(match.group(2)))
-                target = _scope_for_pragma(
-                    graph, artifact.id, line_number, directive_kind, options
+                if options is None:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.ambiguous_source_options",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=("source pragma contains duplicate option keys or flags "
+                                 "and was not promoted to a directive fact"),
+                        stage=Stage.SOURCE.value,
+                        artifact_id=artifact.id,
+                        anchor=anchor,
+                    ))
+                    continue
+                pragma_scope_path = _pragma_lexical_scope_path(
+                    lexical_scopes.get(artifact.id, ()), line_number,
+                )
+                target = (
+                    _scope_for_pragma(
+                        graph,
+                        artifact.id,
+                        line_number,
+                        directive_kind,
+                        options,
+                        masked_lines=masked_lines,
+                        pragma_scope_path=pragma_scope_path,
+                        entity_lexical_paths=entity_lexical_paths,
+                    )
+                    if activity_mode == "libclang"
+                    else _degraded_scope_for_pragma(
+                        graph,
+                        artifact.id,
+                        line_number,
+                        directive_kind,
+                        options,
+                        masked_lines=masked_lines,
+                    )
                 )
                 operand_target = (
                     resolve_directive_variable_operand(
-                        graph, target, options.get("variable"),
+                        graph,
+                        target,
+                        options.get("variable"),
+                        artifact_id=artifact.id,
+                        pragma_line=line_number,
+                        pragma_scope_path=pragma_scope_path,
+                        entity_lexical_paths=entity_lexical_paths,
                     )
                     if directive_kind == "DEPENDENCE" else None
                 )
@@ -1197,10 +1443,245 @@ class LibClangExtractor:
                     ))
 
 
-def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
-                      kind: str, options: dict[str, Any]) -> Entity | None:
+def _pragma_lexical_scope_path(
+    scopes: Iterable[tuple[tuple[str, ...], int, int]],
+    line: int,
+) -> tuple[str, ...] | None:
+    matches = {
+        path for path, start, end in scopes
+        if start <= line <= end
+    }
+    if not matches:
+        return None
+    depth = max(len(path) for path in matches)
+    deepest = {path for path in matches if len(path) == depth}
+    return next(iter(deepest)) if len(deepest) == 1 else None
+
+
+def _static_ast_entity(graph: CanonicalGraph, entity: Entity) -> bool:
+    return bool(
+        entity.snapshot_id == graph.snapshot_id
+        and entity.stage == Stage.AST.value
+        and str(entity.authority) == "static_fact"
+        and str(entity.completeness) == "complete"
+    )
+
+
+def _unique_ast_parent(
+    graph: CanonicalGraph, entity_id: str,
+) -> Entity | None:
+    relations = [
+        relation for relation in graph.relations.values()
+        if relation.kind == "hls.contains" and relation.dst == entity_id
+    ]
+    if len(relations) != 1:
+        return None
+    relation = relations[0]
+    parent = graph.entities.get(relation.src)
+    if (
+        parent is None
+        or relation.snapshot_id != graph.snapshot_id
+        or relation.stage != Stage.AST.value
+        or str(relation.authority) != "static_fact"
+        or str(relation.completeness) != "complete"
+        or not _static_ast_entity(graph, parent)
+    ):
+        return None
+    return parent
+
+
+def _unique_function_owner(
+    graph: CanonicalGraph, entity: Entity,
+) -> Entity | None:
+    current = entity
+    visited: set[str] = set()
+    while current.kind not in {"hls.kernel", "hls.function"}:
+        if current.id in visited:
+            return None
+        visited.add(current.id)
+        parent = _unique_ast_parent(graph, current.id)
+        if parent is None:
+            return None
+        current = parent
+    return current if _static_ast_entity(graph, current) else None
+
+
+def _innermost_source_entity(
+    entities: Iterable[Entity],
+    *,
+    artifact_id: str,
+    line: int,
+) -> Entity | None:
+    spans: dict[str, int] = {}
+    values: dict[str, Entity] = {}
+    for entity in entities:
+        local = [
+            (anchor.end_line or line) - (anchor.start_line or line)
+            for anchor in entity.anchors
+            if anchor.artifact_id == artifact_id
+            and anchor.start_line is not None
+            and anchor.end_line is not None
+            and anchor.start_line <= line <= anchor.end_line
+        ]
+        if local:
+            spans[entity.id] = min(local)
+            values[entity.id] = entity
+    if not spans:
+        return None
+    smallest = min(spans.values())
+    winners = [values[key] for key, span in spans.items() if span == smallest]
+    return winners[0] if len(winners) == 1 else None
+
+
+def _lexically_visible_operand(
+    graph: CanonicalGraph,
+    entity: Entity,
+    *,
+    owner: Entity,
+    artifact_id: str,
+    line: int,
+    pragma_scope_path: tuple[str, ...] | None,
+    entity_lexical_paths: Mapping[str, tuple[str, ...]],
+) -> bool:
+    if (
+        not _static_ast_entity(graph, entity)
+        or _unique_function_owner(graph, entity) != owner
+    ):
+        return False
+    if entity.kind == "hls.port":
+        return _unique_ast_parent(graph, entity.id) == owner
+    starts = [
+        anchor.start_line for anchor in entity.anchors
+        if anchor.artifact_id == artifact_id
+        and anchor.start_line is not None
+    ]
+    if not starts or min(starts) >= line:
+        return False
+    declaration_path = entity_lexical_paths.get(entity.id)
+    return bool(
+        pragma_scope_path is not None
+        and declaration_path is not None
+        and len(declaration_path) <= len(pragma_scope_path)
+        and pragma_scope_path[:len(declaration_path)] == declaration_path
+    )
+
+
+def _only_trivia_before_loop(
+    masked_lines: list[str], pragma_line: int, loop_line: int,
+) -> bool:
+    for value in masked_lines[pragma_line:loop_line - 1]:
+        stripped = value.strip()
+        if (
+            not stripped
+            or _PRAGMA.match(value)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\s*:", stripped)
+        ):
+            continue
+        return False
+    return True
+
+
+def _degraded_scope_for_pragma(
+    graph: CanonicalGraph,
+    artifact_id: str,
+    line: int,
+    kind: str,
+    options: dict[str, Any],
+    *,
+    masked_lines: list[str],
+) -> Entity | None:
+    """Resolve only the small, explicitly approximate degraded-mode surface.
+
+    Degraded entities intentionally cannot satisfy the AST proof predicates
+    used by the standard resolver.  Keeping this separate preserves the
+    opt-in legacy view without weakening the libclang path.
+    """
+
+    candidates = [
+        entity
+        for entity in graph.entities.values()
+        if any(
+            anchor.artifact_id == artifact_id
+            and anchor.start_line is not None
+            and anchor.end_line is not None
+            for anchor in entity.anchors
+        )
+    ]
+    containing_functions = [
+        entity
+        for entity in candidates
+        if entity.kind in {"hls.kernel", "hls.function"}
+        and any(
+            anchor.artifact_id == artifact_id
+            and anchor.start_line is not None
+            and anchor.end_line is not None
+            and anchor.start_line <= line <= anchor.end_line
+            for anchor in entity.anchors
+        )
+    ]
+    if len(containing_functions) != 1:
+        return None
+    owner = containing_functions[0]
+    variable = str(options.get("variable") or options.get("port") or "")
+    if variable:
+        matches = [
+            entity
+            for entity in candidates
+            if entity.name == variable
+            and (entity.qualified_name or "").startswith(
+                (owner.qualified_name or owner.name) + "::"
+            )
+        ]
+        return matches[0] if len(matches) == 1 else None
+    loops = [
+        entity
+        for entity in candidates
+        if entity.kind == "hls.loop"
+        and any(
+            relation.kind == "hls.contains"
+            and relation.src == owner.id
+            and relation.dst == entity.id
+            for relation in graph.relations.values()
+        )
+    ]
+    loop_directives = {"PIPELINE", "UNROLL", "LOOP_FLATTEN", "LOOP_TRIPCOUNT"}
+    if kind in loop_directives:
+        following: list[tuple[int, Entity]] = []
+        for entity in loops:
+            starts = [
+                anchor.start_line
+                for anchor in entity.anchors
+                if anchor.artifact_id == artifact_id
+                and anchor.start_line is not None
+                and anchor.start_line > line
+            ]
+            if starts:
+                start = min(starts)
+                if _only_trivia_before_loop(masked_lines, line, start):
+                    following.append((start, entity))
+        if following:
+            nearest = min(start for start, _entity in following)
+            winners = [entity for start, entity in following if start == nearest]
+            return winners[0] if len(winners) == 1 else None
+        return owner if kind == "PIPELINE" else None
+    return owner
+
+
+def _scope_for_pragma(
+    graph: CanonicalGraph,
+    artifact_id: str,
+    line: int,
+    kind: str,
+    options: dict[str, Any],
+    *,
+    masked_lines: list[str],
+    pragma_scope_path: tuple[str, ...] | None,
+    entity_lexical_paths: Mapping[str, tuple[str, ...]],
+) -> Entity | None:
     candidates: list[Entity] = []
     for entity in graph.entities.values():
+        if not _static_ast_entity(graph, entity):
+            continue
         for anchor in entity.anchors:
             if anchor.artifact_id == artifact_id and anchor.start_line and anchor.end_line:
                 candidates.append(entity)
@@ -1209,107 +1690,93 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
         anchor.artifact_id == artifact_id and anchor.start_line is not None and anchor.end_line is not None
         and anchor.start_line <= line <= anchor.end_line for anchor in entity.anchors
     )]
+    function_owner = _innermost_source_entity(
+        (
+            entity for entity in containing
+            if entity.kind in {"hls.kernel", "hls.function"}
+        ),
+        artifact_id=artifact_id,
+        line=line,
+    )
     variable = str(options.get("variable") or options.get("port") or "")
     if variable and kind != "DEPENDENCE":
-        matches = [entity for entity in candidates if entity.name == variable]
-        owners = [entity for entity in containing
-                  if entity.kind in {"hls.kernel", "hls.function"}]
-        if owners:
-            spans = {
-                entity.id: min(
-                    (anchor.end_line or line) - (anchor.start_line or line)
-                    for anchor in entity.anchors
-                    if anchor.artifact_id == artifact_id
-                    and anchor.start_line is not None
-                    and anchor.end_line is not None
-                    and anchor.start_line <= line <= anchor.end_line
-                )
-                for entity in owners
-            }
-            smallest = min(spans.values())
-            owner_candidates = [
-                entity for entity in owners if spans[entity.id] == smallest
-            ]
-            if len(owner_candidates) != 1:
-                return None
-            owner = owner_candidates[0]
-            if kind == "INTERFACE":
-                # Vitis INTERFACE is a component-port request.  A lexical
-                # helper parameter or an equally named port elsewhere in the
-                # graph must never be promoted to the configured top port.
-                kernels = [
-                    entity for entity in graph.entities.values()
-                    if entity.kind == "hls.kernel"
-                    and entity.snapshot_id == graph.snapshot_id
-                    and entity.stage == Stage.AST.value
-                    and str(entity.authority) == "static_fact"
-                    and str(entity.completeness) == "complete"
-                ]
-                if len(kernels) != 1 or owner.id != kernels[0].id:
-                    return None
-                direct_ports = []
-                for candidate in matches:
-                    if (candidate.kind != "hls.port"
-                            or candidate.snapshot_id != graph.snapshot_id
-                            or candidate.stage != Stage.AST.value
-                            or str(candidate.authority) != "static_fact"
-                            or str(candidate.completeness) != "complete"):
-                        continue
-                    ownership = [
-                        relation for relation in graph.relations.values()
-                        if relation.kind == "hls.contains"
-                        and relation.dst == candidate.id
-                    ]
-                    if (
-                        len(ownership) == 1
-                        and ownership[0].src == owner.id
-                        and ownership[0].snapshot_id == graph.snapshot_id
-                        and ownership[0].stage == Stage.AST.value
-                        and str(ownership[0].authority) == "static_fact"
-                        and str(ownership[0].completeness) == "complete"
-                    ):
-                        direct_ports.append(candidate)
-                return direct_ports[0] if len(direct_ports) == 1 else None
-            owner_name = owner.qualified_name or owner.name
-            scoped = [entity for entity in matches
-                      if (entity.qualified_name or "").startswith(owner_name + "::")]
-            preferred = [entity for entity in scoped
-                         if entity.kind in {"hls.stream", "hls.memory", "hls.port"}]
-            if len(preferred) == 1:
-                return preferred[0]
-            if len(scoped) == 1:
-                return scoped[0]
-            # Once a lexical owner is known, failure to prove a unique child
-            # is ambiguity.  Do not donate an identically named entity from a
-            # sibling function through the former graph-wide fallback.
+        if function_owner is None or pragma_scope_path is None:
             return None
-        # Named storage and port directives require a unique lexical function
-        # owner.  A file-scope pragma must not borrow a graph-wide unique name:
-        # that proves spelling only, not the directive's HLS scope.
-        return None
+        matches = [
+            entity for entity in candidates
+            if entity.name == variable
+            and entity.kind in {
+                "hls.memory", "hls.stream", "hls.port", "source.variable",
+            }
+            and _lexically_visible_operand(
+                graph,
+                entity,
+                owner=function_owner,
+                artifact_id=artifact_id,
+                line=line,
+                pragma_scope_path=pragma_scope_path,
+                entity_lexical_paths=entity_lexical_paths,
+            )
+        ]
+        if kind == "INTERFACE":
+            kernels = [
+                entity for entity in graph.entities.values()
+                if entity.kind == "hls.kernel"
+                and _static_ast_entity(graph, entity)
+            ]
+            ports = [
+                entity for entity in matches
+                if entity.kind == "hls.port"
+                and len(kernels) == 1
+                and function_owner.id == kernels[0].id
+                and _unique_ast_parent(graph, entity.id) == function_owner
+            ]
+            return ports[0] if len(ports) == 1 else None
+        # Entity kind is not C/C++ name-resolution evidence.  In particular,
+        # an inner scalar can shadow an outer array; preferring the array would
+        # attach the directive to the wrong declaration.  Stay unresolved
+        # unless the complete lexical evidence yields one exact candidate.
+        return matches[0] if len(matches) == 1 else None
     if kind == "DEPENDENCE":
         # DEPENDENCE names an operand but applies to the loop/function that
         # lexically encloses the declaration.  Unlike a loop pragma placed
         # immediately before a loop, a nearby following loop is not sufficient
         # evidence for this two-identity contract.
         loops = [entity for entity in containing if entity.kind == "hls.loop"]
-        if loops:
-            spans = {entity.id: min(
-                (anchor.end_line or line) - (anchor.start_line or line)
-                for anchor in entity.anchors
-            ) for entity in loops}
-            smallest = min(spans.values())
-            winners = [entity for entity in loops if spans[entity.id] == smallest]
-            return winners[0] if len(winners) == 1 else None
+        enclosing = _innermost_source_entity(
+            loops, artifact_id=artifact_id, line=line,
+        )
+        return enclosing or function_owner
     loop_directives = {"PIPELINE", "UNROLL", "LOOP_FLATTEN", "LOOP_TRIPCOUNT"}
     if kind in loop_directives:
         # HLS loop pragmas normally precede the loop they annotate.  Prefer the
         # nearest unique following loop before considering an enclosing loop;
         # otherwise a pragma before an inner loop is incorrectly attached to
         # its outer loop.
-        following = [entity for entity in candidates if entity.kind == "hls.loop" and any(
-            anchor.start_line and 0 < anchor.start_line - line <= 3 for anchor in entity.anchors
-        )]
+        loops = [entity for entity in containing if entity.kind == "hls.loop"]
+        enclosing = _innermost_source_entity(
+            loops, artifact_id=artifact_id, line=line,
+        )
+        lexical_owner = enclosing or function_owner
+        following: list[Entity] = []
+        if lexical_owner is not None and pragma_scope_path is not None:
+            for entity in candidates:
+                if (
+                    entity.kind != "hls.loop"
+                    or entity_lexical_paths.get(entity.id) != pragma_scope_path
+                    or _unique_ast_parent(graph, entity.id) != lexical_owner
+                ):
+                    continue
+                starts = [
+                    anchor.start_line for anchor in entity.anchors
+                    if anchor.artifact_id == artifact_id
+                    and anchor.start_line is not None
+                    and anchor.start_line > line
+                ]
+                if starts and _only_trivia_before_loop(
+                    masked_lines, line, min(starts),
+                ):
+                    following.append(entity)
         if following:
             distances = {entity.id: min(
                 (anchor.start_line or 10**9) - line for anchor in entity.anchors
@@ -1320,23 +1787,15 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
             if len(winners) == 1:
                 return winners[0]
             return None
+        if enclosing is not None:
+            return enclosing
+        return function_owner if kind == "PIPELINE" else None
+    if kind == "DATAFLOW":
         loops = [entity for entity in containing if entity.kind == "hls.loop"]
-        if loops:
-            spans = {entity.id: min(
-                (anchor.end_line or line) - (anchor.start_line or line) for anchor in entity.anchors
-            ) for entity in loops}
-            smallest = min(spans.values())
-            winners = [entity for entity in loops if spans[entity.id] == smallest]
-            return winners[0] if len(winners) == 1 else None
-    functions = [entity for entity in containing if entity.kind in {"hls.kernel", "hls.function"}]
-    if functions:
-        spans = {entity.id: min(
-            (anchor.end_line or line) - (anchor.start_line or line) for anchor in entity.anchors
-        ) for entity in functions}
-        smallest = min(spans.values())
-        winners = [entity for entity in functions if spans[entity.id] == smallest]
-        return winners[0] if len(winners) == 1 else None
-    return None
+        return _innermost_source_entity(
+            loops, artifact_id=artifact_id, line=line,
+        ) or function_owner
+    return function_owner
 
 
 class RegexSourceExtractor:
