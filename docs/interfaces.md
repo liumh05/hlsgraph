@@ -194,10 +194,13 @@ hlsgraph run --project /path/to/project --backend local \
 
 The command runs the argv already declared for `csynth`; it does not infer or
 download a toolchain. For SSH, the selected toolchain must declare
-`environment_hash`; remote project files must already be synchronized byte for
-byte with the active snapshot. The declared attestation command should report a
-stable toolchain/environment identity (for example, a maintained probe script),
-not volatile timestamps or secrets.
+`environment_hash`. Runner v2 reads the active snapshot inputs, transfers them
+explicitly into one unique remote run directory, and verifies their size and
+SHA-256 there; a pre-existing remote checkout or development sync is not an
+execution input. Mutagen/rsync may still help edit code, but cannot substitute
+for this input transfer or for declared-output evidence return. The declared
+attestation command should report a stable toolchain/environment identity (for
+example, a maintained probe script), not volatile timestamps or secrets.
 
 ```toml
 [[toolchains]]
@@ -294,9 +297,11 @@ explicit HLS flow, freshness, completeness, and confidence. Predictions and
 bounded private snippets both require explicit opt-in and remain labelled.
 
 Set `HLSGRAPH_MCP_TOOLS=all` before startup to expose the v0.2 narrow tools for
-compatibility: overview/search/context, module/traverse/impact,
-evidence/compare, feature evidence/correspondence, health/runs/predictions,
-variants/render, and knowledge. The default remains the single-tool surface.
+compatibility. The registration source of truth is `_register_legacy_tools` in
+`hlsgraph.mcp.server`; its exact tool names are `overview`, `search`, `context`,
+`module_or_region`, `traverse`, `impact`, `evidence`, `feature_evidence`,
+`correspondences`, `compare`, `health`, `runs`, `predictions`, `variants`,
+`render`, and `knowledge`. The default remains the single `explore` surface.
 
 MCP has no tool for writing graph facts or promoting a prediction. Any external
 source/config change creates a new state that must be re-indexed or verified by

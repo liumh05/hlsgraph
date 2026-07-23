@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ from tools.audit_release import (
     SEMANTIC_REVIEW_RECEIPT_PATH,
     SEMANTIC_REVIEW_TRACE_PATH,
     SURFACE_HELPER_HASH_KEY,
-    _audit_knowledge_review_release_gate,
+    verify_legacy_v4_review_evidence,
 )
 
 
@@ -50,6 +51,70 @@ PACKS = {
         "hlsgraph.open_ir.public_guidance.2026_07_21"
     ),
 }
+
+
+class _FetchHeaders:
+    def get_content_type(self) -> str:
+        return "text/plain"
+
+    def get_content_charset(self) -> str:
+        return "utf-8"
+
+
+class _FetchResponse:
+    status = 200
+    headers = _FetchHeaders()
+
+    def __init__(self, url: str, body: bytes | BaseException) -> None:
+        self._url = url
+        self._body = body
+
+    def __enter__(self) -> "_FetchResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def getcode(self) -> int:
+        return self.status
+
+    def geturl(self) -> str:
+        return self._url
+
+    def read(self, _limit: int) -> bytes:
+        if isinstance(self._body, BaseException):
+            raise self._body
+        return self._body
+
+
+class _LengthFetchHeaders(_FetchHeaders):
+    def __init__(self, length: int, content_type: str = "text/plain") -> None:
+        self._length = length
+        self._content_type = content_type
+
+    def get(self, name: str) -> str | None:
+        return str(self._length) if name.casefold() == "content-length" else None
+
+    def get_content_type(self) -> str:
+        return self._content_type
+
+
+class _LengthFetchResponse(_FetchResponse):
+    def __init__(
+        self, url: str, body: bytes | BaseException, *, declared_length: int,
+        content_type: str = "text/plain",
+    ) -> None:
+        super().__init__(url, body)
+        self.headers = _LengthFetchHeaders(declared_length, content_type)
+
+
+class _FetchOpener:
+    def __init__(self, response: _FetchResponse) -> None:
+        self._response = response
+
+    def open(self, _request: object, *, timeout: float) -> _FetchResponse:
+        assert timeout > 0
+        return self._response
 
 
 def _raw_evidence_path(root: Path, raw_name: str) -> Path:
@@ -82,7 +147,7 @@ def _trusted_fetch(
         return _evidence_fetcher(mapping)(url, _timeout, _max_bytes)
     locator_hash = hashlib.sha256(url.encode("utf-8")).hexdigest().encode("ascii")
     if "documentation-service.arm.com/static/" in url:
-        body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + locator_hash
+        body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + locator_hash + b"\n%%EOF\n"
         content_type = "application/pdf"
     else:
         body = b"HLSGRAPH-CACHE-TEXT-" + locator_hash
@@ -93,51 +158,73 @@ def _trusted_fetch(
     )
 
 
+def _fixture_primary_body(entry: dict[str, object]) -> bytes:
+    url = str(entry["evidence_url"])
+    locator_hash = hashlib.sha256(url.encode("utf-8")).hexdigest().encode("ascii")
+    if "documentation-service.arm.com/static/" in url:
+        return b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + locator_hash + b"\n%%EOF\n"
+    if str(entry["resolver_id"]).startswith("github.raw."):
+        return b"HLSGRAPH-PINNED-RAW-" + locator_hash + b"\n"
+    return b"HLSGRAPH-MAPPED-TOPIC-TEXT-" + locator_hash
+
+
+def _fixture_reference_binding(row: dict[str, object]) -> dict[str, object]:
+    section = row.get("section")
+    return {
+        "reference_id": row.get("reference_id"),
+        "reference_kind": row.get("reference_kind"),
+        "reference_surface_sha256": row.get("reference_surface_sha256"),
+        "document_id": row.get("document_id"),
+        "document_version": row.get("document_version"),
+        "rule_id": row.get("rule_id"),
+        "rule_surface_sha256": row.get("rule_surface_sha256"),
+        "section": section,
+        "section_sha256": hashlib.sha256(
+            run_knowledge_review._canonical_json(section),
+        ).hexdigest(),
+    }
+
+
 def _fixture_evidence_mapping(citation_bytes: bytes) -> dict[str, object]:
     citation = json.loads(citation_bytes)
-    urls = sorted({str(row["citation_url"]) for row in citation["references"]})
-    entries: list[dict[str, object]] = []
-    for url in urls:
-        parts = urlsplit(url)
-        if parts.hostname != "docs.amd.com":
-            entries.append({
-                "citation_url": url, "evidence_url": url,
-                "resolver_id": "direct.v1", "identity": None,
-            })
-            continue
-        match = run_knowledge_review._AMD_CITATION_PATH_RE.fullmatch(parts.path)
-        assert match is not None
-        version = match.group("version") or match.group("version_topic")
-        slug = match.group("document_slug") or match.group("document_slug_topic")
-        publication_id = "pub" + hashlib.sha256(slug.encode()).hexdigest()[:16]
-        document_id = slug.split("-", 1)[0].upper()
-        base = {
-            "publication_id": publication_id, "document_id": document_id,
-            "document_slug": slug, "version": version,
-            "title": f"Fixture {document_id} User Guide",
-        }
-        if parts.path == f"/r/{version}-English/{slug}/":
-            entries.append({
-                "citation_url": url,
-                "evidence_url": (
-                    f"https://docs.amd.com/api/khub/maps/{publication_id}"
-                ),
-                "resolver_id": "amd.docs.khub.map.v1", "identity": base,
-            })
-        else:
-            suffix = parts.path.rsplit("/", 1)[-1]
-            token = hashlib.sha256(url.encode()).hexdigest()[:16]
-            entries.append({
-                "citation_url": url,
-                "evidence_url": (
-                    f"https://docs.amd.com/api/khub/maps/{publication_id}/"
-                    f"topics/content{token}/content?target=DESIGNED_READER"
-                ),
-                "resolver_id": "amd.docs.khub.topic.v1",
-                "identity": {
-                    **base, "toc_id": f"toc{token}",
-                    "content_id": f"content{token}", "topic_title": suffix,
-                },
+    public = json.loads(
+        (ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    references_by_url: dict[str, list[dict[str, object]]] = {}
+    for row in citation["references"]:
+        references_by_url.setdefault(str(row["citation_url"]), []).append(row)
+    entries = copy.deepcopy(public["entries"])
+    for entry in entries:
+        url = str(entry["citation_url"])
+        entry["reference_bindings"] = sorted(
+            (
+                _fixture_reference_binding(row)
+                for row in references_by_url[url]
+            ),
+            key=lambda row: str(row["reference_id"]),
+        )
+        body = _fixture_primary_body(entry)
+        resolver_id = str(entry["resolver_id"])
+        identity = entry["identity"]
+        if resolver_id == "direct.sha256.v1":
+            assert isinstance(identity, dict)
+            identity["body_sha256"] = hashlib.sha256(body).hexdigest()
+            identity["body_size"] = len(body)
+            identity["content_type"] = (
+                "application/pdf" if body.startswith(b"%PDF-") else "text/html"
+            )
+        elif resolver_id == "github.raw.document.v1":
+            assert isinstance(identity, dict)
+            identity["source_sha256"] = hashlib.sha256(body).hexdigest()
+            identity["source_size"] = len(body)
+        elif resolver_id == "github.raw.lines.v1":
+            assert isinstance(identity, dict)
+            identity.update({
+                "source_sha256": hashlib.sha256(body).hexdigest(),
+                "start_line": 1, "end_line": 1,
+                "slice_sha256": hashlib.sha256(body).hexdigest(),
             })
     return {
         "schema_version": run_knowledge_review.CITATION_EVIDENCE_SCHEMA_VERSION,
@@ -211,13 +298,16 @@ def _evidence_fetcher(mapping: dict[str, object]):
             })
             content_type = "application/json"
         elif url in by_evidence:
-            body = b"HLSGRAPH-MAPPED-TOPIC-TEXT-" + hashlib.sha256(
-                url.encode("utf-8")
-            ).hexdigest().encode("ascii")
+            row = by_evidence[url]
+            body = _fixture_primary_body(row)
+            identity = row.get("identity")
+            if (row.get("resolver_id") == "direct.sha256.v1"
+                    and isinstance(identity, dict)):
+                content_type = str(identity["content_type"])
         elif "documentation-service.arm.com/static/" in url:
             body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + hashlib.sha256(
                 url.encode("utf-8")
-            ).hexdigest().encode("ascii")
+            ).hexdigest().encode("ascii") + b"\n%%EOF\n"
             content_type = "application/pdf"
         else:
             body = b"HLSGRAPH-CACHE-TEXT-" + hashlib.sha256(
@@ -252,7 +342,7 @@ def _approved_result(
             "reference_id": reference["reference_id"],
             "reference_surface_sha256": reference["reference_surface_sha256"],
             "verdict": "verified",
-            "exact_locator_inspected": True,
+            "exact_locator_inspected": is_rule,
             "declared_version_matched": True,
             "declared_section_matched": True if is_rule else None,
             "paraphrase_supported": True if is_rule else None,
@@ -349,6 +439,8 @@ def _fixture_boundary_contract(
         "ownership_policy": run_knowledge_review.RUNTIME_OWNERSHIP_POLICY,
         "executable_relative_path": "codex",
         "executable_sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
+        "bubblewrap_relative_path": "codex-resources/bwrap",
+        "bubblewrap_sha256": run_knowledge_review.OFFICIAL_CODEX_BWRAP_SHA256,
         "entries": [
             {
                 "relative_path": ".", "kind": "dir", "size": 0,
@@ -357,6 +449,14 @@ def _fixture_boundary_contract(
             {
                 "relative_path": "codex", "kind": "file", "size": 5,
                 "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
+            },
+            {
+                "relative_path": "codex-resources", "kind": "dir", "size": 0,
+                "mode": "0500", "sha256": empty_sha256,
+            },
+            {
+                "relative_path": "codex-resources/bwrap", "kind": "file", "size": 5,
+                "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_BWRAP_SHA256,
             },
         ],
     }
@@ -396,6 +496,7 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
         "tools/audit_knowledge_citations.py",
         "tools/run_knowledge_review.py",
         "tools/audit_release.py",
+        *sorted(run_knowledge_review.SUITE_REVIEW_SOURCE_PATHS),
     ):
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -416,9 +517,11 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     def citation_fetch(url: str, _timeout: float, _max_bytes: int):
+        locator_hash = hashlib.sha256(url.encode("utf-8")).hexdigest().encode("ascii")
         payload = (
-            b"%PDF-review-fixture" if "documentation-service.arm.com/static/" in url
-            else b"public-review-locator-fixture"
+            b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + locator_hash + b"\n%%EOF\n"
+            if "documentation-service.arm.com/static/" in url
+            else b"HLSGRAPH-MAPPED-TOPIC-TEXT-" + locator_hash
         )
         return audit_knowledge_citations.OnlineFetch(
             200,
@@ -497,7 +600,7 @@ def reviewed_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     )
     return root
 def _audit(root: Path) -> list[str]:
-    return _audit_knowledge_review_release_gate(
+    return verify_legacy_v4_review_evidence(
         root,
         semantic_review=root / SEMANTIC_REVIEW_PATH,
         adversarial_review=root / ADVERSARIAL_REVIEW_PATH,
@@ -508,10 +611,133 @@ def _audit(root: Path) -> list[str]:
     )
 
 
+def test_default_review_fetch_retries_incomplete_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://example.com/manual.txt"
+    responses = iter((
+        _FetchResponse(url, IncompleteRead(b"partial", 8)),
+        _FetchResponse(url, b"complete"),
+    ))
+    attempts = 0
+
+    def opener(_handler: object) -> _FetchOpener:
+        nonlocal attempts
+        attempts += 1
+        return _FetchOpener(next(responses))
+
+    monkeypatch.setattr(run_knowledge_review, "build_opener", opener)
+    fetched = run_knowledge_review._default_fetch(url, 1.0, 1024)
+
+    assert attempts == 2
+    assert fetched.body == b"complete"
+    assert fetched.final_url == url
+
+
+def test_default_review_fetch_fails_closed_after_fixed_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://example.com/manual.txt"
+    attempts = 0
+
+    def opener(_handler: object) -> _FetchOpener:
+        nonlocal attempts
+        attempts += 1
+        return _FetchOpener(
+            _FetchResponse(url, IncompleteRead(b"private-partial", 8)),
+        )
+
+    monkeypatch.setattr(run_knowledge_review, "build_opener", opener)
+    with pytest.raises(ValueError, match="failed after 3 attempts") as failure:
+        run_knowledge_review._default_fetch(url, 1.0, 1024)
+
+    assert attempts == run_knowledge_review.MAX_FETCH_ATTEMPTS
+    assert "private-partial" not in str(failure.value)
+
+
+def test_default_review_fetch_retries_declared_partial_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://example.com/manual.txt"
+    complete = b"complete-document"
+    responses = iter((
+        _LengthFetchResponse(
+            url, complete[:5], declared_length=len(complete),
+        ),
+        _LengthFetchResponse(
+            url, complete, declared_length=len(complete),
+        ),
+    ))
+    attempts = 0
+
+    def opener(_handler: object) -> _FetchOpener:
+        nonlocal attempts
+        attempts += 1
+        return _FetchOpener(next(responses))
+
+    monkeypatch.setattr(run_knowledge_review, "build_opener", opener)
+    fetched = run_knowledge_review._default_fetch(url, 1.0, 1024)
+
+    assert attempts == 2
+    assert fetched.body == complete
+    assert fetched.content_length == len(complete)
+
+
+def test_default_review_fetch_retries_incomplete_pdf_without_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://example.com/manual.pdf"
+    complete = b"%PDF-1.7\npublic-document\n%%EOF\n"
+    responses = iter((
+        _LengthFetchResponse(
+            url, complete[:-7], declared_length=len(complete) - 7,
+            content_type="application/pdf",
+        ),
+        _LengthFetchResponse(
+            url, complete, declared_length=len(complete),
+            content_type="application/pdf",
+        ),
+    ))
+    attempts = 0
+
+    def opener(_handler: object) -> _FetchOpener:
+        nonlocal attempts
+        attempts += 1
+        return _FetchOpener(next(responses))
+
+    monkeypatch.setattr(run_knowledge_review, "build_opener", opener)
+    fetched = run_knowledge_review._default_fetch(url, 1.0, 1024)
+
+    assert attempts == 2
+    assert fetched.body == complete
+
+
 def test_final_review_gate_accepts_exact_repeated_review_bytes(
     reviewed_release_root: Path,
 ) -> None:
     assert _audit(reviewed_release_root) == []
+
+
+def test_formal_v03_release_gate_rejects_valid_legacy_v4_evidence(
+    reviewed_release_root: Path,
+) -> None:
+    issues = audit_release._audit_knowledge_review_release_gate(
+        reviewed_release_root,
+        semantic_review=reviewed_release_root / SEMANTIC_REVIEW_PATH,
+        adversarial_review=reviewed_release_root / ADVERSARIAL_REVIEW_PATH,
+        semantic_raw=_raw_evidence_path(
+            reviewed_release_root, "semantic.raw.jsonl",
+        ),
+        adversarial_raw=_raw_evidence_path(
+            reviewed_release_root, "adversarial.raw.jsonl",
+        ),
+        semantic_cache=reviewed_release_root.parent / "semantic.cache",
+        adversarial_cache=reviewed_release_root.parent / "adversarial.cache",
+    )
+    assert issues == [
+        "formal v0.3 release requires v6 six-invocation knowledge-review "
+        "receipts; legacy v4 evidence is historical verification only"
+    ]
 
 
 def test_seal_rejects_boundary_contract_tamper(
@@ -560,7 +786,7 @@ def test_seal_and_release_audit_reject_different_review_runtimes(
         })
     ).hexdigest()
     _write_json(path, receipt)
-    with pytest.raises(ValueError, match="exact executable identity"):
+    with pytest.raises(ValueError, match=r"exact Codex\+bwrap identity"):
         run_knowledge_review.seal_review_attestations(
             reviewed_release_root,
             semantic_raw=_raw_evidence_path(
@@ -916,6 +1142,8 @@ def test_runtime_manifest_requires_exact_executable_and_closed_tree() -> None:
         "ownership_policy": run_knowledge_review.RUNTIME_OWNERSHIP_POLICY,
         "executable_relative_path": "codex",
         "executable_sha256": "a" * 64,
+        "bubblewrap_relative_path": "codex-resources/bwrap",
+        "bubblewrap_sha256": run_knowledge_review.OFFICIAL_CODEX_BWRAP_SHA256,
         "entries": [{
             "relative_path": ".", "kind": "dir", "size": 0,
             "mode": "0500", "sha256": empty_sha256,
@@ -924,16 +1152,23 @@ def test_runtime_manifest_requires_exact_executable_and_closed_tree() -> None:
     root_only["sha256"] = hashlib.sha256(
         run_knowledge_review._canonical_json(root_only)
     ).hexdigest()
-    with pytest.raises(ValueError, match="exact executable identity"):
+    with pytest.raises(ValueError, match=r"exact Codex\+bwrap identity"):
         run_knowledge_review._validate_runtime_manifest(root_only)
 
     orphan = copy.deepcopy(root_only)
-    orphan["entries"].append({
+    orphan["entries"].extend([{
         "relative_path": "missing/codex", "kind": "file", "size": 5,
         "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256,
-    })
+    }, {
+        "relative_path": "codex-resources", "kind": "dir", "size": 0,
+        "mode": "0500", "sha256": empty_sha256,
+    }, {
+        "relative_path": "codex-resources/bwrap", "kind": "file", "size": 5,
+        "mode": "0500", "sha256": run_knowledge_review.OFFICIAL_CODEX_BWRAP_SHA256,
+    }])
     orphan["executable_relative_path"] = "missing/codex"
     orphan["executable_sha256"] = run_knowledge_review.OFFICIAL_CODEX_ELF_SHA256
+    orphan["entries"].sort(key=lambda item: item["relative_path"])
     orphan.pop("sha256")
     orphan["sha256"] = hashlib.sha256(
         run_knowledge_review._canonical_json(orphan)
@@ -957,6 +1192,12 @@ def test_review_command_contract_is_default_deny_minimal_allowlist() -> None:
         '{":minimal"="read","$CACHE"="read","$CODEX_RUNTIME"="read"}'
     )
     assert "deny" not in filesystem
+
+
+def test_review_runtime_path_pins_bundled_bwrap_before_system_tools() -> None:
+    assert run_knowledge_review._runtime_initial_process_path(Path("/frozen/runtime")) == (
+        "/frozen/runtime/codex-resources:/usr/bin:/bin"
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
@@ -989,11 +1230,21 @@ def test_review_runtime_manifest_is_pathless_stable_and_link_free(
     codex = runtime / "codex"
     codex.write_bytes(b"frozen-codex-runtime")
     codex.chmod(0o500)
+    resources = runtime / "codex-resources"
+    resources.mkdir(mode=0o700)
+    bwrap = resources / "bwrap"
+    bwrap.write_bytes(b"frozen-codex-bwrap")
+    bwrap.chmod(0o500)
+    resources.chmod(0o500)
     runtime.chmod(0o500)
     monkeypatch.setattr(run_knowledge_review, "_mount_fstype", lambda _path: "ext4")
     monkeypatch.setattr(
         run_knowledge_review, "OFFICIAL_CODEX_ELF_SHA256",
         hashlib.sha256(b"frozen-codex-runtime").hexdigest(),
+    )
+    monkeypatch.setattr(
+        run_knowledge_review, "OFFICIAL_CODEX_BWRAP_SHA256",
+        hashlib.sha256(b"frozen-codex-bwrap").hexdigest(),
     )
     first = run_knowledge_review._freeze_runtime_manifest(codex)
     second = run_knowledge_review._freeze_runtime_manifest(codex)
@@ -1006,7 +1257,7 @@ def test_review_runtime_manifest_is_pathless_stable_and_link_free(
     linked = runtime / "linked"
     linked.symlink_to(codex)
     runtime.chmod(0o500)
-    with pytest.raises(RuntimeError, match="one executable|linked entry"):
+    with pytest.raises(RuntimeError, match="codex and codex-resources|linked entry"):
         run_knowledge_review._freeze_runtime_manifest(codex)
 
     runtime.chmod(0o700)
@@ -1015,7 +1266,58 @@ def test_review_runtime_manifest_is_pathless_stable_and_link_free(
     extra.write_text("unexpected", encoding="utf-8")
     extra.chmod(0o400)
     runtime.chmod(0o500)
-    with pytest.raises(RuntimeError, match="exactly its one executable"):
+    with pytest.raises(RuntimeError, match="exactly codex and codex-resources"):
+        run_knowledge_review._freeze_runtime_manifest(codex)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX runtime alias contract")
+def test_review_runtime_rejects_bundled_bwrap_tamper_and_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    codex = runtime / "codex"
+    codex.write_bytes(b"frozen-codex-runtime")
+    codex.chmod(0o500)
+    resources = runtime / "codex-resources"
+    resources.mkdir(mode=0o700)
+    bwrap = resources / "bwrap"
+    bwrap.write_bytes(b"frozen-codex-bwrap")
+    bwrap.chmod(0o500)
+    resources.chmod(0o500)
+    runtime.chmod(0o500)
+    monkeypatch.setattr(run_knowledge_review, "_mount_fstype", lambda _path: "ext4")
+    monkeypatch.setattr(
+        run_knowledge_review, "OFFICIAL_CODEX_ELF_SHA256",
+        hashlib.sha256(b"frozen-codex-runtime").hexdigest(),
+    )
+    monkeypatch.setattr(
+        run_knowledge_review, "OFFICIAL_CODEX_BWRAP_SHA256",
+        hashlib.sha256(b"frozen-codex-bwrap").hexdigest(),
+    )
+    run_knowledge_review._freeze_runtime_manifest(codex)
+
+    bwrap.chmod(0o700)
+    bwrap.write_bytes(b"tampered-codex-bwrap")
+    bwrap.chmod(0o500)
+    with pytest.raises(RuntimeError, match="fixed official .* bundled bwrap"):
+        run_knowledge_review._freeze_runtime_manifest(codex)
+
+    resources.chmod(0o700)
+    bwrap.unlink()
+    external = tmp_path / "external-bwrap"
+    external.write_bytes(b"frozen-codex-bwrap")
+    external.chmod(0o500)
+    bwrap.symlink_to(external)
+    resources.chmod(0o500)
+    with pytest.raises(RuntimeError, match="linked entry"):
+        run_knowledge_review._freeze_runtime_manifest(codex)
+
+    resources.chmod(0o700)
+    bwrap.unlink()
+    os.link(external, bwrap)
+    resources.chmod(0o500)
+    with pytest.raises(RuntimeError, match="unsafe file"):
         run_knowledge_review._freeze_runtime_manifest(codex)
 
 
@@ -1090,6 +1392,145 @@ def test_public_amd_mapping_accepts_real_khub_opaque_ids() -> None:
     assert len(run_knowledge_review._citation_evidence_rows(snapshot)) == 46
 
 
+def test_public_github_rule_evidence_uses_exact_raw_line_ranges() -> None:
+    value = json.loads(
+        (ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    rows = [
+        row for row in value["entries"]
+        if row["resolver_id"] == "github.raw.lines.v1"
+    ]
+    assert len(rows) == 13
+    assert len({row["evidence_url"] for row in rows}) == 5
+    for row in rows:
+        identity = row["identity"]
+        assert row["citation_url"].startswith("https://github.com/")
+        assert row["evidence_url"] == (
+            "https://raw.githubusercontent.com/"
+            f"{identity['repository']}/{identity['commit']}/{identity['path']}"
+        )
+        assert len(identity["commit"]) == 40
+        assert 1 <= identity["start_line"] <= identity["end_line"]
+        assert (
+            identity["end_line"] - identity["start_line"] + 1
+            <= run_knowledge_review.MAX_EVIDENCE_LINE_RANGE
+        )
+        assert len(identity["source_sha256"]) == 64
+        assert len(identity["slice_sha256"]) == 64
+
+
+def test_public_document_evidence_is_version_and_body_bound() -> None:
+    mapping = json.loads(
+        (ROOT / run_knowledge_review.CITATION_EVIDENCE_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    citation = json.loads(
+        (ROOT / run_knowledge_review.CITATION_AUDIT_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
+    fetches = {row["fetch_url"]: row for row in citation["fetches"]}
+    direct = [
+        row for row in mapping["entries"]
+        if row["resolver_id"] == "direct.sha256.v1"
+    ]
+    immutable = [
+        row for row in mapping["entries"]
+        if row["resolver_id"] == "github.raw.document.v1"
+    ]
+    assert len(direct) == 3
+    assert len(immutable) == 4
+    for row in direct:
+        identity = row["identity"]
+        fetched = fetches[row["citation_url"]]
+        assert identity["body_sha256"] == fetched["sha256"]
+        assert identity["body_size"] == fetched["byte_count"]
+        assert identity["content_type"] == fetched["content_type"]
+        assert row["evidence_url"] == row["citation_url"]
+    for row in immutable:
+        identity = row["identity"]
+        assert identity["document_version"] == f"git-{identity['commit']}"
+        assert row["evidence_url"] == (
+            "https://raw.githubusercontent.com/"
+            f"{identity['repository']}/{identity['commit']}/{identity['path']}"
+        )
+
+    mutated = copy.deepcopy(mapping)
+    next(
+        row for row in mutated["entries"]
+        if row["resolver_id"] == "direct.sha256.v1"
+    )["identity"]["body_sha256"] = "0" * 64
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        ROOT, run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    with pytest.raises(ValueError, match="direct SHA-256 document identity"):
+        run_knowledge_review._validate_citation_evidence_mapping(
+            mutated,
+            citation_audit_sha256=mapping["citation_audit_sha256"],
+            exact_urls=snapshot.exact_citation_urls,
+            expected_references=citation["references"],
+            expected_fetches=citation["fetches"],
+        )
+
+
+def test_github_raw_line_derivation_checks_source_and_slice_hashes() -> None:
+    body = b"heading\nfirst\nsecond\nfooter\n"
+    selected = b"first\nsecond\n"
+    mapping = {
+        "identity": {
+            "repository": "owner/repository", "commit": "a" * 40,
+            "path": "docs/spec.md", "source_sha256": hashlib.sha256(body).hexdigest(),
+            "start_line": 2, "end_line": 3,
+            "slice_sha256": hashlib.sha256(selected).hexdigest(),
+        },
+    }
+    fetched = run_knowledge_review.TrustedFetch(
+        200, "https://raw.githubusercontent.com/owner/repository/" + "a" * 40
+        + "/docs/spec.md", (), "text/plain", body, charset="utf-8",
+    )
+    derived = run_knowledge_review._github_line_range_derivation(mapping, fetched)
+    assert derived.text == selected
+    assert derived.parser_id == "hlsgraph.review.github-raw-lines.v1"
+
+    mapping["identity"]["slice_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="selected range differs"):
+        run_knowledge_review._github_line_range_derivation(mapping, fetched)
+
+
+def test_document_only_pdfs_do_not_invoke_text_parser(
+    reviewed_release_root: Path,
+) -> None:
+    mapping = json.loads(
+        (reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_PATH)
+        .read_text(encoding="utf-8")
+    )
+    delegated = _evidence_fetcher(mapping)
+
+    def forbidden_parser(_body: bytes) -> run_knowledge_review.TextDerivation:
+        raise AssertionError("document-only PDF parser must not run")
+
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        reviewed_release_root, run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    cache = run_knowledge_review.create_review_cache(
+        reviewed_release_root, snapshot,
+        reviewed_release_root.parent / "document-only-pdf.cache",
+        fetcher=delegated, pdf_text_extractor=forbidden_parser,
+    )
+    arm = [
+        entry for entry in cache.manifest["citations"]
+        if "documentation-service.arm.com/static/" in entry["requested_url"]
+    ]
+    assert len(arm) == 2
+    assert all(entry["available"] is True for entry in arm)
+    assert all(entry["inspection_required"] is False for entry in arm)
+    assert all(entry["inspection_chunks"] == [] for entry in arm)
+    assert all(entry["parser_id"] is None for entry in arm)
+
+
 def test_amd_map_and_pages_are_fetched_once_per_publication(
     reviewed_release_root: Path,
 ) -> None:
@@ -1126,6 +1567,48 @@ def test_amd_map_and_pages_are_fetched_once_per_publication(
     ].sha256 == hashlib.sha256(
         (ROOT / run_knowledge_review.RELEASE_AUDITOR_PATH).read_bytes()
     ).hexdigest()
+
+
+def test_shared_evidence_fetch_failure_is_reused_fail_closed(
+    reviewed_release_root: Path,
+) -> None:
+    mapping = json.loads(
+        (reviewed_release_root / run_knowledge_review.CITATION_EVIDENCE_PATH)
+        .read_text(encoding="utf-8")
+    )
+    delegated = _evidence_fetcher(mapping)
+    shared_url = next(
+        row["evidence_url"] for row in mapping["entries"]
+        if row["resolver_id"] == "github.raw.lines.v1"
+        and sum(
+            candidate["evidence_url"] == row["evidence_url"]
+            for candidate in mapping["entries"]
+        ) > 1
+    )
+    calls = 0
+
+    def fail_shared(url: str, timeout: float, max_bytes: int):
+        nonlocal calls
+        if url == shared_url:
+            calls += 1
+            raise ValueError("fixture transport failure")
+        return delegated(url, timeout, max_bytes)
+
+    snapshot = run_knowledge_review.freeze_review_snapshot(
+        reviewed_release_root, run_knowledge_review.SEMANTIC_PROTOCOL,
+    )
+    cache = run_knowledge_review.create_review_cache(
+        reviewed_release_root, snapshot,
+        reviewed_release_root.parent / "shared-fetch-failure.cache",
+        fetcher=fail_shared,
+    )
+    affected = [
+        row for row in cache.manifest["citations"]
+        if row["evidence_url"] == shared_url
+    ]
+    assert len(affected) > 1
+    assert calls == 1
+    assert all(row["available"] is False for row in affected)
 
 
 def test_final_review_gate_rejects_search_or_write_trace_operations(
@@ -1351,6 +1834,7 @@ def test_cache_allows_only_identical_same_host_redirect_chain(
 
 def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
     reviewed_release_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = run_knowledge_review.freeze_review_snapshot(
         reviewed_release_root, SEMANTIC_REVIEW_PROTOCOL,
@@ -1360,13 +1844,34 @@ def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
         .read_text(encoding="utf-8")
     )
     delegated = _evidence_fetcher(mapping)
+    validated_evidence = run_knowledge_review._citation_evidence_rows(snapshot)
+    references = run_knowledge_review._citation_reference_rows(snapshot)
+    promoted = False
+    patched_references: list[dict[str, object]] = []
+    for reference in references:
+        row = dict(reference)
+        if (not promoted
+                and "documentation-service.arm.com/static/"
+                in str(row["citation_url"])):
+            row["reference_kind"] = "rule"
+            promoted = True
+        patched_references.append(row)
+    assert promoted
+    monkeypatch.setattr(
+        run_knowledge_review, "_citation_reference_rows",
+        lambda _snapshot: patched_references,
+    )
+    monkeypatch.setattr(
+        run_knowledge_review, "_citation_evidence_rows",
+        lambda _snapshot: validated_evidence,
+    )
 
     def with_unparsed_pdf(url: str, timeout: float, max_bytes: int):
         if "documentation-service.arm.com/static/" not in url:
             return delegated(url, timeout, max_bytes)
         body = b"%PDF-1.7\nHLSGRAPH-CACHE-PDF-" + hashlib.sha256(
             url.encode("utf-8")
-        ).hexdigest().encode("ascii")
+        ).hexdigest().encode("ascii") + b"\n%%EOF\n"
         return run_knowledge_review.TrustedFetch(
             200, url, (url,), "application/pdf", body, charset=None,
         )
@@ -1379,9 +1884,10 @@ def test_pdf_without_controlled_parser_is_unavailable_and_cannot_approve(
     cache = run_knowledge_review.load_review_cache(cache.root, snapshot)
     pdf_entries = [
         entry for entry in cache.manifest["citations"]
-        if entry["content_type"] == "application/pdf"
+        if (entry["content_type"] == "application/pdf"
+            and entry["inspection_required"] is True)
     ]
-    assert pdf_entries
+    assert len(pdf_entries) == 1
     assert all(entry["available"] is False for entry in pdf_entries)
     assert all(
         entry["error_code"] == "citation_text_unavailable"
@@ -1751,13 +2257,23 @@ def test_evidence_identity_strings_are_bounded_and_control_free(
             encoding="utf-8",
         )
     )
-    amd = next(row for row in value["entries"] if row["identity"] is not None)
+    amd = next(
+        row for row in value["entries"]
+        if str(row["resolver_id"]).startswith("amd.docs.khub.")
+    )
     amd["identity"]["title"] = bad_title
+    citation = json.loads(
+        (ROOT / run_knowledge_review.CITATION_AUDIT_PATH).read_text(
+            encoding="utf-8",
+        )
+    )
     with pytest.raises(ValueError, match="identity does not close"):
         run_knowledge_review._validate_citation_evidence_mapping(
             value,
             citation_audit_sha256=value["citation_audit_sha256"],
             exact_urls=[row["citation_url"] for row in value["entries"]],
+            expected_references=citation["references"],
+            expected_fetches=citation["fetches"],
         )
 
 

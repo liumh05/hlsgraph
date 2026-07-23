@@ -1,11 +1,30 @@
 {
-  "citation_audit_sha256": "66ac93ed69978221b9bfcd4ecc8f5f54faf115880c7282df7a748161545797c4",
+  "citation_audit_sha256": "ef110ff6f5c000d697ee2a0d69b05ca944e00ad73ed1b3deaabc5af7180a3397",
   "entries": [
     {
       "citation_url": "https://arxiv.org/abs/2107.11673v4",
       "evidence_url": "https://arxiv.org/abs/2107.11673v4",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "identity": {
+        "body_sha256": "03a74856aa984eed12345fe68f2359122576a0ffccf56c11f8ddb0eea9b09094",
+        "body_size": 44043,
+        "content_type": "text/html",
+        "document_id": "scalehls.paper",
+        "document_version": "arxiv-2107.11673v4"
+      },
+      "reference_bindings": [
+        {
+          "document_id": "scalehls.paper",
+          "document_version": "arxiv-2107.11673v4",
+          "reference_id": "2b1f664af98a31cbae67afd575a653f2f4803b9543cbfc7735a65c8ca2a8e6ed",
+          "reference_kind": "document",
+          "reference_surface_sha256": "17e74ed7b3f6e2f9d74e0e3eae9dddc6fa4d7c9530e38618b704cf170b180664",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "direct.sha256.v1"
     },
     {
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/",
@@ -17,6 +36,30 @@
         "title": "Vitis High-Level Synthesis User Guide (UG1399)",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "661a4a9dc7fd4c5a7a55d66b18e4be7dad6f563ad322f6b579b4a1c0c8e40639",
+          "reference_kind": "document",
+          "reference_surface_sha256": "96c263cd142d0147cd20bc0f967a70838b2544029bc85840b5a55210a880c8dc",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        },
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "e83b736949e4dd46a0a06f76d2f665910a47bc68695220b7100fc5791b9e1782",
+          "reference_kind": "document",
+          "reference_surface_sha256": "2332b86985925e5ae575d1a43de5e88773a3eebb296572de8094682072400002",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
       "resolver_id": "amd.docs.khub.map.v1"
     },
     {
@@ -32,6 +75,19 @@
         "topic_title": "Dataflow Viewer",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "68ab82bbf108fbf36abd272dcb61ec20ef898b1c8d6fc915a191787bef48def4",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "68d3b021a0e8b0a5bc75d3c7edcc919c3b7eebd4ee82a8d8f13a381df4fde7ef",
+          "rule_id": "amd.ug1399:2024.2:dataflow.dynamic_results_are_workload_scoped",
+          "rule_surface_sha256": "4faff72c6c5427cc0a7b8ebf7f0fae4ae891209546b359a033c3f23a677a03ff",
+          "section": "Dataflow Viewer",
+          "section_sha256": "25aac5b98d2c366ff3f1b7f61bfadf946a000da498af450498b5b981b183fbd4"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -47,6 +103,19 @@
         "topic_title": "Failure to Satisfy Optimization Directives",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "952c6135f7e6c5add7aea06e2624c2a69a7acab2ae404cb58933c8cdfbc525fb",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "2353f0aeaa643d76dba8ae400666a4192403a91988327920f26512b95e9cdaf5",
+          "rule_id": "amd.ug1399:2024.2:directive.requested_effective_achieved",
+          "rule_surface_sha256": "51ae2a2357b06e9cef649332f9fa0d7bffe39802f423d285e0157d05a2ff2e1d",
+          "section": "Failure to Satisfy Optimization Directives",
+          "section_sha256": "bcf28a63627d8b2580bbff563e965d8633a8dd7dd912f48363e2724deddaba31"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -62,6 +131,19 @@
         "topic_title": "Performance Metrics Example",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "c5ff66064d9eccc41051d2fa50462ab58605580cc25b57517dcfacd754be954e",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "323eee86c070eb2d84fedb49f4783748ec253b69aed266c4d2f167d273827893",
+          "rule_id": "amd.ug1399:2024.2:qor.latency_and_ii_are_distinct",
+          "rule_surface_sha256": "c05da70688b23ea6a1044e201a194e74edd5159e44bd4f46ca160b913fb4cda0",
+          "section": "Performance Metrics Example",
+          "section_sha256": "0753c64dcaf886c80ac7929d7f153354e5ebf19d5ac40504ef520c672b81034e"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -77,6 +159,19 @@
         "topic_title": "Running C Simulation",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "2ff37464ecdac3e3f11e1792ab28e6320ef780588a88cdd1f0ea109fb4364efb",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "a724e345d4aae05e882e8392fdb848536efa40b2d1c76d8db72dde20061e1706",
+          "rule_id": "amd.ug1399:2024.2:verification.csim_is_workload_scoped",
+          "rule_surface_sha256": "45cfadffbfdf4cb579300d85e17d50149ea93d902f11afb3421f4454e034c6c6",
+          "section": "Running C Simulation",
+          "section_sha256": "317140be0251165ad4d09d8c10d544afcd9f627b3c690d3b645f14a62ace42a7"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -92,6 +187,19 @@
         "topic_title": "Running C/RTL Co-Simulation",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "d9418322d8e7fb94ca8ae3d2d3ac6edddf984ab654194b02f794971bc34f00fe",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "4dd64bea9035d2fe2021f56aed3f97b11d7c8adc65e57412dc7633b0bf513a9f",
+          "rule_id": "amd.ug1399:2024.2:verification.cosim_is_workload_scoped",
+          "rule_surface_sha256": "61fe8db6af5617be346943803dad9c058aa2a1ed817eae1f58c6e75214d40008",
+          "section": "Running C/RTL Co-Simulation",
+          "section_sha256": "7eb3fe60c4ac49f0fd27242c90365ee62ce2e9f0daa06782788cc72bf3603fe5"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -107,6 +215,19 @@
         "topic_title": "Schedule Viewer",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "e9e84f1599359b27235a7e6b3026427e6970ca2e4c9f6c04efacb933d227d4cd",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "ffc8f88d4f8c106024c40b3118902fd511b2990667d813a8c2257c7e69184ef0",
+          "rule_id": "amd.ug1399:2024.2:schedule.control_steps_are_compiler_evidence",
+          "rule_surface_sha256": "fbe42941e0e46636bbf70be2807c37ed6115b3f7f54a4a4b261411c2c2a8a8f9",
+          "section": "Schedule Viewer",
+          "section_sha256": "48d84e2b3941ee45ebb85c9c5437213579dbf6293dc44ac7ce5c90a88bc93d4f"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -122,6 +243,19 @@
         "topic_title": "pragma HLS array_partition",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "ba5d0b94d81000eb2f0077aae928426b4f720e44c1dac81c03bfccc7188dc1ad",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "1f2e385e11f8f43ccffb4e07a6ef0e6748e341c13283e8cd2acd086e9d24185b",
+          "rule_id": "amd.ug1399:2024.2:directive.array_partition_requests_banking",
+          "rule_surface_sha256": "b233b6b2434b0b30d8d353b5a31eeee859dbd1f28fc20cad9d50c1aab55bc30f",
+          "section": "pragma HLS array_partition",
+          "section_sha256": "50cee36865a6001036e7cb32baa148e6469efb0aa8673d3e1549fb70303ebf68"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -137,6 +271,19 @@
         "topic_title": "pragma HLS dataflow",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "f42d406f6082e6898e4ad51871a442403cf9a45e382f7e891c1e7b64367167fd",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "d7ce83a6ab96f3c286bfaf911bec5b8d687ef46c23384772439127b9bd279ee4",
+          "rule_id": "amd.ug1399:2024.2:directive.dataflow_has_explicit_scope",
+          "rule_surface_sha256": "78db5fd365bdb8e04450cddca3e74fe54cd601b3ae12c8a8dab7b724edbb734d",
+          "section": "pragma HLS dataflow",
+          "section_sha256": "ce34520fabef822c85f795cb65cfda8b96c3b5bb9b11a755f54d749dd9a9d6f4"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -152,6 +299,19 @@
         "topic_title": "pragma HLS dependence",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "6c56d9b02d6155e2c65bc3a21f0b92f8fa2aa2e8df81b1fab7231f9c6c06f4b6",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "61d15356b8942c32124419c66c6e0fd741e3c8c4dba4c4f2585fc13ead2a4355",
+          "rule_id": "amd.ug1399:2024.2:directive.dependence_is_user_assertion",
+          "rule_surface_sha256": "f99be616d0c03a88bf147cbe7d0015243819b5157dd4178043f1257abe00b023",
+          "section": "pragma HLS dependence",
+          "section_sha256": "a66da2bc534f8bd7a63d1f83ee9c40a1dfa5295157df9acad9ed671370b04322"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -167,6 +327,19 @@
         "topic_title": "pragma HLS inline",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "de1b0207c47123457cf0a503d551670c650cc4e6940e11fba2be40acef3533ad",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "77c822f2b7372dc3e66fdd72fde732343902251ecafa34bc8860f2c81939f6ea",
+          "rule_id": "amd.ug1399:2024.2:directive.inline_changes_hierarchy",
+          "rule_surface_sha256": "c0a30f70657fa2fa7f1cc1571534c32c7dbb770f0e928f1be88530cb263f8640",
+          "section": "pragma HLS inline",
+          "section_sha256": "c0cd2753475e11ad4e1f7d834a87601f88d1f7a543a98d6cde091d1031effea3"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -182,6 +355,30 @@
         "topic_title": "pragma HLS interface",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "98b24bd38abc7bf66329bab722608bba43750bee03728793e5e4ed35e808918b",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "384cce84ba8217dd395b7e08ef2e787eb222b067a7d95bdfb8fc5bba1310af2b",
+          "rule_id": "amd.ug1399:2024.2:directive.interface_is_port_contract",
+          "rule_surface_sha256": "26fd76d481dfb9e4b7ac57e8fff5b604b9d2ae4af4d55017cfc705ff372db3a7",
+          "section": "pragma HLS interface",
+          "section_sha256": "a063ff91ced5f5a8f1347e7cb551cbd36d25ddd1a9f932f168080f10b85c90e9"
+        },
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "dbd677992f4c11e83e8488a46c9594cea169f6359e88c01cdd7cc5ff15e8411a",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "cb26cceabd0cdd1deda5a908502741debd1d393eb72020ea26c6478486db7d9e",
+          "rule_id": "amd.ug1399:2024.2:axi.interface_mode_is_scoped_request",
+          "rule_surface_sha256": "e03784e981d358794418879227ecb5ecf5ec52442059b62e7ac698b428d70386",
+          "section": "pragma HLS interface",
+          "section_sha256": "a063ff91ced5f5a8f1347e7cb551cbd36d25ddd1a9f932f168080f10b85c90e9"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -197,6 +394,19 @@
         "topic_title": "pragma HLS loop_tripcount",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "ab8f4c57a621c107d082c00845fb934a99d05b532c31a0145ae2ddd917c0cf98",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "c6fc191959fdba2643e62ef2ec85e8ddcb1051472eceee247c318cb667a1a3f7",
+          "rule_id": "amd.ug1399:2024.2:directive.tripcount_guides_estimates",
+          "rule_surface_sha256": "d278ba8c7bd3ed3f280da7041c14e83e8e699e6bad29099dcbebd2e4777d30e6",
+          "section": "pragma HLS loop_tripcount",
+          "section_sha256": "183de25bf451d8a1c453a7795a03aaa791e7f11ed77b4f5b495e456df65782a8"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -212,6 +422,19 @@
         "topic_title": "pragma HLS pipeline",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "a93650f5e96253c9c16b2630b9a97fd2fb7f6e1e8b4e6ecb63b9ba65a3471437",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "a48324cfa4f4aee8051b88b2e713772ab5b2954283025d22746ec3cff33d31ed",
+          "rule_id": "amd.ug1399:2024.2:directive.pipeline_ii_is_requested",
+          "rule_surface_sha256": "394bceb721f6dd4647c3b1900e03580034cbf2b64cd51fcb805618a8fd50b703",
+          "section": "pragma HLS pipeline",
+          "section_sha256": "7b7f4429148b45415be55f5da60512cf68b2ce614bf52cd7238196cb5c5372eb"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -227,6 +450,19 @@
         "topic_title": "pragma HLS stream",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "190624f5fc59cdecfc1d5c03f22c2c8084ae4a89d47ac46f9e6f3d6a97dca9a9",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "a7bff2eeec2482c384a15bda5b2991ecd197b63392a82c73f5b362d605cc8811",
+          "rule_id": "amd.ug1399:2024.2:directive.stream_depth_is_requested",
+          "rule_surface_sha256": "c3390cf7320b43b62dface3003bcc993b4a9cce5ec6c7c3a3bc12588fe200924",
+          "section": "pragma HLS stream",
+          "section_sha256": "850e021594bf1d130157f80dafc0fa1e2bab047242cc72f0c040d1c455ddc60a"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -242,6 +478,19 @@
         "topic_title": "pragma HLS unroll",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug1399",
+          "document_version": "2024.2",
+          "reference_id": "9b65293f7856e6c7a61227acb7ead61aaaeea0010e369f775437c6147fd95801",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "2678472a6f24423e4e1a570c1baa39ca6523173de873b550831907c2fa49559f",
+          "rule_id": "amd.ug1399:2024.2:directive.unroll_requests_replication",
+          "rule_surface_sha256": "bdc03e4cd2a9832a5eb187491f214190e21c21b3c45282f4e6cf57a11513b4a6",
+          "section": "pragma HLS unroll",
+          "section_sha256": "9eb9105e2a26f468d7e93e0cf064ae881cc758c995be6ccf3b550812f7b63b2a"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -254,6 +503,19 @@
         "title": "Vivado Design Suite Tcl Command Reference Guide (UG835)",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug835",
+          "document_version": "2024.2",
+          "reference_id": "81344f80c51351647b621d44605c5619725edce28d9dadd395c65249d5bdbed9",
+          "reference_kind": "document",
+          "reference_surface_sha256": "76f337f15605d2343285a2c30178fffda539461998d18754a27236776f112f37",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
       "resolver_id": "amd.docs.khub.map.v1"
     },
     {
@@ -269,6 +531,19 @@
         "topic_title": "report_timing_summary",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug835",
+          "document_version": "2024.2",
+          "reference_id": "b30e84816502b6b8f0e79f253d95cda1d52dc7cda902835ec49dc1e44eb1c6c2",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "9cc67f6f8d9318a8718a39426bced99cb0261e4e551b1d6e2270df2ed7fc116c",
+          "rule_id": "amd.ug835:2024.2:timing.summary_keeps_wns_tns_distinct",
+          "rule_surface_sha256": "9de13573ad930d114f414fe8a3fe9ce3af8316abbfe65b8e9b446c8119b20e1f",
+          "section": "report_timing_summary",
+          "section_sha256": "22d2d613aa6de27f0d63d519597fbd1d4a3bd80cf5d6c22adf3a6e8276bce14d"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -281,6 +556,19 @@
         "title": "Vivado Design Suite User Guide: Using Constraints (UG903)",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug903",
+          "document_version": "2024.2",
+          "reference_id": "12797df48f9131c9d3b21fba10f4c856133ed489c9195915d0a5e46e0535da0a",
+          "reference_kind": "document",
+          "reference_surface_sha256": "fc9e206e6cc761a77284cb9c22958e055b9fb09bcf33e6eed9c3191dc77a885e",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
       "resolver_id": "amd.docs.khub.map.v1"
     },
     {
@@ -296,6 +584,19 @@
         "topic_title": "About XDC Constraints",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug903",
+          "document_version": "2024.2",
+          "reference_id": "0e338ddb570b422f372fa62af59aff1297cbca658efacf8402ef64ca32eda292",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "dcf5599dee9fb1afaeeaa7040e491b4a749503d59530aed66a85884c89693f3e",
+          "rule_id": "amd.ug903:2024.2:xdc.constraints_are_design_inputs",
+          "rule_surface_sha256": "2304a8c88ef2075722db53cffb6e4b7d8d1d48de2faa791ec6a83e857953984c",
+          "section": "About XDC Constraints",
+          "section_sha256": "6971a5a20cc4a9c407c715f11a1fc125672c1f2463124891923ea96c06b05c0c"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -308,6 +609,19 @@
         "title": "Vivado Design Suite User Guide: Design Analysis and Closure Techniques (UG906)",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug906",
+          "document_version": "2024.2",
+          "reference_id": "2c71f13f61920b7592d3e5e88ccc74cbec9ce3f92b356a77c12a5854b01c662e",
+          "reference_kind": "document",
+          "reference_surface_sha256": "3316209fa641b896e82dab071fa95f1766f4cf702e8a9b747e030a539be241e7",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
       "resolver_id": "amd.docs.khub.map.v1"
     },
     {
@@ -323,6 +637,19 @@
         "topic_title": "Analyzing the Design Congestion",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug906",
+          "document_version": "2024.2",
+          "reference_id": "308c40c4d2cd3650efd8df4580dcd7effe6aaf4cdf723de7f41edfeeb5d39eb8",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "564ecaee6975ab5ad23882599fe304279bfd77c1bd0fe218a9f3209dad0351e1",
+          "rule_id": "amd.ug906:2024.2:physical.congestion_is_stage_scoped",
+          "rule_surface_sha256": "84db9d552cbeaea873efcd40b3031a5f73d6746c7d5a651cb3ae048b2ee80233",
+          "section": "Analyzing the Design Congestion",
+          "section_sha256": "899dcd9fe1aad7f5fda70d5cac1682755dd3ec280452e9991fbcd5bdfb991e67"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -338,6 +665,19 @@
         "topic_title": "Report Utilization",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug906",
+          "document_version": "2024.2",
+          "reference_id": "828d483b16e8e3f4f8ea800cdc409a434d8d7b82c453a3eb2e279562355f7deb",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "e8a9a40ca40d5a4f820c4b776868320cd383e452958413c554d7448be49c8a69",
+          "rule_id": "amd.ug906:2024.2:resource.utilization_is_stage_scoped",
+          "rule_surface_sha256": "977c474701d9c0ae5c109d9b47a6b8ae72a0d0a58565887b4b1028eb50ce948c",
+          "section": "Report Utilization",
+          "section_sha256": "1379d77b73089688ca79b72d0f5b2ead174ab5ff2bf93921fb5c1003a1c68234"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -353,6 +693,30 @@
         "topic_title": "Verifying Timing Signoff",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug906",
+          "document_version": "2024.2",
+          "reference_id": "2f2d37d2ce90ad888f556c7215178c18b02cf42af77d1e8daf7d4eb5c49adb57",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "25aa9dd8b30888e6f9f361a0042850593bd39e98809c92db6a9706152a6d8603",
+          "rule_id": "amd.ug906:2024.2:timing.post_route_signoff_requires_routed_design",
+          "rule_surface_sha256": "a64b9a29643b0599908d0db81c9f5aaabf20251cd9fe797f0bd66d1a4f02626e",
+          "section": "Verifying Timing Signoff",
+          "section_sha256": "90ee79d5f43b79d945fb40287766bd64e02c75b560df9afe4af29b81d08a1abb"
+        },
+        {
+          "document_id": "amd.ug906",
+          "document_version": "2024.2",
+          "reference_id": "30da8dd607d5ef534d64a723ba6c15ab2bf42241b35bfedbaa58c5605fecd061",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "18cd01beff4cec6c9b7b91eeac03ca1ec0f6aa11033612f8c1602fd4cd5dfc55",
+          "rule_id": "amd.ug906:2024.2:timing.post_route_observations_are_routed_evidence",
+          "rule_surface_sha256": "3582f07f8d0cb9dd518eef61ddf14227d4bfcfac6b40102dc304f05437d2dbdc",
+          "section": "Verifying Timing Signoff",
+          "section_sha256": "90ee79d5f43b79d945fb40287766bd64e02c75b560df9afe4af29b81d08a1abb"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
@@ -365,6 +729,19 @@
         "title": "Vivado Design Suite User Guide: Power Analysis and Optimization (UG907)",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug907",
+          "document_version": "2024.2",
+          "reference_id": "7e2f465340a09784e4abb03bfa508c720cdf8b6a535733f32404e9c5d6dbfa17",
+          "reference_kind": "document",
+          "reference_surface_sha256": "7c851478f3047ece16b99370d17af7e2375f662e5d78524ecc56a870c24994f3",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
       "resolver_id": "amd.docs.khub.map.v1"
     },
     {
@@ -380,122 +757,574 @@
         "topic_title": "Running Power Analysis from the Vivado IDE",
         "version": "2024.2"
       },
+      "reference_bindings": [
+        {
+          "document_id": "amd.ug907",
+          "document_version": "2024.2",
+          "reference_id": "7006261b8146c6c9d1ab857d8cb1b540bac836ee237fbc12990410bda4d79f13",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "dada86f07a243211063992aecad91afa1bca4af916a63837b56cdb274e99f735",
+          "rule_id": "amd.ug907:2024.2:power.requires_activity_context",
+          "rule_surface_sha256": "0a82ac2b9e85dbe5dc91724bccc6f8ba3cc15b84a2e76be7be0856ef0d480403",
+          "section": "Running Power Analysis from the Vivado IDE",
+          "section_sha256": "1da96c208d9031811e513470728151ccf94a4fa992603329a67c71f718b2ab0c"
+        }
+      ],
       "resolver_id": "amd.docs.khub.topic.v1"
     },
     {
       "citation_url": "https://documentation-service.arm.com/static/602a9df190ee6824a1e02b98",
       "evidence_url": "https://documentation-service.arm.com/static/602a9df190ee6824a1e02b98",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "identity": {
+        "body_sha256": "5d57888094cab17ad385eb1651ada736babd6c61333fcd479cb37e6e08f77102",
+        "body_size": 2319926,
+        "content_type": "application/pdf",
+        "document_id": "arm.ihi0022",
+        "document_version": "H.c"
+      },
+      "reference_bindings": [
+        {
+          "document_id": "arm.ihi0022",
+          "document_version": "H.c",
+          "reference_id": "0c6576ea23f3f76cc35fa8806bd5c9039324f221acbe62a24428b64feae44048",
+          "reference_kind": "document",
+          "reference_surface_sha256": "1e7d90f9d096cd8ec9bbe365101400b0170b3691387b1743d61db17baaff237f",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "direct.sha256.v1"
     },
     {
       "citation_url": "https://documentation-service.arm.com/static/64819f1516f0f201aa6b963c",
       "evidence_url": "https://documentation-service.arm.com/static/64819f1516f0f201aa6b963c",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "identity": {
+        "body_sha256": "477e232cd3dfb7b5e38370f8e6fb692361cb2321727e936a137c671a45acd2d0",
+        "body_size": 480665,
+        "content_type": "application/pdf",
+        "document_id": "arm.ihi0051",
+        "document_version": "B"
+      },
+      "reference_bindings": [
+        {
+          "document_id": "arm.ihi0051",
+          "document_version": "B",
+          "reference_id": "adb1882df10c944e933aa1828215861931e423d9ce233acb24e1f52c7b860ae7",
+          "reference_kind": "document",
+          "reference_surface_sha256": "fc4ddbc7a2d5af43327dc0db6edb202b052ef5c6c0b91f33fb7e70e79aee78ba",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "direct.sha256.v1"
     },
     {
       "citation_url": "https://github.com/EPFL-LAP/dynamatic/blob/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
-      "evidence_url": "https://github.com/EPFL-LAP/dynamatic/blob/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/EPFL-LAP/dynamatic/4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+      "identity": {
+        "commit": "4dd0bbc86aa55d01854b93fbbc8b818cc318ea80",
+        "document_id": "dynamatic.mlir_primer",
+        "document_version": "git-4dd0bbc86aa55d01854b93fbbc8b818cc318ea80",
+        "path": "docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+        "repository": "EPFL-LAP/dynamatic",
+        "source_sha256": "4740021c532406c801b0ae4a9215aebc43494dbb9ad75c9e0c9d882dec1f1370",
+        "source_size": 22489
+      },
+      "reference_bindings": [
+        {
+          "document_id": "dynamatic.mlir_primer",
+          "document_version": "git-4dd0bbc86aa55d01854b93fbbc8b818cc318ea80",
+          "reference_id": "a9f7c7895d187e60b22863143be9897fed4a8590fd6a7e7c2130f936fcd2117a",
+          "reference_kind": "document",
+          "reference_surface_sha256": "55a8869a76047713f5370c2cc5fe344fed1ea516dcd91e413e6c39410a0b9537",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "github.raw.document.v1"
     },
     {
       "citation_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
-      "evidence_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/circt/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
+      "identity": {
+        "commit": "ef03d45c960607315a8b62903b92d072d8542e30",
+        "end_line": 90,
+        "path": "include/circt/Dialect/Handshake/HandshakeOps.td",
+        "repository": "llvm/circt",
+        "slice_sha256": "48aa9c5ec0e6e01bef479f13bef0ddd8a8034fd4cc67da629cfab62d40202086",
+        "source_sha256": "dfd7b3680977ccaf6f0cc60a7232c68c967e5e519c02fea75ac9e24dd8bdd60b",
+        "start_line": 38
+      },
+      "reference_bindings": [
+        {
+          "document_id": "circt.handshake",
+          "document_version": "git-ef03d45c960607315a8b62903b92d072d8542e30",
+          "reference_id": "31c4868aee7f2ef794c8bc86437744774c22e596f7fc3cb42b6eed5b1f6a2dd7",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "c7976b797a76027f49525d022e055adf37726c2824588caf045d23634fb1ded0",
+          "rule_id": "circt.handshake:git-ef03d45c960607315a8b62903b92d072d8542e30:circt.handshake_has_dataflow_semantics",
+          "rule_surface_sha256": "617ac60bb37954f35e172f4f0607575c25ce4c77de0fbbda5f382806e95da5d0",
+          "section": "Handshake operation and FuncOp definitions",
+          "section_sha256": "0d95c875a0c3701b4f78e2e3223f72bce643053c6c1ea6694c051cb54fe6084e"
+        },
+        {
+          "document_id": "circt.handshake",
+          "document_version": "git-ef03d45c960607315a8b62903b92d072d8542e30",
+          "reference_id": "a508a6508e4403b10762e652bcb969054e328752a9a3cd20fa72e0e31696dd40",
+          "reference_kind": "document",
+          "reference_surface_sha256": "e97bb55702fb5616e6b3e0ad6c1ef1a603c3fec513a9c47d328a567cffaa4244",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 13705,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "c94bb0e619062abc84f4405fe474c496e29f9c9a6c5ae75181e5fb043681e12e",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 13496
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "5d6b44371fe5fc9ebb5a2d7ecf764822611867d73b9bcbd535a767d1d3315557",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "509787101165b68a13d0c31573f6e08bb2826a200b74fdc0f829df7dcf0e7ece",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.calls_are_low_level_ir_evidence",
+          "rule_surface_sha256": "809ebf99912be3d8aaea839f5c40db556ac4fbbb86e9989cf683651ba1648272",
+          "section": "Call Instruction",
+          "section_sha256": "0d0d54cb9d7ad9f3da92048b7ca293e935eaaea66074e2b7716d2878034135ac"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 1086,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "e98f315e0bf7625011ddbcd5eb75727259319e566fc8ca048accb975f4b4066d",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 977
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "4dd883bb8655646f0d285689d8463d30f2b4c52d4a5bec09551b8e51867317ec",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "50eac7067bfbbf59be3d084dac57fe6ebe0323e998372e502c7d1ad93ec9441d",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.containers_are_ir_scope_evidence",
+          "rule_surface_sha256": "8654500f946987c16272b822d7b4ced709e3e3cb2d9aa2d6632416b4c7b388bb",
+          "section": "Functions",
+          "section_sha256": "8423b9bb9477326f665fba8d7848295e13f82d5b9af37d107f8743b9910d6f91"
+        },
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "c1739677aff7900c362bc5e087a726bf4b081d24c786b6ae202abeec4da45c0d",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "52a10a9b3f083b1d91b316d674c8fc7bffad1e1c8f6967ec76634e25e958694f",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.cfg_is_low_level_control_evidence",
+          "rule_surface_sha256": "1df5506f9cee5752ff3ee6e0b404aaf093abb32b56c02eb01d23e8030856b8f6",
+          "section": "Basic Blocks and Terminators",
+          "section_sha256": "0b392d6316172f73fa32b7af73f1377de6ca905e8ecc3f44a673a88baa94d8da"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 12266,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "f758110704c215c8ab4271be1f9f5ab5d83f81b60d844d58bd5e50d763023403",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 12191
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "55bb453b3ff39898e26c00afa70f7f83a9699ee6745827edb8806799d82d57a7",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "2c6df7dba8044a05dd47343618c57054814440902c293408e24a9be460f9fad1",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.index_histograms_require_explicit_operand_schema",
+          "rule_surface_sha256": "33f5da5bc771445d3e837e50c747dccd17d465b90af0986f17e24d9debefc512",
+          "section": "GetElementPtr Instruction",
+          "section_sha256": "1d574d49e21979c330620a3e7bcfc881b4d097f13b35ed937e7eb2642b960f43"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 10044,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "0f56d19161a821766d21ad9003450462fb1008c808907823c5733f6d36a92391",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 9940
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "c7a55dadbb359402021e57ee208446bd810e619526531bb8347c4a2b5f72ce3f",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "54702124b6622c088c407728314c671d6f255281506e3dc72008826a6ba5dca9",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.instructions_are_typed_operation_evidence",
+          "rule_surface_sha256": "05359ec8da9950c5fd239dc4f78e7a6eae2ffd3a2db7ce509e22299582d7efc3",
+          "section": "Instruction Reference",
+          "section_sha256": "a837a7af1a4e1a033c61ecf1a7f8f2b111c208d79fee034fa68acb3111536071"
+        },
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "d528acc0c943082a853d08b0f0405cc0a8d888b77e9cd74d9e98b03ab4d7eb66",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "64ba51a6a608bbcf5c455466dba17e7a029bd2367f1ce14d729684abd086b7d1",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.operation_histograms_require_opcode_schema",
+          "rule_surface_sha256": "ffa1c5e28584a3a9d22ab17c72c56e1416b64dd112e63f515df3b702a1f2a0f0",
+          "section": "Instruction Reference / Opcode Aggregate",
+          "section_sha256": "782e95ebef767dc9bd3e312d6e8777df2ce0aadd599f0edb81d27b1e480096ac"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 4595,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "c3cd81de6a7b2c565bef44372dccc837f09be29886b758207962ff8a301d56b0",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 4569
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "d353bda093aa2ad4352cec89fba3a3cecbc46b5343c5ddf3de558cc0dde12dfa",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "0e1bc0d748fccdadf9a4a4f3e3f7937ddd1621a4fab96b04018cf1f7b5c8363f",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.bitwidth_histograms_require_integer_width_schema",
+          "rule_surface_sha256": "3044aefc9c85e5fcd47034e0b1a8feec2cf7c42565013eca63caa195bdebc79e",
+          "section": "Integer Type",
+          "section_sha256": "c8c3c422a0cdb4fb5b852603d00e93f7e149b51dd722630a09cb091e99a4bd51"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 12445,
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "2b9fe6767c121926c25e05e5173e43fae8423f64225a653d42676375a106c8a0",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "start_line": 11625
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "43af4f0e04daa8395d8da2b607b17d1c2a7861732820ebd577daf1331bd4184e",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "959f1f041c36d634128bf07e1f5a5c1ab208fb20630de7091af9038177801ad9",
+          "rule_id": "llvm.ir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.memory_access_histograms_require_opcode_schema",
+          "rule_surface_sha256": "5a1cdafa12f675f1d1f67633897624026c9b5aa8e523c8ca22668f1b8c49a744",
+          "section": "Memory Access and Addressing Instructions",
+          "section_sha256": "363f56f12e4516c97ac512db853aee498192f34adc934d679168c0171a9ec1e5"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 179,
+        "path": "llvm/docs/SourceLevelDebugging.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "7222268df5b564ffc46ef60057e223ec5e618631cdc9dc876be67096cebfec60",
+        "source_sha256": "fb70db5ecf8090683718d97a6c74a71d2af594d3d822c46e0b656330760f4714",
+        "start_line": 88
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.debug",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "559f6ac5cadce3c8dccebc131d72ca23b7f651781e8525d839fa2dd4ab773323",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "35a7a11205a84d1e86e979e496919ef41f0581279c22ca87dcfe778644cf0daf",
+          "rule_id": "llvm.ir.debug:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:llvm.debug_metadata_is_source_mapping_evidence",
+          "rule_surface_sha256": "061e857cc8ff9384d5d0d6519fdd70744679b9ff2cdc9a3935fa27ebdea2d39c",
+          "section": "Debugging Information Format",
+          "section_sha256": "866afdf315d8a58a718df5a4615a976d19edcba602d7a56fef148aec6e016ab2"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 500,
+        "path": "mlir/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "254761f99767bc8d8ad4e019faf9c0e4c74ba93e866a151aced1f059729fe610",
+        "source_sha256": "f2e267cb07ff36af88ae0a0a325ea81e3f350ad6e032f8fed0b62abf20cbe7fd",
+        "start_line": 353
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "bbf5f6c4be5e57580aeb3c62d936a9bc44aa8d8ff22eb45e3d9cb3eead6e586a",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "3622511d5a5b6d851d17cf5dddf1507828fae19abb527bd0f5590e8adeb63a87",
+          "rule_id": "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.containers_preserve_ir_scope",
+          "rule_surface_sha256": "d916ed00bf7a03ca18a32cc8ab616f5c4e6f66bbe88d2f789851668d2c230753",
+          "section": "Blocks and Regions",
+          "section_sha256": "8b3f080024d7914c35659f659b8f57314c08d3ea56467590112cb51e2b2779d9"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 285,
+        "path": "mlir/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "9e7949d37d16d4dc74270fe1611bf1ee44df31daf1a9fc318c4ff34444276ddd",
+        "source_sha256": "f2e267cb07ff36af88ae0a0a325ea81e3f350ad6e032f8fed0b62abf20cbe7fd",
+        "start_line": 243
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "63632006d9b3df9b9147306dbcf945d768f6c2e35e2fb06320577a7e8fae60a2",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "17c01aaff62062355fd2d6f58b4b138ab1d349cae4cba3e173a1dbb2591cdcb9",
+          "rule_id": "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.multiple_dialects_keep_native_semantics",
+          "rule_surface_sha256": "684b5020a313e96194e91fd58d8cb7de0ec311594caed07dedb7e1241d4916c1",
+          "section": "Dialects",
+          "section_sha256": "0d6d34d7294c5deac6c923462f67b844f374a239e48c46bebf5f709048abe629"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 352,
+        "path": "mlir/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "32b157fdff98ae51cbe38f60237ae6f044d6455cfb8ac48f70519c224e90a6e7",
+        "source_sha256": "f2e267cb07ff36af88ae0a0a325ea81e3f350ad6e032f8fed0b62abf20cbe7fd",
+        "start_line": 286
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "9cdf18bd5ffbd73bb332b8a2c163779b6f26f2877d757ac7403c51debebb49e6",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "d32a91b03c4cc28ff5c7147593aa42ca9f86354dd50504d0c1293f6f67cc8d92",
+          "rule_id": "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.operation_histograms_require_dialect_schema",
+          "rule_surface_sha256": "699f519d626aa9b4e573bf7f41959683f85e47169f3ee7fcd8b9e7e143bb73a2",
+          "section": "Operations",
+          "section_sha256": "dacc9320697906f6abcd78fe18c53ec1ae4829ff721b1ccc2743cf555c95895c"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 603,
+        "path": "mlir/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "e01dff4330f2a5fa71a68759c04982056eab2ac677c8a260b6a5b7740c7e9830",
+        "source_sha256": "f2e267cb07ff36af88ae0a0a325ea81e3f350ad6e032f8fed0b62abf20cbe7fd",
+        "start_line": 435
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "a492256171626e62883871486171ce1fc6e61b715242c1e20af14f8231bb4291",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "c8d4602a1e0b9caff30d6f1e834395d82498e34da8a9af8b2bb37ff0c8a0bdd2",
+          "rule_id": "llvm.mlir.langref:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.region_semantics_come_from_owner",
+          "rule_surface_sha256": "696851e518fb0ecfec5b301380ad8ea6102611318ac2dc0114dcf5627982dc65",
+          "section": "Regions",
+          "section_sha256": "14157a45a8b77e6893777c1d628a79a81f1fc6b8f61d73654ed6dc16da4b0f4f"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
-      "evidence_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "end_line": 340,
+        "path": "mlir/include/mlir/IR/BuiltinLocationAttributes.td",
+        "repository": "llvm/llvm-project",
+        "slice_sha256": "a1e2c31857f9c9420326ba0d5e8c6da54e3c06ed6bebc9ec03fe9a4a0a0dde19",
+        "source_sha256": "9c7e618279aa5749e57ca1863725b041df08265384180ded02a6c0c62d5e8b71",
+        "start_line": 27
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.builtin",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "c08100e02f9b92ce9156167f44249d0d8c35a651cc1496a6b2517ca774eefa6b",
+          "reference_kind": "document",
+          "reference_surface_sha256": "5c5647577e5baa9fdffeb0c7cb334218645ad7e28f154fcbe93cbc0ff73c1506",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        },
+        {
+          "document_id": "llvm.mlir.builtin",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "f7754480fa9128a1e710f1302bd76fc64c2aad0e60f36c35fa7f83264c738694",
+          "reference_kind": "rule",
+          "reference_surface_sha256": "06866d7b6ab4712355e1a3f949d7a0c1ccb52de133b424467bc157e6aff7fa52",
+          "rule_id": "llvm.mlir.builtin:git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3:mlir.locations_are_mapping_evidence",
+          "rule_surface_sha256": "12fab947e16b02e9a30980136b0be940261e1dd327a40b2b58a1c0c8f64d2411",
+          "section": "Location Attributes",
+          "section_sha256": "22a76f886b4c05150d05c8039c44d3e28ee9e63f86ae56c9782c25bcea96ce76"
+        }
+      ],
+      "resolver_id": "github.raw.lines.v1"
     },
     {
       "citation_url": "https://llvm.org/docs/LangRef.html",
-      "evidence_url": "https://llvm.org/docs/LangRef.html",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "document_id": "llvm.ir.langref",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "path": "llvm/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "source_sha256": "ef656ecd0fb4da751733330525d0bc6c8aa3f12a765551d6b25e0cc2f222327a",
+        "source_size": 1128724
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "729ed108e0d3414d8da77dc7b0870cf45903cd655f6917847298dcd8f0e879af",
+          "reference_kind": "document",
+          "reference_surface_sha256": "4b515b6ca7e7ac8995797d130ae9669341cfc6f34da45b44d6b8d313cbb1971d",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "github.raw.document.v1"
     },
     {
       "citation_url": "https://llvm.org/docs/SourceLevelDebugging.html",
-      "evidence_url": "https://llvm.org/docs/SourceLevelDebugging.html",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "document_id": "llvm.ir.debug",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "path": "llvm/docs/SourceLevelDebugging.md",
+        "repository": "llvm/llvm-project",
+        "source_sha256": "fb70db5ecf8090683718d97a6c74a71d2af594d3d822c46e0b656330760f4714",
+        "source_size": 101151
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.ir.debug",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "3bde9f69c0d961deaee0fc366819187585113ac1a7d78ce8c155ba4195f52b16",
+          "reference_kind": "document",
+          "reference_surface_sha256": "885c03d2a1e2bab1f138df172211cd487fb8879902b42d885f30992f96de6a17",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "github.raw.document.v1"
     },
     {
       "citation_url": "https://mlir.llvm.org/docs/LangRef/",
-      "evidence_url": "https://mlir.llvm.org/docs/LangRef/",
-      "identity": null,
-      "resolver_id": "direct.v1"
+      "evidence_url": "https://raw.githubusercontent.com/llvm/llvm-project/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md",
+      "identity": {
+        "commit": "429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "document_id": "llvm.mlir.langref",
+        "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+        "path": "mlir/docs/LangRef.md",
+        "repository": "llvm/llvm-project",
+        "source_sha256": "f2e267cb07ff36af88ae0a0a325ea81e3f350ad6e032f8fed0b62abf20cbe7fd",
+        "source_size": 39561
+      },
+      "reference_bindings": [
+        {
+          "document_id": "llvm.mlir.langref",
+          "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
+          "reference_id": "3c9337f1ba42f348818836d7ddc21b8baac44e4b5b1559ec025e602306853a8f",
+          "reference_kind": "document",
+          "reference_surface_sha256": "95f58b7dc91cecaa1abbe157ab43df3d965cf5278011de4119c0ce37dbdefb7e",
+          "rule_id": null,
+          "rule_surface_sha256": null,
+          "section": null,
+          "section_sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+        }
+      ],
+      "resolver_id": "github.raw.document.v1"
     }
   ],
-  "schema_version": "hlsgraph.knowledge-review.evidence-map.v1"
+  "schema_version": "hlsgraph.knowledge-review.evidence-map.v2"
 }

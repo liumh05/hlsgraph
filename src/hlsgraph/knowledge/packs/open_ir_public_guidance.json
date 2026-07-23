@@ -98,8 +98,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#blocks",
-      "summary": "MLIR module and function containers preserve compiler IR scope; their presence does not establish an HLS hardware instance.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "MLIR operations are nested in regions and blocks, while module and function operations provide compiler IR containment and scope.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Compiler IR containment is preserved as scope evidence; it does not by itself establish an instantiated HLS hardware block."}
     },
     {
       "document_id": "llvm.mlir.langref",
@@ -123,8 +124,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#dialects",
-      "summary": "MLIR modules may contain multiple dialects whose operations retain dialect-defined semantics; a generic operation cannot be promoted to hardware topology.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "MLIR supports multiple dialects, and an operation's semantics are defined by the dialect that owns that operation.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "HLSGraph preserves dialect identity and does not promote a generic operation to hardware topology without a supported dialect-specific projection."}
     },
     {
       "document_id": "llvm.mlir.langref",
@@ -147,8 +149,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#regions",
-      "summary": "A region's semantics are defined by its owner, so containment or SSA use alone does not establish HLS connectivity.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "MLIR regions contain blocks, and the operation that owns a region defines the region's semantics.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Region containment or SSA use alone is not promoted to HLS connectivity; the owning operation's supported semantics are required."}
     },
     {
       "document_id": "llvm.mlir.builtin",
@@ -172,7 +175,7 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/include/mlir/IR/BuiltinLocationAttributes.td",
-      "summary": "Structured MLIR locations are mapping evidence; unresolved or ambiguous mappings remain explicit and names are never used to invent an edge.",
+      "summary": "MLIR location attributes represent source locations and support structured forms including call-site, fused, named, and opaque locations.",
       "license_note": "Short project-authored paraphrase; no source text is redistributed.",
       "metadata": {"hlsgraph_local_derivation_policy": "Allowing explicit many-to-many mappings, retaining ambiguity, and forbidding name-based edge invention are HLSGraph mapping policies; the source defines the typed location forms."}
     },
@@ -197,8 +200,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/mlir/docs/LangRef.md#operations",
-      "summary": "An MLIR operation aggregate is meaningful only with dialect-qualified operation names and an explicitly complete current artifact domain.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "MLIR operations have dialect-qualified names and may carry operands, results, attributes, regions, and successors.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Operation aggregates use dialect-qualified names and require an explicitly complete current-artifact domain; missing evidence remains unknown rather than zero."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -221,8 +225,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
-      "summary": "LLVM modules and functions delimit low-level IR scope and do not by themselves identify instantiated HLS hardware.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "LLVM function definitions contain typed signatures and a list of basic blocks that together form the function CFG.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "LLVM function containment is retained as low-level IR scope evidence and is not treated as proof of an instantiated HLS hardware block."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -246,8 +251,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
-      "summary": "LLVM instructions are typed low-level compiler operations; an instruction is evidence, not a scheduled or bound hardware operation.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "LLVM instruction syntax is opcode-specific and includes explicit types for values where the instruction requires them.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "An LLVM instruction is compiler-operation evidence and is not treated as a scheduled or function-unit-bound hardware operation without schedule or binding evidence."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -270,8 +276,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#functions",
-      "summary": "LLVM basic blocks and branch successors are low-level control evidence and are never promoted directly to HLS hardware edges.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "An LLVM function definition contains basic blocks that end in terminator instructions and together form the function CFG.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "LLVM basic blocks and successor relations remain low-level control evidence and are not promoted directly to HLS hardware edges."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -296,8 +303,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#call-instruction",
-      "summary": "A resolved LLVM call-like instruction is low-level compiler evidence and does not establish an HLS hardware instance or topology edge.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "The LLVM call instruction records a callee, function type, arguments, optional attributes, and result semantics.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "A resolved LLVM call-like instruction remains low-level compiler evidence and does not by itself establish an HLS hardware instance or topology edge."}
     },
     {
       "document_id": "llvm.ir.debug",
@@ -321,8 +329,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/SourceLevelDebugging.md#debugging-information-format",
-      "summary": "LLVM debug metadata can relate IR to source but may be transformed or incomplete; it is mapping evidence rather than unique hardware identity.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "LLVM debug metadata records source-level information and may be updated or dropped as IR transformations change the program.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Debug locations are retained as potentially incomplete, many-to-many mapping evidence and never treated as unique hardware identity."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -345,8 +354,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#instruction-reference",
-      "summary": "An LLVM operation histogram must be recomputed over a complete current operation domain using explicit opcodes.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "The LLVM instruction reference groups the instruction set into named classes and defines opcode-specific instruction syntax.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "LLVM operation histograms are recomputed from explicit opcodes over a declared complete current-artifact domain."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -369,7 +379,7 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#getelementptr-instruction",
-      "summary": "A GEP index aggregate covers only explicitly represented getelementptr index operands over a declared complete current operation domain.",
+      "summary": "The getelementptr instruction syntax explicitly lists a base pointer followed by zero or more typed index operands.",
       "license_note": "Short project-authored paraphrase; no source text is redistributed.",
       "metadata": {"hlsgraph_local_derivation_policy": "Requiring a complete aggregation domain and treating absent evidence as unknown rather than zero are HLSGraph derivation policies."}
     },
@@ -394,8 +404,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#integer-type",
-      "summary": "Bitwidth aggregates count explicit integer type occurrences and do not infer widths absent from the current LLVM evidence domain.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "LLVM integer types use the form iN, where N is the integer type's bit width.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Bitwidth aggregates count explicit integer type occurrences in a complete current-artifact domain and do not invent absent widths."}
     },
     {
       "document_id": "llvm.ir.langref",
@@ -419,8 +430,9 @@
         "specification_revision_does_not_imply_artifact_revision": true
       },
       "citation_url": "https://github.com/llvm/llvm-project/blob/429c88d37f1f02e68ebc1fc7b0da4511ce6407e3/llvm/docs/LangRef.md#memory-access-and-addressing-operations",
-      "summary": "Memory-access aggregates are recomputed from explicit LLVM opcodes and do not identify eventual HLS banks or ports.",
-      "license_note": "Short project-authored paraphrase; no source text is redistributed."
+      "summary": "LLVM defines distinct memory and addressing opcodes including alloca, load, store, fence, cmpxchg, atomicrmw, and getelementptr.",
+      "license_note": "Short project-authored paraphrase; no source text is redistributed.",
+      "metadata": {"hlsgraph_local_derivation_policy": "Memory-access aggregates are recomputed from explicit LLVM opcodes and do not identify eventual HLS banks or ports without separate binding evidence."}
     },
     {
       "document_id": "circt.handshake",
@@ -443,7 +455,7 @@
         "unsupported_operations_remain_evidence_only": true
       },
       "citation_url": "https://github.com/llvm/circt/blob/ef03d45c960607315a8b62903b92d072d8542e30/include/circt/Dialect/Handshake/HandshakeOps.td",
-      "summary": "Handshake operations belong to fine-grained dataflow graph regions; this native compiler evidence is not itself post-synthesis hardware topology.",
+      "summary": "The CIRCT Handshake dialect defines fine-grained dataflow operations together with a Handshake function operation.",
       "license_note": "Short project-authored paraphrase; no source text is redistributed.",
       "metadata": {"hlsgraph_local_derivation_policy": "Keeping native Handshake evidence separate from post-synthesis topology and leaving unsupported operations evidence-only are HLSGraph truth-boundary policies."}
     }

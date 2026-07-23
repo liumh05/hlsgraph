@@ -1,236 +1,270 @@
 # Knowledge review release runbook
 
-The two v0.3 knowledge reviews are release evidence, not ordinary generated
-documentation. Run them from two separate clean ext4 checkouts of the same
-candidate commit. Windows, drvfs, a dirty tree, a model-enabled network, or a
-missing retained raw stream/cache makes the review invalid.
+The v0.3 knowledge review is a six-invocation, fail-closed release procedure.
+It reviews the same frozen public candidate twice: three semantic shards and
+three adversarial shards.  All six invocations use the same pinned model, so a
+successful suite is recorded as `machine_repeated_reviewed`; it is not a
+cross-model or human review.
 
-## Preconditions
+This procedure reviews short public rules and their exact citations.  It does
+not publish vendor manuals, PDFs, extracted pages, local document chunks, or
+model-readable private evidence.
 
-- Ubuntu 22.04 under WSL2, with each checkout and evidence cache on ext4 (not
-  `/mnt/c`, `/mnt/d`, another drvfs mount, or a home directory).
-- `codex-cli 0.144.0`, authenticated through a dedicated `CODEX_HOME`.
-- No `OPENAI_API_KEY`, `CODEX_API_KEY`, or `CODEX_ACCESS_TOKEN` environment
-  variable. The runner supplies a narrow environment and starts model-issued
-  commands from a default-deny filesystem. Only Codex's system-level
-  `:minimal` runtime, the exact hashed Codex runtime directory, and the current
-  frozen cache are readable; homes, `CODEX_HOME`, drvfs, live checkouts, raw
-  evidence, peer caches, and unrelated temporary files are absent from that
-  view.
-- A clean committed public candidate containing the passed online citation
-  audit at `docs/knowledge-citation-audit-v0.3.json` and its closed
-  `docs/knowledge-review-evidence-v0.3.json` mapping. The latter binds the raw
-  citation-audit SHA-256 and contains exactly one entry per unique human
-  citation URL; it contains official identifiers and URLs, never manual text.
-  Every identity string is 1--256 characters and rejects ASCII control/newline
-  characters; titles remain short identity labels, not a document-text channel.
-- One separate private evidence directory and one dedicated cache parent per
-  invocation, all created with mode `0700`. Each cache parent must be owned by the invoking
-  user and empty before the run. Each evidence directory must likewise be an
-  empty, caller-owned `0700` directory dedicated to that one invocation. Raw
-  JSONL and stderr files stay there; never put them beside or below a cache.
-  Raw JSONL/stderr files are `0600`; after construction, cache directories and
-  files are frozen to `0500` and `0400` respectively. Never place these
-  restricted artifacts in the repository, wheel, sdist, SBOM, or GitHub Release.
-- A dedicated caller-owned, frozen `0500` runtime directory containing exactly
-  one direct child: the self-contained, owner-executable Codex binary used by
-  both invocations. No other file or subdirectory is allowed. Its exact
-  single-file manifest and executable SHA-256 are recorded in each receipt; a
-  package-manager shim, hard link, or writable installation is not valid. The
-  only accepted executable is the official `rust-v0.144.0` Linux musl ELF with
-  SHA-256
+## Fixed formal profile
+
+- Linux/WSL2 on ext4.  A checkout or evidence tree on drvfs (`/mnt/c`,
+  `/mnt/d`, and similar mounts) is invalid.
+- One clean, committed candidate checkout.  The suite executor must be the
+  copy contained in that checkout.
+- `codex-cli 0.144.0`, model `gpt-5.6-sol`, reasoning effort `medium`.
+- The official self-contained Linux musl Codex ELF, SHA-256
   `901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429`.
-  The official release-asset tar digest independently checked through the
-  GitHub API is
+  The independently checked official release tar SHA-256 is
   `725883fc20ab4af3072829aaa0edf6d12c216238f9f7315a6656b950fb05c8bb`.
+- `tiktoken==0.13.0`, encoding `o200k_base`, with the complete tokenizer-table
+  contract SHA-256 fixed by `tools/knowledge_review_shards.py`.  The formal
+  suite reads its BPE table from one explicit frozen offline cache; it never
+  downloads tokenizer data during a release run.
+- A dedicated authenticated `CODEX_HOME`; API-key environment variables are
+  absent.  The model sandbox cannot read `CODEX_HOME`.
+- One caller-owned, empty, mode-`0700` external suite work root.  It must be
+  disjoint from the checkout, `CODEX_HOME`, and Codex runtime.
 
-Generate and commit the fixed citation inventory before cloning the review
-trees:
+The frozen context contract is a 372,000-token window, at most 250,000
+accounted visible input tokens per shard, a 122,000-token reserve, and a
+32,000-token allowance inside the visible-input ceiling for the runtime
+envelope.  Codex is launched with a 300,000-token auto-compaction threshold
+whose scope is `total`.  The raw event stream must contain no compaction event;
+the four terminal usage fields (`input_tokens`, `cached_input_tokens`,
+`output_tokens`, and `reasoning_output_tokens`) are retained as cumulative API
+usage and are not misrepresented as instantaneous context length.  Receipts
+label `input_tokens + output_tokens` only as a deterministic derived value;
+they never present it as a counter reported by Codex.
+
+## What is frozen and what the model can see
+
+The review snapshot integrity-binds the public package, schemas, citation
+inventory/evidence map, prompts, suite executor, cache/replay/seal code, release
+auditor, and all three knowledge packs.  A byte change invalidates the suite.
+
+Integrity binding does not imply model visibility.  Each invocation receives
+only its own generated projection under
+`review-projections/v1/<shard>/...`, its own assertion contract, and its own
+content-addressed citation chunks.  The three fixed shards are:
+
+1. `knowledge_activation`
+2. `ir_semantics`
+3. `tool_evidence`
+
+The 38 rule references occur in exactly one shard each.  Another shard's
+rules, bindings, coverage rows, assertions, and chunks are absent rather than
+merely hidden by prompt instructions.  Full public source files and the full
+citation inventory remain integrity inputs but are not mounted as readable
+model context.
+
+## Citation acquisition and PDF policy
+
+Before model execution, the trusted runner obtains the semantic protocol's
+exact machine-evidence URLs.  Redirect identity, status, media type, charset,
+length, and body bytes are checked against the committed evidence map.  AMD
+topics are closed against the official KHUB map and pages identities.  GitHub
+citations are commit- and byte-pinned, and rules see only their audited line
+ranges.
+
+The adversarial full cache is then rebuilt without network access by replaying
+the frozen semantic cache.  The release auditor later compares every resolver
+response and evidence response, including exact body bytes, across both full
+caches.  Model-issued commands have network disabled in all six invocations.
+
+A document-only PDF locator proves document identity, not section meaning.
+PDF text may support a future rule only when the rule cites a bounded section
+and the runner is given a fixed absolute `pdftotext` executable plus its
+SHA-256.  The controlled derivation must succeed and the assigned chunks must
+be completely inspected.  PDF files, complete extracted text, MinerU output,
+and local sidecar chunks remain outside Git and all release artifacts.
+
+## Prepare the candidate
+
+Generate the online citation inventory before freezing the candidate:
 
 ```bash
 python3 tools/audit_knowledge_citations.py --online \
   --output docs/knowledge-citation-audit-v0.3.json
 ```
 
-Resolve each AMD human locator through the official KHUB service before the
-candidate is frozen. A document root maps to
-`/api/khub/maps/{publication_id}`. A topic maps to
-`/api/khub/maps/{publication_id}/topics/{content_id}/content?target=DESIGNED_READER`,
-with the same map's `/pages` inventory supplying the unique `prettyUrl`,
-`tocId`, `contentId`, and topic title. Record that closed identity in
-`knowledge-review-evidence-v0.3.json`. Do not store the fetched metadata,
-pages response, topic body, PDF, or derived text in Git. Non-AMD references use
-`direct.v1` and must keep identical human and evidence URLs.
+Resolve and commit the corresponding closed
+`docs/knowledge-review-evidence-v0.3.json`.  It contains official identities,
+URLs, versions, and byte hashes, never downloaded manual text.  Run the public
+test and privacy gates, commit the candidate, then create a fresh ext4 clone.
+The formal executor rejects a dirty checkout.
 
-Validate both files with `preflight`, then commit them together with the closed
-evidence-map schema. The evidence map's `citation_audit_sha256` must equal the
-SHA-256 of the citation-audit file's original bytes:
+## Prepare the isolated runtime
+
+Example layout (all paths are on ext4):
 
 ```bash
-git add docs/knowledge-citation-audit-v0.3.json \
-  docs/knowledge-review-evidence-v0.3.json \
-  tools/knowledge_review_evidence.schema.json
-git commit -m "Add v0.3 citation review evidence map"
+export CHECKOUT=/root/hlsgraph-review-v03
+export SUITE_WORK=/var/tmp/hlsgraph-review-suite-v03
+export CODEX_RUNTIME=/var/tmp/hlsgraph-review-runtime-v03
+export CODEX_HOME=/var/tmp/hlsgraph-review-codex-home-v03
+export TIKTOKEN_CACHE_DIR=/var/tmp/hlsgraph-review-tokenizer-cache-v03
+
+install -d -m 0700 "$SUITE_WORK" "$CODEX_HOME"
+export CODEX_PACKAGE=/path/to/codex-0.144.0-linux-x64.tgz
+export CODEX_STAGE="$(mktemp -d)"
+
+printf '%s  %s\n' \
+  391a3793d21feff08da2d9132f01107dd56fa5a48a158e23d15c6d56e34f7cb2 \
+  "$CODEX_PACKAGE" | sha256sum --check --strict
+tar -xzf "$CODEX_PACKAGE" -C "$CODEX_STAGE" \
+  package/vendor/x86_64-unknown-linux-musl/bin/codex \
+  package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap
+
+test ! -e "$CODEX_RUNTIME"
+install -d -m 0700 "$CODEX_RUNTIME/codex-resources"
+install -m 0500 \
+  "$CODEX_STAGE/package/vendor/x86_64-unknown-linux-musl/bin/codex" \
+  "$CODEX_RUNTIME/codex"
+install -m 0500 \
+  "$CODEX_STAGE/package/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap" \
+  "$CODEX_RUNTIME/codex-resources/bwrap"
+printf '%s  %s\n' \
+  901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429 \
+  "$CODEX_RUNTIME/codex" | sha256sum --check --strict
+printf '%s  %s\n' \
+  77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c \
+  "$CODEX_RUNTIME/codex-resources/bwrap" | sha256sum --check --strict
+chmod 0500 "$CODEX_RUNTIME/codex-resources" "$CODEX_RUNTIME"
 ```
 
-## Preflight without network or model execution
+The tarball is the `@openai/codex@0.144.0-linux-x64` platform package.  The
+runtime must contain exactly `codex` and `codex-resources/bwrap`, with the
+intermediate directory shown above and no other entry.  Files may not be
+symlinks, hard links, package-manager shims, or writable installations.  The
+executor freezes both component hashes and sets the initial process path to
+`$CODEX_RUNTIME/codex-resources:/usr/bin:/bin`, so the pinned bundled bwrap is
+selected ahead of an unrecorded host version.  `code_mode`, `code_mode_host`,
+and `code_mode_only` are explicitly disabled, so tool execution cannot request
+an unpinned `codex-code-mode-host`; the fixed direct shell path is used instead.
+Codex's ephemeral argv0 aliases remain inside the dedicated `CODEX_HOME`; that
+directory is not exposed to the review sandbox, and `auth.json` is still a
+negative boundary canary.
 
-The `preflight` subcommand freezes the real source inventory and prompt
-contract. It performs no citation fetch and does not invoke Codex:
+Prepare the tokenizer cache once, before the formal run.  The cache must live
+on ext4, contain exactly the named table, and remain caller-owned mode `0500`
+with a mode-`0400` table:
 
 ```bash
-python3 tools/run_knowledge_review.py preflight \
-  --protocol hlsgraph.knowledge-review.semantic.v1
-python3 tools/run_knowledge_review.py preflight \
-  --protocol hlsgraph.knowledge-review.adversarial.v1
+test ! -e "$TIKTOKEN_CACHE_DIR"
+install -d -m 0700 "$TIKTOKEN_CACHE_DIR"
+curl --fail --location --retry 8 --retry-all-errors \
+  --output "$TIKTOKEN_CACHE_DIR/fb374d419588a4632f3f557e76b4b70aebbca790" \
+  https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+printf '%s  %s\n' \
+  446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d \
+  "$TIKTOKEN_CACHE_DIR/fb374d419588a4632f3f557e76b4b70aebbca790" \
+  | sha256sum --check --strict
+test "$(stat -c %s \
+  "$TIKTOKEN_CACHE_DIR/fb374d419588a4632f3f557e76b4b70aebbca790")" \
+  -eq 3613922
+chmod 0400 \
+  "$TIKTOKEN_CACHE_DIR/fb374d419588a4632f3f557e76b4b70aebbca790"
+chmod 0500 "$TIKTOKEN_CACHE_DIR"
 ```
 
-Record the reported snapshot, implementation, schema, citation-audit, and pack
-surface hashes. Any change before or during a review invalidates that run.
+Authenticate the dedicated `CODEX_HOME` before the run.  Do not export
+`OPENAI_API_KEY`, `CODEX_API_KEY`, or `CODEX_ACCESS_TOKEN`.
 
-## Run two isolated invocations
+The work root must still be empty when the executor starts.  If a prior run
+created anything there, use a newly named empty root; do not reuse or clean an
+evidence directory in place.
 
-Create two ext4 clones/worktrees at the same commit and private external
-evidence parents. The cache and raw paths must not already exist.
+## Execute exactly six reviews
+
+From the clean checkout:
 
 ```bash
-export CODEX_HOME="$HOME/.codex-hlsgraph-review"
-install -d -m 0700 \
-  /var/tmp/hlsgraph-review-semantic-evidence \
-  /var/tmp/hlsgraph-review-adversarial-evidence \
-  /var/tmp/hlsgraph-review-semantic-cache \
-  /var/tmp/hlsgraph-review-adversarial-cache \
-  /var/tmp/hlsgraph-review-runtime
-# Install the exact self-contained codex-cli 0.144.0 binary here; do not use
-# a symlink or package-manager shim.
-install -m 0500 /path/to/exact/codex \
-  /var/tmp/hlsgraph-review-runtime/codex
-chmod 0500 /var/tmp/hlsgraph-review-runtime
-
-cd /var/tmp/hlsgraph-review-semantic
-python3 tools/run_knowledge_review.py review \
-  --protocol hlsgraph.knowledge-review.semantic.v1 \
-  --raw-output /var/tmp/hlsgraph-review-semantic-evidence/semantic.codex.jsonl \
-  --cache-root /var/tmp/hlsgraph-review-semantic-cache/cache \
-  --codex-command /var/tmp/hlsgraph-review-runtime/codex \
-  --pdftotext-command /usr/bin/pdftotext \
-  --pdftotext-sha256 "$(sha256sum /usr/bin/pdftotext | cut -d' ' -f1)"
-
-cd /var/tmp/hlsgraph-review-adversarial
-python3 tools/run_knowledge_review.py review \
-  --protocol hlsgraph.knowledge-review.adversarial.v1 \
-  --raw-output /var/tmp/hlsgraph-review-adversarial-evidence/adversarial.codex.jsonl \
-  --cache-root /var/tmp/hlsgraph-review-adversarial-cache/cache \
-  --codex-command /var/tmp/hlsgraph-review-runtime/codex \
-  --pdftotext-command /usr/bin/pdftotext \
-  --pdftotext-sha256 "$(sha256sum /usr/bin/pdftotext | cut -d' ' -f1)"
+cd "$CHECKOUT"
+python3 -m tools.execute_knowledge_review_suite \
+  --root "$CHECKOUT" \
+  --work-root "$SUITE_WORK" \
+  --codex "$CODEX_RUNTIME/codex" \
+  --timeout-seconds 7200 \
+  --fetch-timeout-seconds 60
 ```
 
-The trusted runner fetches each exact machine evidence URL before model
-execution. A redirect may repeat the identical URL, but may not change its
-scheme, host, port, path, or query. The runner applies a fixed response
-size limit, and writes content-addressed bodies plus parser-bound inspection
-text to the external cache. For AMD topics it also fetches and validates the
-official map metadata and pages inventory, closing public version, logical
-document ID, slug, title, and the unique pretty-URL/TOC/content/topic identity.
-Map/pages responses are fetched once per publication in an invocation and
-referenced as the same content-addressed artifacts by all its topics. A
-FluidTopics JavaScript portal shell is unavailable evidence, not document
-text. Codex then runs with network disabled and a true
-allowlist rather than a full-disk read baseline: `:minimal`, `$CODEX_RUNTIME`,
-and `$CACHE` are the only readable roots, and the generated cache is frozen to
-directory mode `0500` and file mode `0400`. Cache files and runtime files with
-more than one hard link are rejected. The
-runner proves the allowed reads, denied checkout/auth/external/peer reads, and
-denied cache writes before sending the prompt. The only model-issued command
-forms accepted by replay are a complete `head -n COUNT PATH` read and
-`sha256sum PATH ...` over manifest-listed chunks only. Each chunk is UTF-8
-safe, content addressed, at most 6000 bytes, and binds a contiguous byte range,
-parent hash, and exact reconstruction. A source/citation counts as inspected
-only after replay sees every chunk's exact output. The Codex command and receipt
-fix `tool_output_token_limit=50000`; any CLI truncation therefore still fails
-the exact-output replay rather than being mistaken for visibility.
+The executor performs, in order:
 
-The snapshot intentionally distinguishes two claims. Every frozen source file
-is `integrity_bound`: its byte hash contributes to the snapshot and any change
-invalidates the review. Only the explicit minimal activation TCB, public packs,
-citation inventory/evidence map, and output contract are
-`model_inspection_required` and must be read chunk by chunk. Other files are
-listed as `integrity_bound_only`; neither the prompt nor receipt claims the LLM
-read them. The public manifest and receipt bind this closed inspection-scope
-contract.
+1. clean-host, ext4, runtime, tokenizer, source, schema, and privacy checks;
+2. one online pinned full-cache acquisition for the semantic protocol;
+3. one exact offline full-cache replay for the adversarial protocol;
+4. three physically isolated semantic Codex subprocesses;
+5. three physically isolated adversarial Codex subprocesses;
+6. deterministic aggregation, trace/receipt construction, and pair sealing;
+7. publication of only the aggregate result, normalized trace, and receipt to
+   their fixed public `docs/` paths.
 
-PDF content is usable only when the fixed absolute `/usr/bin/pdftotext` binary
-matches the explicitly supplied SHA-256, runs under the runner's minimal fixed
-environment, produces non-empty UTF-8 text, and records controlled parser,
-version-output, executable, argv, environment, and contract hashes. Stdout and
-stderr are drained concurrently under fixed byte limits; timeout or a limit
-breach terminates and then kills the child and exposes only a body-free error.
-Omit `--pdftotext-command` only if the citation inventory contains no PDFs. A
-PDF without controlled text derivation is marked unavailable; an unavailable
-or incompletely inspected citation cannot produce `approved: true`.
+Each private invocation directory retains:
 
-The retained raw JSONL contains the public source command output but replaces
-full citation inspection output with a hash/length marker. Raw response bodies
-and derived citation text remain only in the private external cache. Unknown
-events/tools, partial reads, missing start/completion status, output mismatch,
-interpreters, search, writes, command chaining, substitute URLs, or cache/source
-mutation fail closed.
+- `raw.jsonl`: exact authoritative Codex stdout;
+- `sanitized.jsonl`: deterministic content-redacted derivative;
+- `stderr.raw.log` and `stderr.log`: exact stderr and its deterministic
+  derivative;
+- `process.json`: exact argv, cwd, stdin/stdout/stderr hashes, exit status, and
+  command-contract hash;
+- `invocation.json`: the closed replay envelope; and
+- its own immutable projected cache.
 
-Each invocation stages and then publishes its controlled result, content-free
-normalized trace, and v4 receipt. Approved results have no issues and use only
-the fixed summary `approved_no_issues`; rejected results expose controlled
-codes, never model-authored finding/evidence/fix prose. Public traces expose a
-controlled parser ID plus contract digest, never parser output or arbitrary
-version text. The receipt embeds a path-tokenized boundary contract,
-the hashed Codex runtime manifest, cache identity, parent policy, canary
-outcomes, and a contract hash; it never publishes an absolute private path.
-Do not hand-edit any of these public artifacts. These hashes and replay checks
-are reproducible integrity evidence for the declared execution inputs. They are
-not a third-party cryptographic attestation of OpenAI execution and do not
-protect against an already-malicious maintainer who controls all evidence.
+For every returned Codex process, the executor writes exact stdout/stderr,
+their deterministic redacted derivatives, and `process.json` before semantic
+interpretation.  On a zero exit status it replaces `sanitized.jsonl` with the
+verified citation-redacted JSONL before command/replay/static-boundary checks.
+Thus nonzero exits and post-process contract failures remain diagnosable
+without reading raw content.  A failed diagnostic directory has no
+`invocation.json`, aggregate receipt, or pair seal; it is never resumable and
+its work root must never be reused.
 
-## Deterministically seal pack attestations
+The work root also contains both full caches, `suite-evidence.json`, and
+`pair-seal.json`.  It is private retained release evidence.  Never add any of
+it to Git, a wheel, sdist, SBOM, benchmark bundle, or GitHub Release.
 
-Copy the semantic and adversarial result/trace/receipt triples into the release
-checkout at their fixed `docs/knowledge-review-v0.3.*` paths. Retain both raw
-streams and both complete caches externally. Then run the sealer from the
-release checkout:
+The command contract grants read access only to Codex's minimal runtime roots,
+the exact frozen Codex+bwrap runtime tree, and the current projected cache.  It
+disables networking, user configuration, repository rules, persistence, and
+unlisted tools.  The model submits only manifest-listed
+`head -n 100000000 PATH` reads; the pinned CLI must report each as the exact
+`/bin/bash -lc 'head -n 100000000 PATH'` event wrapper.  Replay unwraps only
+that literal form and then verifies output byte-for-byte.  Unknown events,
+wrapper or command drift, incomplete chunks, output truncation, writes,
+interpreters, search, chaining, source mutation, or cache mutation fail closed.
+
+## Audit first, then atomically attest
+
+Do not hand-edit `review_status`, `reviewers`, `source_hashes`, or
+`review_evidence`.  The finalizer first invokes the same pure full-evidence
+replay used by the release gate.  Only after all six raw streams, both full
+caches, six projected caches, six process records, aggregate results, traces,
+receipts, pair seal, and pack semantic surfaces validate does it atomically
+replace all three pack files:
 
 ```bash
-python3 tools/run_knowledge_review.py seal \
-  --semantic-raw /var/tmp/hlsgraph-review-semantic-evidence/semantic.codex.jsonl \
-  --adversarial-raw /var/tmp/hlsgraph-review-adversarial-evidence/adversarial.codex.jsonl \
-  --semantic-cache /var/tmp/hlsgraph-review-semantic-cache/cache \
-  --adversarial-cache /var/tmp/hlsgraph-review-adversarial-cache/cache
+python3 -m tools.apply_knowledge_review_suite_attestation \
+  --root "$CHECKOUT" \
+  --suite-evidence "$SUITE_WORK"
 ```
 
-The sealer replays both invocations, requires independent thread/invocation/raw
-identities and exact citation agreement, and updates only the excluded
-review-attestation fields. It aborts if any semantic pack surface or frozen
-implementation input changes. The frozen closure includes the restricted
-runner, citation generator, surface helper, and release auditor themselves, so
-changing the verifier after review invalidates the seal. The checkout, both raw
-evidence directories, both caches, and the active dedicated `CODEX_HOME` must
-be pairwise disjoint. Sealing and release audit require raw files to be
-caller-owned `0600` files with one link in caller-owned `0700` parents; they
-recheck the link-free parent chain and file/parent identity, including inode,
-size, mtime and ctime, across each descriptor read. The runtime host path is
-intentionally absent from the public receipt: only the pathless single-file
-manifest and the original sandbox boundary are revalidated later. Never populate `reviewers`,
-`source_hashes`, or `review_evidence` manually.
+Any pre-write failure leaves every pack byte unchanged.  A partial replacement
+is rolled back.  Successful output lists only the three attested pack filenames
+and their SHA-256 values; private paths or document text are not embedded.
 
 ## Formal release audit
 
-The default audit is the release gate. `--preflight-only` checks only archive
-and privacy hygiene and cannot approve a release.
+Run the complete release audit after attestation.  The normal release inputs
+are still required; the v6 review evidence is supplied as one external root:
 
 ```bash
 python3 tools/audit_release.py dist \
-  --semantic-review-raw /var/tmp/hlsgraph-review-semantic-evidence/semantic.codex.jsonl \
-  --adversarial-review-raw /var/tmp/hlsgraph-review-adversarial-evidence/adversarial.codex.jsonl \
-  --semantic-review-cache /var/tmp/hlsgraph-review-semantic-cache/cache \
-  --adversarial-review-cache /var/tmp/hlsgraph-review-adversarial-cache/cache \
+  --knowledge-review-suite-evidence "$SUITE_WORK" \
   --eval-identity /path/to/environment.lock.json \
   --static-report /path/to/static-report.json \
   --bootstrap-report /path/to/bootstrap.json \
@@ -239,8 +273,20 @@ python3 tools/audit_release.py dist \
   --release-notes /path/to/release-notes.md
 ```
 
-The audit loads the retained private caches, replays both raw lifecycle streams,
-recomputes every snapshot/prompt/result/trace/receipt/source hash, and validates
-the deterministic pack seal. If an exact official locator cannot expose the
-cited content, the release remains NO-GO; reachability metadata alone is not a
-semantic review.
+The auditor independently reconstructs the fixed tree and snapshots, validates
+the acquisition modes, reproduces the offline full-cache equality, derives
+both sanitized streams from raw bytes, validates exact process argv and
+stdio, replays every allowed command, rebuilds both aggregate products and the
+six-way pair seal, and compares the pack attestation byte-for-byte with the
+reconstructed material.  A missing private evidence file or stale hash is a
+release NO-GO.
+
+The older two-call v4 workflow remains accepted only for historical artifact
+verification.  It is not the v0.3 formal procedure because the monolithic
+input exceeds the fixed review context budget.  `--preflight-only` checks
+archive/privacy hygiene only and cannot approve a release.
+
+These receipts provide reproducible integrity evidence for the declared
+inputs and execution contract.  They are not a third-party cryptographic
+attestation and cannot defend against a maintainer who controls and replaces
+the candidate, verifier, and retained evidence together.

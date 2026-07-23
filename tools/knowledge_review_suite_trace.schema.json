@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "This schema validates one canonical JSONL row. Ordering and five-row completeness are additionally enforced by seal_knowledge_review_suite.parse_protocol_trace().",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "protocol": {
+      "enum": [
+        "hlsgraph.knowledge-review.semantic.v1",
+        "hlsgraph.knowledge-review.adversarial.v1"
+      ]
+    },
+    "tokenBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "prompt_tokens",
+        "chunk_tokens",
+        "command_tokens",
+        "tool_event_count",
+        "tool_event_overhead_tokens",
+        "runtime_envelope_allowance_tokens",
+        "visible_input_tokens",
+        "context_reserve_tokens",
+        "within_budget"
+      ],
+      "properties": {
+        "contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tokenizer_id",
+            "tokenizer_contract_sha256",
+            "context_window_tokens",
+            "max_visible_input_tokens",
+            "min_context_reserve_tokens",
+            "tool_event_overhead_tokens"
+            ,"runtime_envelope_allowance_tokens",
+            "auto_compact_token_limit_tokens",
+            "auto_compact_token_limit_scope"
+          ],
+          "properties": {
+            "tokenizer_id": {"const": "o200k_base"},
+            "tokenizer_contract_sha256": {
+              "const": "02b0af8658a8a3abddcf10a02178f7f5ebeaa12e9fb24c562a71c5dbf288b4c9"
+            },
+            "context_window_tokens": {"const": 372000},
+            "max_visible_input_tokens": {"const": 250000},
+            "min_context_reserve_tokens": {"const": 122000},
+            "tool_event_overhead_tokens": {"const": 192}
+            ,"runtime_envelope_allowance_tokens": {"const": 32000}
+            ,"auto_compact_token_limit_tokens": {"const": 300000}
+            ,"auto_compact_token_limit_scope": {"const": "total"}
+          }
+        },
+        "prompt_tokens": {"type": "integer", "minimum": 0},
+        "chunk_tokens": {"type": "integer", "minimum": 0},
+        "command_tokens": {"type": "integer", "minimum": 0},
+        "tool_event_count": {"type": "integer", "minimum": 0},
+        "tool_event_overhead_tokens": {"type": "integer", "minimum": 0},
+        "runtime_envelope_allowance_tokens": {"const": 32000},
+        "visible_input_tokens": {"type": "integer", "minimum": 0, "maximum": 250000},
+        "context_reserve_tokens": {"type": "integer", "minimum": 122000},
+        "within_budget": {"const": true}
+      }
+    },
+    "suiteStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "sequence",
+        "kind",
+        "protocol_id",
+        "review_snapshot_sha256",
+        "citation_evidence_sha256",
+        "full_evidence_surface_sha256",
+        "shard_plan_sha256",
+        "runtime_manifest_sha256",
+        "model",
+        "reasoning_effort",
+        "codex_cli_version",
+        "official_codex_elf_sha256",
+        "shard_count"
+      ],
+      "properties": {
+        "schema_version": {"const": "hlsgraph.knowledge-review.suite-tool-trace.v2"},
+        "sequence": {"const": 1},
+        "kind": {"const": "suite_start"},
+        "protocol_id": {"$ref": "#/$defs/protocol"},
+        "review_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "citation_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "full_evidence_surface_sha256": {"$ref": "#/$defs/sha256"},
+        "shard_plan_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "model": {"const": "gpt-5.6-sol"},
+        "reasoning_effort": {"const": "medium"},
+        "codex_cli_version": {"const": "codex-cli 0.144.0"},
+        "official_codex_elf_sha256": {
+          "const": "901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429"
+        },
+        "shard_count": {"const": 3}
+      }
+    },
+    "shardInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "sequence",
+        "kind",
+        "protocol_id",
+        "shard_id",
+        "invocation_id",
+        "thread_id",
+        "raw_output_sha256",
+        "sanitized_output_sha256",
+        "reported_input_tokens",
+        "reported_cached_input_tokens",
+        "reported_output_tokens",
+        "reported_reasoning_output_tokens",
+        "derived_input_plus_output_tokens",
+        "normalized_shard_trace_sha256",
+        "shard_manifest_sha256",
+        "shard_result_sha256",
+        "cache_manifest_sha256",
+        "prompt_sha256",
+        "command_sha256",
+        "boundary_contract_sha256",
+        "runtime_manifest_sha256",
+        "replay_contract_sha256",
+        "assigned_chunk_inventory_sha256",
+        "shard_evidence_surface_sha256",
+        "assertion_ids",
+        "reference_ids",
+        "token_budget",
+        "completed",
+        "exit_code",
+        "compaction_event_count",
+        "unknown_event_count",
+        "assigned_chunks_complete"
+      ],
+      "properties": {
+        "schema_version": {"const": "hlsgraph.knowledge-review.suite-tool-trace.v2"},
+        "sequence": {"enum": [2, 3, 4]},
+        "kind": {"const": "shard_invocation"},
+        "protocol_id": {"$ref": "#/$defs/protocol"},
+        "shard_id": {
+          "enum": ["knowledge_activation", "ir_semantics", "tool_evidence"]
+        },
+        "invocation_id": {"$ref": "#/$defs/identifier"},
+        "thread_id": {"$ref": "#/$defs/identifier"},
+        "raw_output_sha256": {"$ref": "#/$defs/sha256"},
+        "sanitized_output_sha256": {"$ref": "#/$defs/sha256"},
+        "reported_input_tokens": {"type": "integer", "minimum": 0},
+        "reported_cached_input_tokens": {"type": "integer", "minimum": 0},
+        "reported_output_tokens": {"type": "integer", "minimum": 0},
+        "reported_reasoning_output_tokens": {"type": "integer", "minimum": 0},
+        "derived_input_plus_output_tokens": {"type": "integer", "minimum": 0},
+        "normalized_shard_trace_sha256": {"$ref": "#/$defs/sha256"},
+        "shard_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "shard_result_sha256": {"$ref": "#/$defs/sha256"},
+        "cache_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "command_sha256": {"$ref": "#/$defs/sha256"},
+        "boundary_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "replay_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "assigned_chunk_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "shard_evidence_surface_sha256": {"$ref": "#/$defs/sha256"},
+        "assertion_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "reference_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "token_budget": {"$ref": "#/$defs/tokenBudget"},
+        "completed": {"const": true},
+        "exit_code": {"const": 0},
+        "compaction_event_count": {"const": 0},
+        "unknown_event_count": {"const": 0},
+        "assigned_chunks_complete": {"const": true}
+      }
+    },
+    "aggregateEmit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "sequence",
+        "kind",
+        "protocol_id",
+        "result_sha256",
+        "assertion_ids",
+        "assertion_union_sha256",
+        "rule_reference_ids",
+        "rule_reference_union_sha256",
+        "result_reference_ids",
+        "result_reference_union_sha256",
+        "approved"
+      ],
+      "properties": {
+        "schema_version": {"const": "hlsgraph.knowledge-review.suite-tool-trace.v2"},
+        "sequence": {"const": 5},
+        "kind": {"const": "aggregate_emit"},
+        "protocol_id": {"$ref": "#/$defs/protocol"},
+        "result_sha256": {"$ref": "#/$defs/sha256"},
+        "assertion_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "assertion_union_sha256": {"$ref": "#/$defs/sha256"},
+        "rule_reference_ids": {
+          "type": "array",
+          "minItems": 38,
+          "maxItems": 38,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "rule_reference_union_sha256": {"$ref": "#/$defs/sha256"},
+        "result_reference_ids": {
+          "type": "array",
+          "minItems": 53,
+          "maxItems": 53,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "result_reference_union_sha256": {"$ref": "#/$defs/sha256"},
+        "approved": {"const": true}
+      }
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/suiteStart"},
+    {"$ref": "#/$defs/shardInvocation"},
+    {"$ref": "#/$defs/aggregateEmit"}
+  ]
+}

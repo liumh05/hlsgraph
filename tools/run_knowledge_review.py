@@ -1,6 +1,12 @@
-"""Run and replay one fail-closed public knowledge-pack review.
+"""Run and replay the legacy v4 monolithic knowledge-review contract.
 
-Formal reviews are Linux/WSL2-only.  The model runs in a default-deny named
+This module remains integrity-bound because v5 reuses its cache, snapshot, and
+replay primitives and because historical v4 artifacts must remain verifiable.
+Its ``review`` and ``seal`` CLI operations cannot approve a v0.3 release; the
+formal v0.3 workflow is ``execute_knowledge_review_suite.py`` followed by
+``apply_knowledge_review_suite_attestation.py`` and the v5 release audit.
+
+V4 review execution is Linux/WSL2-only.  The model runs in a default-deny named
 permission profile which exposes only Codex's minimal system runtime, one
 frozen evidence cache and one frozen Codex runtime directory.  The public
 checkout, ``CODEX_HOME`` and every unrelated host path remain outside that
@@ -16,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from http.client import HTTPException
 import json
 import os
 import re
@@ -53,12 +60,14 @@ CODEX_CLI_VERSION = "codex-cli 0.144.0"
 TRACE_SCHEMA_VERSION = "hlsgraph.knowledge-review.tool-trace.v3"
 RECEIPT_SCHEMA_VERSION = "hlsgraph.knowledge-review.cli-receipt.v4"
 BOUNDARY_CONTRACT_SCHEMA_VERSION = (
-    "hlsgraph.knowledge-review.boundary-contract.v2"
+    "hlsgraph.knowledge-review.boundary-contract.v3"
 )
 RUNTIME_MANIFEST_SCHEMA_VERSION = (
-    "hlsgraph.knowledge-review.runtime-manifest.v2"
+    "hlsgraph.knowledge-review.runtime-manifest.v3"
 )
-RUNTIME_OWNERSHIP_POLICY = "caller_owned_frozen_0500_no_links_v1"
+RUNTIME_OWNERSHIP_POLICY = (
+    "caller_owned_frozen_0500_no_links_exact_codex_bwrap_v2"
+)
 BOUNDARY_POLICY = "default_deny_minimal_allowlist_v1"
 CACHE_PARENT_POLICY = "caller_owned_0700_single_cache_v1"
 EVIDENCE_PARENT_POLICY = "caller_owned_0700_dedicated_evidence_v1"
@@ -68,16 +77,36 @@ CITATION_AUDIT_PATH = "docs/knowledge-citation-audit-v0.3.json"
 CITATION_EVIDENCE_PATH = "docs/knowledge-review-evidence-v0.3.json"
 CITATION_EVIDENCE_SCHEMA_PATH = "tools/knowledge_review_evidence.schema.json"
 CITATION_EVIDENCE_SCHEMA_VERSION = (
-    "hlsgraph.knowledge-review.evidence-map.v1"
+    "hlsgraph.knowledge-review.evidence-map.v2"
 )
 RUNNER_PATH = "tools/run_knowledge_review.py"
 CITATION_GENERATOR_PATH = "tools/audit_knowledge_citations.py"
 SURFACE_HELPER_PATH = "tools/knowledge_review_surface.py"
 RELEASE_AUDITOR_PATH = "tools/audit_release.py"
-CACHE_SCHEMA_VERSION = "hlsgraph.knowledge-review.cache.v2"
+# Integrity-only inputs for the formal six-invocation v5 suite.  They are
+# frozen into each ReviewSnapshot, but remain outside
+# MODEL_INSPECTION_EXACT_PATHS: the reviewer is expected to inspect the HLS
+# implementation and assigned evidence, not its own orchestration code.
+SUITE_REVIEW_SOURCE_PATHS = frozenset({
+    "pyproject.toml",
+    "tools/apply_knowledge_review_suite_attestation.py",
+    "tools/execute_knowledge_review_suite.py",
+    "tools/knowledge_review_shards.py",
+    "tools/run_knowledge_review_suite.py",
+    "tools/knowledge_review_suite_cache.py",
+    "tools/knowledge_review_suite_replay.py",
+    "tools/seal_knowledge_review_suite.py",
+    "tools/knowledge_review_shard.schema.json",
+    "tools/knowledge_review_suite_evidence.schema.json",
+    "tools/knowledge_review_suite_receipt.schema.json",
+    "tools/knowledge_review_suite_trace.schema.json",
+    "tools/knowledge_review_prompts/semantic_shard.md",
+    "tools/knowledge_review_prompts/adversarial_shard.md",
+})
+CACHE_SCHEMA_VERSION = "hlsgraph.knowledge-review.cache.v3"
 CACHE_MANIFEST_NAME = "manifest.json"
 CHUNK_CONTRACT_SCHEMA_VERSION = "hlsgraph.knowledge-review.chunks.v1"
-MAX_REVIEW_CHUNK_BYTES = 6000
+MAX_REVIEW_CHUNK_BYTES = 24_000
 TOOL_OUTPUT_TOKEN_LIMIT = 50_000
 MAX_INITIAL_PROMPT_BYTES = 512 * 1024
 CACHE_DIRECTORY_MODE = 0o500
@@ -86,11 +115,21 @@ PDFTOTEXT_ALLOWED_PATH = "/usr/bin/pdftotext"
 OFFICIAL_CODEX_ELF_SHA256 = (
     "901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429"
 )
+OFFICIAL_CODEX_BWRAP_SHA256 = (
+    "77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c"
+)
+CODEX_EXECUTABLE_RELATIVE_PATH = "codex"
+CODEX_BWRAP_RELATIVE_PATH = "codex-resources/bwrap"
+RUNTIME_INITIAL_PATH_TOKENS = (
+    "$CODEX_RUNTIME/codex-resources", "/usr/bin", "/bin",
+)
 OFFICIAL_CODEX_RELEASE_ASSET_SHA256 = (
     "725883fc20ab4af3072829aaa0edf6d12c216238f9f7315a6656b950fb05c8bb"
 )
 MAX_CITATION_BYTES = 32 * 1024 * 1024
 MAX_REDIRECTS = 5
+MAX_FETCH_ATTEMPTS = 3
+MAX_EVIDENCE_LINE_RANGE = 1024
 MAX_PDF_TEXT_BYTES = 32 * 1024 * 1024
 MAX_PARSER_STDERR_BYTES = 64 * 1024
 MAX_PARSER_VERSION_BYTES = 16 * 1024
@@ -121,7 +160,8 @@ DISABLED_CODEX_FEATURES = (
     "in_app_browser", "standalone_web_search", "computer_use",
     "image_generation", "apps", "enable_mcp_apps", "multi_agent",
     "multi_agent_v2", "plugins", "plugin_sharing", "remote_plugin",
-    "hooks", "workspace_dependencies",
+    "hooks", "workspace_dependencies", "code_mode", "code_mode_host",
+    "code_mode_only",
 )
 PERMISSION_PROFILE = "hlsgraph_knowledge_review"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
@@ -180,6 +220,7 @@ MODEL_INSPECTION_EXACT_PATHS = frozenset({
 def _model_inspection_required(path: str) -> bool:
     return (
         path in MODEL_INSPECTION_EXACT_PATHS
+        or path.startswith("review-projections/v1/")
         or path.startswith(PACK_SURFACE_HASH_PREFIX)
         and path.endswith(".json")
     )
@@ -265,6 +306,7 @@ class TrustedFetch:
     content_type: str
     body: bytes = field(repr=False)
     charset: str | None = None
+    content_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -291,7 +333,10 @@ def _chunk_contract() -> dict[str, Any]:
     return payload
 
 
-def _inspection_contract(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _inspection_contract(
+    files: Sequence[dict[str, Any]],
+    citations: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
     required = sorted(
         str(item["path"]) for item in files
         if item.get("model_inspection_required") is True
@@ -300,14 +345,24 @@ def _inspection_contract(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
         str(item["path"]) for item in files
         if item.get("model_inspection_required") is False
     )
+    citation_required = sorted(
+        str(item["requested_url"]) for item in citations
+        if item.get("inspection_required") is True
+    )
+    citation_identity_only = sorted(
+        str(item["requested_url"]) for item in citations
+        if item.get("inspection_required") is False
+    )
     payload: dict[str, Any] = {
-        "schema_version": "hlsgraph.knowledge-review.inspection-scope.v1",
+        "schema_version": "hlsgraph.knowledge-review.inspection-scope.v2",
         "model_inspection_required": required,
         "integrity_bound_only": integrity_only,
-        "policy": "explicit_minimal_activation_tcb_plus_packs_and_citations_v1",
+        "citation_section_inspection_required": citation_required,
+        "citation_identity_bound_only": citation_identity_only,
+        "policy": "explicit_activation_tcb_plus_rule_sections_v2",
         "integrity_statement": (
-            "integrity-bound files invalidate the snapshot but are not claimed "
-            "as model-inspected"
+            "integrity-bound files and document-only locators invalidate the "
+            "snapshot but are not claimed as model content inspection"
         ),
     }
     payload["sha256"] = hashlib.sha256(_canonical_json(payload)).hexdigest()
@@ -400,6 +455,7 @@ def required_read_paths(root: Path, protocol_id: str) -> set[str]:
         RUNNER_PATH, CITATION_GENERATOR_PATH, SURFACE_HELPER_PATH,
         RELEASE_AUDITOR_PATH,
         *(item["prompt"] for item in PROTOCOL_FILES.values()),
+        *SUITE_REVIEW_SOURCE_PATHS,
     }
     implementation = root / "src" / "hlsgraph"
     paths.update(
@@ -450,6 +506,37 @@ _AMD_EVIDENCE_PATH_RE = re.compile(
 _AMD_MAP_EVIDENCE_PATH_RE = re.compile(
     r"^/api/khub/maps/(?P<document_id>[A-Za-z0-9_~-]+)$"
 )
+_GITHUB_BLOB_PATH_RE = re.compile(
+    r"^/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)/blob/"
+    r"(?P<commit>[0-9a-f]{40})/(?P<path>[^?#]+)$"
+)
+_GITHUB_RAW_PATH_RE = re.compile(
+    r"^/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)/"
+    r"(?P<commit>[0-9a-f]{40})/(?P<path>[^?#]+)$"
+)
+_GITHUB_DOCUMENT_SOURCES = {
+    "https://github.com/EPFL-LAP/dynamatic/blob/"
+    "4dd0bbc86aa55d01854b93fbbc8b818cc318ea80/"
+    "docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md": (
+        "EPFL-LAP/dynamatic",
+        "docs/DeveloperGuide/CompilerIntrinsics/MLIRPrimer.md",
+    ),
+    "https://llvm.org/docs/LangRef.html": (
+        "llvm/llvm-project", "llvm/docs/LangRef.md",
+    ),
+    "https://llvm.org/docs/SourceLevelDebugging.html": (
+        "llvm/llvm-project", "llvm/docs/SourceLevelDebugging.md",
+    ),
+    "https://mlir.llvm.org/docs/LangRef/": (
+        "llvm/llvm-project", "mlir/docs/LangRef.md",
+    ),
+}
+_GITHUB_SECTION_ANCHOR_ALIASES = {
+    "Memory Access and Addressing Instructions": (
+        "memory-access-and-addressing-operations"
+    ),
+    "Blocks and Regions": "blocks",
+}
 _AMD_ID_RE = re.compile(r"[A-Za-z0-9_~-]+")
 _IDENTITY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -465,9 +552,33 @@ def _valid_identity_string(
     )
 
 
+def _reference_binding(row: dict[str, Any]) -> dict[str, Any]:
+    section = row.get("section")
+    if section is not None and not isinstance(section, str):
+        raise ValueError("citation reference section is not text or null")
+    return {
+        "reference_id": row.get("reference_id"),
+        "reference_kind": row.get("reference_kind"),
+        "reference_surface_sha256": row.get("reference_surface_sha256"),
+        "document_id": row.get("document_id"),
+        "document_version": row.get("document_version"),
+        "rule_id": row.get("rule_id"),
+        "rule_surface_sha256": row.get("rule_surface_sha256"),
+        "section": section,
+        "section_sha256": hashlib.sha256(_canonical_json(section)).hexdigest(),
+    }
+
+
+def _github_section_slug(section: str) -> str:
+    lowered = section.strip().casefold()
+    lowered = re.sub(r"[^a-z0-9\s-]", "", lowered)
+    return re.sub(r"[-\s]+", "-", lowered).strip("-")
+
+
 def _validate_citation_evidence_mapping(
     value: Any, *, citation_audit_sha256: str,
-    exact_urls: Iterable[str],
+    exact_urls: Iterable[str], expected_references: Iterable[dict[str, Any]],
+    expected_fetches: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
     """Validate the closed human-citation to fetched-evidence mapping."""
 
@@ -482,10 +593,30 @@ def _validate_citation_evidence_mapping(
     if not isinstance(entries, list):
         raise ValueError("citation evidence mapping has no entry inventory")
     expected_urls = set(exact_urls)
+    expected_bindings_by_url: dict[str, list[dict[str, Any]]] = {}
+    expected_reference_rows_by_url: dict[str, list[dict[str, Any]]] = {}
+    for reference in expected_references:
+        if not isinstance(reference, dict):
+            raise ValueError("citation evidence mapping reference inventory is malformed")
+        reference_url = str(reference.get("citation_url", ""))
+        expected_reference_rows_by_url.setdefault(reference_url, []).append(reference)
+        expected_bindings_by_url.setdefault(reference_url, []).append(
+            _reference_binding(reference),
+        )
+    for rows in expected_bindings_by_url.values():
+        rows.sort(key=lambda row: str(row["reference_id"]))
+    fetches_by_url: dict[str, dict[str, Any]] = {}
+    for fetched in expected_fetches:
+        if (not isinstance(fetched, dict)
+                or not isinstance(fetched.get("fetch_url"), str)
+                or fetched["fetch_url"] in fetches_by_url):
+            raise ValueError("citation audit fetch inventory is malformed")
+        fetches_by_url[str(fetched["fetch_url"])] = fetched
     observed: dict[str, dict[str, Any]] = {}
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != {
             "citation_url", "evidence_url", "resolver_id", "identity",
+            "reference_bindings",
         }:
             raise ValueError("citation evidence mapping has a malformed entry")
         citation_url = entry.get("citation_url")
@@ -496,13 +627,17 @@ def _validate_citation_evidence_mapping(
                 or not isinstance(resolver_id, str)
                 or citation_url in observed):
             raise ValueError("citation evidence mapping has duplicate or invalid locators")
+        if entry.get("reference_bindings") != expected_bindings_by_url.get(
+            citation_url, [],
+        ):
+            raise ValueError("citation evidence mapping reference bindings are stale")
+        reference_rows = expected_reference_rows_by_url.get(citation_url, [])
         citation_parts = urlsplit(citation_url)
         evidence_parts = urlsplit(evidence_url)
         citation_host = (citation_parts.hostname or "").casefold()
         evidence_host = (evidence_parts.hostname or "").casefold()
         if (citation_parts.scheme.casefold() != "https" or not citation_host
-                or evidence_parts.scheme.casefold() != "https"
-                or evidence_host != citation_host
+                or evidence_parts.scheme.casefold() != "https" or not evidence_host
                 or citation_parts.port is not None
                 or evidence_parts.port is not None
                 or citation_parts.username is not None
@@ -511,6 +646,8 @@ def _validate_citation_evidence_mapping(
                 or evidence_parts.password is not None):
             raise ValueError("citation evidence mapping leaves same-host HTTPS")
         if citation_host == "docs.amd.com":
+            if evidence_host != citation_host:
+                raise ValueError("AMD citation evidence leaves same-host HTTPS")
             identity = entry.get("identity")
             citation_match = _AMD_CITATION_PATH_RE.fullmatch(citation_parts.path)
             if citation_match is None:
@@ -590,12 +727,173 @@ def _validate_citation_evidence_mapping(
                         or identity["content_id"]
                         != evidence_match.group("content_id")):
                     raise ValueError("AMD topic evidence identity does not close")
+                rule_sections = {
+                    row.get("section") for row in reference_rows
+                    if row.get("reference_kind") == "rule"
+                }
+                if rule_sections and rule_sections != {identity["topic_title"]}:
+                    raise ValueError(
+                        "AMD topic evidence does not bind the declared rule section",
+                    )
             if citation_parts.query or citation_parts.fragment:
                 raise ValueError("AMD human citation must be an exact clean locator")
+        elif resolver_id == "github.raw.document.v1":
+            identity = entry.get("identity")
+            evidence_match = _GITHUB_RAW_PATH_RE.fullmatch(evidence_parts.path)
+            canonical_source = _GITHUB_DOCUMENT_SOURCES.get(citation_url)
+            document_rows = [
+                row for row in reference_rows
+                if row.get("reference_kind") == "document"
+            ]
+            if (evidence_host != "raw.githubusercontent.com"
+                    or evidence_match is None
+                    or citation_parts.query or citation_parts.fragment
+                    or evidence_parts.query or evidence_parts.fragment
+                    or not isinstance(identity, dict)
+                    or set(identity) != {
+                        "repository", "commit", "path", "source_sha256",
+                        "source_size", "document_id", "document_version",
+                    }
+                    or canonical_source != (
+                        identity.get("repository"), identity.get("path"),
+                    )
+                    or len(document_rows) != 1
+                    or identity.get("document_id")
+                    != document_rows[0].get("document_id")
+                    or identity.get("document_version")
+                    != document_rows[0].get("document_version")
+                    or identity.get("document_version")
+                    != f"git-{identity.get('commit')}"
+                    or evidence_match.group("owner") + "/"
+                    + evidence_match.group("repository")
+                    != identity.get("repository")
+                    or evidence_match.group("commit") != identity.get("commit")
+                    or evidence_match.group("path") != identity.get("path")
+                    or _SHA256_RE.fullmatch(
+                        str(identity.get("source_sha256", "")),
+                    ) is None
+                    or type(identity.get("source_size")) is not int
+                    or identity["source_size"] <= 0
+                    or not _valid_identity_string(identity.get("repository"))
+                    or not _valid_identity_string(identity.get("commit"))
+                    or not _valid_identity_string(identity.get("path"))):
+                raise ValueError("GitHub raw document identity does not close")
+            path = PurePosixPath(str(identity["path"]))
+            if (path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in path.parts)
+                    or evidence_url != (
+                        "https://raw.githubusercontent.com/"
+                        f"{identity['repository']}/{identity['commit']}/"
+                        f"{identity['path']}"
+                    )):
+                raise ValueError("GitHub raw document path is non-canonical")
+        elif resolver_id == "github.raw.lines.v1":
+            identity = entry.get("identity")
+            citation_match = _GITHUB_BLOB_PATH_RE.fullmatch(citation_parts.path)
+            evidence_match = _GITHUB_RAW_PATH_RE.fullmatch(evidence_parts.path)
+            if (citation_host != "github.com"
+                    or evidence_host != "raw.githubusercontent.com"
+                    or citation_match is None or evidence_match is None
+                    or citation_parts.query or evidence_parts.query
+                    or evidence_parts.fragment
+                    or not isinstance(identity, dict)
+                    or set(identity) != {
+                        "repository", "commit", "path", "source_sha256",
+                        "start_line", "end_line", "slice_sha256",
+                    }
+                    or identity.get("repository") != (
+                        citation_match.group("owner") + "/"
+                        + citation_match.group("repository")
+                    )
+                    or identity.get("commit") != citation_match.group("commit")
+                    or identity.get("path") != citation_match.group("path")
+                    or evidence_match.group("owner")
+                    != citation_match.group("owner")
+                    or evidence_match.group("repository")
+                    != citation_match.group("repository")
+                    or evidence_match.group("commit")
+                    != citation_match.group("commit")
+                    or evidence_match.group("path")
+                    != citation_match.group("path")
+                    or not _valid_identity_string(identity.get("repository"))
+                    or not _valid_identity_string(identity.get("commit"))
+                    or not _valid_identity_string(identity.get("path"))
+                    or _SHA256_RE.fullmatch(
+                        str(identity.get("source_sha256", "")),
+                    ) is None
+                    or _SHA256_RE.fullmatch(
+                        str(identity.get("slice_sha256", "")),
+                    ) is None
+                    or type(identity.get("start_line")) is not int
+                    or type(identity.get("end_line")) is not int
+                    or not 1 <= identity["start_line"] <= identity["end_line"]
+                    or identity["end_line"] - identity["start_line"] + 1
+                    > MAX_EVIDENCE_LINE_RANGE):
+                raise ValueError("GitHub raw line evidence identity does not close")
+            path = PurePosixPath(str(identity["path"]))
+            if (path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts)
+                    or evidence_url != (
+                        "https://raw.githubusercontent.com/"
+                        f"{identity['repository']}/{identity['commit']}/"
+                        f"{identity['path']}"
+                    )):
+                raise ValueError("GitHub raw line evidence path is non-canonical")
+            rule_sections = [
+                str(row["section"]) for row in reference_rows
+                if row.get("reference_kind") == "rule"
+                and isinstance(row.get("section"), str)
+            ]
+            if not rule_sections:
+                raise ValueError("GitHub raw line evidence has no bound rule reference")
+            if (citation_parts.fragment
+                    and citation_parts.fragment not in {
+                        _github_section_slug(section) for section in rule_sections
+                    } | {
+                        _GITHUB_SECTION_ANCHOR_ALIASES[section]
+                        for section in rule_sections
+                        if section in _GITHUB_SECTION_ANCHOR_ALIASES
+                    }):
+                raise ValueError(
+                    "GitHub raw line evidence fragment does not bind a rule section",
+                )
+        elif resolver_id == "direct.sha256.v1":
+            identity = entry.get("identity")
+            audited_fetch = fetches_by_url.get(citation_url)
+            document_rows = [
+                row for row in reference_rows
+                if row.get("reference_kind") == "document"
+            ]
+            if (citation_host != evidence_host
+                    or evidence_url != citation_url
+                    or citation_parts.query or citation_parts.fragment
+                    or not isinstance(identity, dict)
+                    or set(identity) != {
+                        "document_id", "document_version", "body_sha256",
+                        "body_size", "content_type",
+                    }
+                    or len(document_rows) != 1
+                    or identity.get("document_id")
+                    != document_rows[0].get("document_id")
+                    or identity.get("document_version")
+                    != document_rows[0].get("document_version")
+                    or _SHA256_RE.fullmatch(
+                        str(identity.get("body_sha256", "")),
+                    ) is None
+                    or type(identity.get("body_size")) is not int
+                    or identity["body_size"] <= 0
+                    or identity.get("content_type") not in {
+                        "application/pdf", "text/html",
+                    }
+                    or not isinstance(audited_fetch, dict)
+                    or audited_fetch.get("status") != 200
+                    or audited_fetch.get("final_url") != citation_url
+                    or audited_fetch.get("sha256") != identity.get("body_sha256")
+                    or audited_fetch.get("byte_count") != identity.get("body_size")
+                    or audited_fetch.get("content_type")
+                    != identity.get("content_type")):
+                raise ValueError("direct SHA-256 document identity does not close")
         else:
-            if (resolver_id != "direct.v1" or entry.get("identity") is not None
-                    or evidence_url != citation_url):
-                raise ValueError("non-AMD citation must use the exact direct resolver")
+            raise ValueError("citation must use an approved exact resolver")
         observed[citation_url] = entry
     if set(observed) != expected_urls or len(entries) != len(expected_urls):
         raise ValueError("citation evidence mapping inventory is incomplete or has extras")
@@ -607,9 +905,15 @@ def _validate_citation_evidence_mapping(
 def _citation_evidence_rows(snapshot: ReviewSnapshot) -> tuple[dict[str, Any], ...]:
     mapping_item = snapshot.file_map[CITATION_EVIDENCE_PATH]
     value = _strict_json_bytes(mapping_item.payload, label="citation evidence mapping")
+    citation_item = snapshot.file_map[CITATION_AUDIT_PATH]
+    citation = _strict_json_bytes(citation_item.payload, label="citation audit")
+    if not isinstance(citation, dict):
+        raise ValueError("citation audit root is not an object")
     return _validate_citation_evidence_mapping(
         value, citation_audit_sha256=snapshot.citation_audit_sha256,
         exact_urls=snapshot.exact_citation_urls,
+        expected_references=_citation_reference_rows(snapshot),
+        expected_fetches=citation.get("fetches", []),
     )
 
 
@@ -675,6 +979,33 @@ def freeze_review_snapshot(root: Path, protocol_id: str) -> ReviewSnapshot:
             cache_sha256=hashlib.sha256(cache_payload).hexdigest(),
             payload=cache_payload,
         ))
+    try:
+        from tools import knowledge_review_shards
+        source_payloads = {
+            item.path: item.payload for item in snapshots
+            if item.path in {
+                knowledge_review_shards.CITATION_AUDIT_SOURCE_PATH,
+                knowledge_review_shards.CITATION_EVIDENCE_SOURCE_PATH,
+                knowledge_review_shards.AMD_PACK_SOURCE_PATH,
+                knowledge_review_shards.AXI_PACK_SOURCE_PATH,
+                knowledge_review_shards.OPEN_IR_PACK_SOURCE_PATH,
+            }
+        }
+        virtual_sources = knowledge_review_shards.build_model_source_projections(
+            source_payloads,
+        )
+    except (ImportError, TypeError, ValueError) as exc:
+        raise ValueError(f"cannot derive shard-local model sources: {exc}") from exc
+    existing_paths = {item.path for item in snapshots}
+    if existing_paths & set(virtual_sources):
+        raise ValueError("shard-local model source collides with a checkout path")
+    for relative, payload in virtual_sources.items():
+        digest = hashlib.sha256(payload).hexdigest()
+        snapshots.append(ReviewFileSnapshot(
+            path=relative, hash_kind="raw_sha256", sha256=digest,
+            cache_sha256=digest, payload=payload,
+        ))
+    snapshots.sort(key=lambda item: item.path)
     by_path = {item.path: item for item in snapshots}
     citation = by_path.get(CITATION_AUDIT_PATH)
     citation_evidence = by_path.get(CITATION_EVIDENCE_PATH)
@@ -743,38 +1074,81 @@ class _SameHostRedirectHandler(HTTPRedirectHandler):
 def _default_fetch(
     url: str, timeout_seconds: float, max_bytes: int,
 ) -> TrustedFetch:
-    handler = _SameHostRedirectHandler(url, MAX_REDIRECTS)
-    opener = build_opener(handler)
-    request = Request(url, headers={"User-Agent": "hlsgraph-knowledge-review/1"})
-    try:
-        with opener.open(request, timeout=timeout_seconds) as response:
-            status_code = int(getattr(response, "status", response.getcode()))
-            final_url = str(response.geturl())
-            body = response.read(max_bytes + 1)
-            content_type = str(response.headers.get_content_type())
-            charset = response.headers.get_content_charset()
-    except (HTTPError, URLError, OSError) as exc:
-        raise ValueError(f"exact citation fetch failed: {type(exc).__name__}") from exc
-    if len(body) > max_bytes:
-        raise ValueError("exact citation response exceeds the fixed byte limit")
-    final_parts = urlsplit(final_url)
-    expected_host = (urlsplit(url).hostname or "").casefold()
-    if (not 200 <= status_code < 300 or final_parts.scheme.casefold() != "https"
-            or (final_parts.hostname or "").casefold() != expected_host):
-        raise ValueError("exact citation fetch did not finish at same-host HTTPS")
-    chain = list(handler.chain)
-    if not chain or chain[-1] != final_url:
-        chain.append(final_url)
-    for item in chain:
-        parts = urlsplit(item)
-        if (parts.scheme.casefold() != "https"
-                or (parts.hostname or "").casefold() != expected_host):
-            raise ValueError("citation redirect chain is not same-host HTTPS")
-    return TrustedFetch(
-        status=status_code, final_url=final_url,
-        redirect_chain=tuple(chain), content_type=content_type,
-        charset=charset, body=body,
-    )
+    last_error: BaseException | None = None
+    for _attempt in range(MAX_FETCH_ATTEMPTS):
+        handler = _SameHostRedirectHandler(url, MAX_REDIRECTS)
+        opener = build_opener(handler)
+        request = Request(
+            url, headers={"User-Agent": "hlsgraph-knowledge-review/1"},
+        )
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                status_code = int(
+                    getattr(response, "status", response.getcode()),
+                )
+                final_url = str(response.geturl())
+                body = response.read(max_bytes + 1)
+                content_type = str(response.headers.get_content_type())
+                charset = response.headers.get_content_charset()
+                get_header = getattr(response.headers, "get", None)
+                declared_length_text = (
+                    get_header("Content-Length") if callable(get_header) else None
+                )
+        except (HTTPError, URLError, HTTPException, OSError) as exc:
+            # Transient TLS/socket/chunk failures are common on large public
+            # manuals.  Retry only the exact same locator with a fresh opener;
+            # redirect, host, byte-limit and content checks remain unchanged.
+            last_error = exc
+            continue
+        declared_length: int | None = None
+        if declared_length_text is not None:
+            try:
+                declared_length = int(str(declared_length_text), 10)
+            except ValueError:
+                raise ValueError("exact citation has an invalid Content-Length")
+            if declared_length < 0:
+                raise ValueError("exact citation has an invalid Content-Length")
+            if declared_length > max_bytes:
+                raise ValueError("exact citation response exceeds the fixed byte limit")
+            if len(body) != declared_length:
+                last_error = HTTPException("incomplete exact citation response")
+                continue
+        if len(body) > max_bytes:
+            raise ValueError("exact citation response exceeds the fixed byte limit")
+        if not body:
+            last_error = HTTPException("empty exact citation response")
+            continue
+        if (body.startswith(b"%PDF-")
+                or content_type.casefold() == "application/pdf") and (
+            not body.startswith(b"%PDF-")
+            or body.rfind(b"%%EOF") < max(0, len(body) - 4096)
+        ):
+            last_error = HTTPException("incomplete exact PDF response")
+            continue
+        final_parts = urlsplit(final_url)
+        expected_host = (urlsplit(url).hostname or "").casefold()
+        if (status_code != 200
+                or final_parts.scheme.casefold() != "https"
+                or (final_parts.hostname or "").casefold() != expected_host):
+            raise ValueError("exact citation fetch did not finish at same-host HTTPS")
+        chain = list(handler.chain)
+        if not chain or chain[-1] != final_url:
+            chain.append(final_url)
+        for item in chain:
+            parts = urlsplit(item)
+            if (parts.scheme.casefold() != "https"
+                    or (parts.hostname or "").casefold() != expected_host):
+                raise ValueError("citation redirect chain is not same-host HTTPS")
+        return TrustedFetch(
+            status=status_code, final_url=final_url,
+            redirect_chain=tuple(chain), content_type=content_type,
+            charset=charset, body=body, content_length=declared_length,
+        )
+    assert last_error is not None
+    raise ValueError(
+        f"exact citation fetch failed after {MAX_FETCH_ATTEMPTS} attempts: "
+        f"{type(last_error).__name__}"
+    ) from last_error
 
 
 def _mkdir_private(path: Path) -> None:
@@ -1085,6 +1459,78 @@ def _text_derivation(fetch: TrustedFetch) -> TextDerivation | None:
     )
 
 
+def _github_line_range_derivation(
+    mapping: dict[str, Any], fetch: TrustedFetch,
+) -> TextDerivation:
+    """Select one audited line range from an exact commit-pinned raw file."""
+
+    identity = mapping.get("identity")
+    if not isinstance(identity, dict):
+        raise ValueError("GitHub raw evidence lacks its closed identity")
+    source_sha256 = hashlib.sha256(fetch.body).hexdigest()
+    if source_sha256 != identity.get("source_sha256"):
+        raise ValueError("GitHub raw evidence source SHA-256 differs from the mapping")
+    try:
+        fetch.body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("GitHub raw evidence is not strict UTF-8") from exc
+    lines = fetch.body.splitlines(keepends=True)
+    start = int(identity["start_line"])
+    end = int(identity["end_line"])
+    if end > len(lines):
+        raise ValueError("GitHub raw evidence line range exceeds the pinned source")
+    selected = b"".join(lines[start - 1:end])
+    if (not selected.strip()
+            or hashlib.sha256(selected).hexdigest()
+            != identity.get("slice_sha256")):
+        raise ValueError("GitHub raw evidence selected range differs from the mapping")
+    contract = {
+        "parser_id": "hlsgraph.review.github-raw-lines.v1",
+        "parser_version": "exact-commit-line-range-v1",
+        "repository": identity["repository"],
+        "commit": identity["commit"],
+        "path": identity["path"],
+        "source_sha256": identity["source_sha256"],
+        "start_line": start,
+        "end_line": end,
+        "slice_sha256": identity["slice_sha256"],
+    }
+    return TextDerivation(
+        text=selected, parser_id=contract["parser_id"],
+        parser_version=contract["parser_version"],
+        command_sha256=hashlib.sha256(_canonical_json(contract)).hexdigest(),
+    )
+
+
+def _validate_document_identity_body(
+    mapping: dict[str, Any], fetch: TrustedFetch,
+) -> None:
+    """Verify document-only bytes against their explicit immutable identity."""
+
+    identity = mapping.get("identity")
+    if not isinstance(identity, dict):
+        raise ValueError("document evidence lacks its closed identity")
+    resolver_id = mapping.get("resolver_id")
+    body_sha256 = hashlib.sha256(fetch.body).hexdigest()
+    if resolver_id == "direct.sha256.v1":
+        if (body_sha256 != identity.get("body_sha256")
+                or len(fetch.body) != identity.get("body_size")
+                or fetch.content_type.casefold()
+                != str(identity.get("content_type", "")).casefold()):
+            raise ValueError("direct document bytes differ from the pinned identity")
+        return
+    if resolver_id == "github.raw.document.v1":
+        if (body_sha256 != identity.get("source_sha256")
+                or len(fetch.body) != identity.get("source_size")):
+            raise ValueError("GitHub document bytes differ from the pinned source")
+        try:
+            fetch.body.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValueError("GitHub document source is not strict UTF-8") from exc
+        return
+    raise ValueError("document evidence uses a non-document resolver")
+
+
 def _is_portal_javascript_shell(text: str, content_type: str) -> bool:
     """Reject deterministic app shells that contain no inspectable document body."""
 
@@ -1291,12 +1737,23 @@ def _checked_fetch(
     fetched = fetcher(url, timeout_seconds, max_bytes)
     if not isinstance(fetched, TrustedFetch):
         raise TypeError("fetcher did not return a TrustedFetch")
-    if not isinstance(fetched.body, bytes) or len(fetched.body) > max_bytes:
+    if (not isinstance(fetched.body, bytes) or not fetched.body
+            or len(fetched.body) > max_bytes):
         raise ValueError("fetcher returned an invalid or oversized body")
     if not isinstance(fetched.content_type, str):
         raise TypeError("fetcher returned an invalid content type")
-    if type(fetched.status) is not int or not 200 <= fetched.status < 300:
+    if type(fetched.status) is not int or fetched.status != 200:
         raise ValueError("non-success citation status")
+    if (fetched.content_length is not None
+            and (type(fetched.content_length) is not int
+                 or fetched.content_length != len(fetched.body))):
+        raise ValueError("fetcher returned an incomplete declared body")
+    if (fetched.body.startswith(b"%PDF-")
+            or fetched.content_type.casefold() == "application/pdf"):
+        if (not fetched.body.startswith(b"%PDF-")
+                or fetched.body.rfind(b"%%EOF")
+                < max(0, len(fetched.body) - 4096)):
+            raise ValueError("fetcher returned an incomplete PDF body")
     expected_host = (urlsplit(url).hostname or "").casefold()
     if not fetched.redirect_chain or fetched.redirect_chain[0] != url:
         raise ValueError("fetcher omitted the exact evidence locator")
@@ -1462,12 +1919,15 @@ def create_review_cache(
         files_inventory.append(inventory)
 
     references_by_url: dict[str, list[str]] = {}
+    rule_references_by_url: dict[str, list[str]] = {}
     for row in _citation_reference_rows(snapshot):
         url = str(row.get("citation_url", ""))
         reference_id = str(row.get("reference_id", ""))
         if url not in snapshot.exact_citation_urls or _SHA256_RE.fullmatch(reference_id) is None:
             raise ValueError("citation reference is not bound to the frozen inventory")
         references_by_url.setdefault(url, []).append(reference_id)
+        if row.get("reference_kind") == "rule":
+            rule_references_by_url.setdefault(url, []).append(reference_id)
 
     evidence_rows = _citation_evidence_rows(snapshot)
     citations: list[dict[str, Any]] = []
@@ -1478,6 +1938,8 @@ def create_review_cache(
     # from silently mixing multiple server responses for the same map.
     amd_map_fetches: dict[str, TrustedFetch] = {}
     amd_pages_fetches: dict[str, TrustedFetch] = {}
+    primary_fetches: dict[str, TrustedFetch] = {}
+    primary_fetch_failures: set[str] = set()
     for mapping in evidence_rows:
         url = str(mapping["citation_url"])
         evidence_url = str(mapping["evidence_url"])
@@ -1486,6 +1948,8 @@ def create_review_cache(
             "evidence_url": evidence_url,
             "resolver_id": mapping["resolver_id"],
             "reference_ids": sorted(references_by_url.get(url, [])),
+            "inspection_required": bool(rule_references_by_url.get(url)),
+            "identity_verified": False,
             "available": False,
             "status": None,
             "final_url": None,
@@ -1507,9 +1971,18 @@ def create_review_cache(
             "error_code": None,
         }
         try:
-            fetched = _checked_fetch(
-                fetcher, evidence_url, timeout_seconds, max_bytes,
-            )
+            if evidence_url in primary_fetch_failures:
+                raise ValueError("shared exact evidence fetch previously failed")
+            fetched = primary_fetches.get(evidence_url)
+            if fetched is None:
+                try:
+                    fetched = _checked_fetch(
+                        fetcher, evidence_url, timeout_seconds, max_bytes,
+                    )
+                except (AttributeError, OSError, TypeError, ValueError):
+                    primary_fetch_failures.add(evidence_url)
+                    raise
+                primary_fetches[evidence_url] = fetched
             body_hash = hashlib.sha256(fetched.body).hexdigest()
             body_relative = f"citations/bodies/{body_hash}.body"
             body_path = lexical_cache / PurePosixPath(body_relative)
@@ -1517,18 +1990,6 @@ def create_review_cache(
                 _write_private(body_path, fetched.body)
             elif body_path.read_bytes() != fetched.body:
                 raise ValueError("citation body hash collision")
-            derivation = _text_derivation(fetched)
-            if derivation is None and (
-                fetched.body.startswith(b"%PDF-")
-                or fetched.content_type.casefold() == "application/pdf"
-            ):
-                derivation = (
-                    pdf_text_extractor(fetched.body)
-                    if pdf_text_extractor is not None
-                    else _pdftotext_derivation(
-                        body_path, pdftotext_command, pdftotext_sha256,
-                    )
-                )
             base.update({
                 "status": fetched.status, "final_url": fetched.final_url,
                 "redirect_chain": list(fetched.redirect_chain),
@@ -1536,9 +1997,27 @@ def create_review_cache(
                 "body_path": body_relative, "body_sha256": body_hash,
                 "body_size": len(fetched.body),
             })
+            derivation: TextDerivation | None = None
+            if base["inspection_required"]:
+                if mapping["resolver_id"] == "github.raw.lines.v1":
+                    derivation = _github_line_range_derivation(mapping, fetched)
+                else:
+                    derivation = _text_derivation(fetched)
+                    if derivation is None and (
+                        fetched.body.startswith(b"%PDF-")
+                        or fetched.content_type.casefold() == "application/pdf"
+                    ):
+                        derivation = (
+                            pdf_text_extractor(fetched.body)
+                            if pdf_text_extractor is not None
+                            else _pdftotext_derivation(
+                                body_path, pdftotext_command, pdftotext_sha256,
+                            )
+                        )
             resolver_artifacts: list[dict[str, Any]] = []
             if mapping["resolver_id"] == "amd.docs.khub.map.v1":
                 _validate_amd_map_body(mapping, fetched.body)
+                base["identity_verified"] = True
                 publication_id = str(mapping["identity"]["publication_id"])
                 amd_map_fetches[publication_id] = fetched
             elif mapping["resolver_id"] == "amd.docs.khub.topic.v1":
@@ -1567,8 +2046,24 @@ def create_review_cache(
                         lexical_cache, "amd_pages", pages_url, pages_fetch,
                     ),
                 ]
+                base["identity_verified"] = True
+            elif mapping["resolver_id"] in {
+                "direct.sha256.v1", "github.raw.document.v1",
+            }:
+                _validate_document_identity_body(mapping, fetched)
+                base["identity_verified"] = True
+            elif mapping["resolver_id"] == "github.raw.lines.v1":
+                if derivation is None:
+                    raise ValueError(
+                        "GitHub rule evidence lacks its exact line derivation",
+                    )
+                base["identity_verified"] = True
             base["resolver_artifacts"] = resolver_artifacts
-            if derivation is None or not derivation.text.strip():
+            if not base["identity_verified"]:
+                raise ValueError("citation resolver did not verify its identity")
+            if not base["inspection_required"]:
+                base["available"] = True
+            elif derivation is None or not derivation.text.strip():
                 base["error_code"] = "citation_text_unavailable"
             else:
                 if (not isinstance(derivation, TextDerivation)
@@ -1614,12 +2109,14 @@ def create_review_cache(
 
     parser_contract_sha256s = sorted({
         str(entry["parser_command_sha256"])
-        for entry in citations if entry.get("available") is True
+        for entry in citations
+        if entry.get("available") is True
+        and entry.get("inspection_required") is True
     })
     manifest = {
         "schema_version": CACHE_SCHEMA_VERSION,
         "chunk_contract": _chunk_contract(),
-        "inspection_contract": _inspection_contract(files_inventory),
+        "inspection_contract": _inspection_contract(files_inventory, citations),
         "parser_contract_sha256s": parser_contract_sha256s,
         "protocol_id": snapshot.protocol_id,
         "review_snapshot_sha256": snapshot.sha256,
@@ -1658,7 +2155,8 @@ def build_review_prompt(
 The model has no network and the checkout itself is not readable. The current
 working directory is the private frozen cache. The only permitted shell
 commands are these exact read-only forms, using forward-slash relative paths
-listed only in cache_manifest.files[*].chunks[*].path or an available
+listed only in cache_manifest.files[*].chunks[*].path or an available,
+`inspection_required=true`
 cache_manifest.citations[*].inspection_chunks[*].path:
 
   head -n COUNT PATH
@@ -1670,9 +2168,15 @@ still invalidate the review when changed, but neither the prompt nor receipt
 claims the model inspected their content. The explicit split and its digest
 are in `cache_manifest.inspection_contract`.
 
+Document-only citation locators have `inspection_required=false`. Their exact
+fetch, identity, version and body hash are deterministically bound by the
+cache, but no claim is made that the model read their full content. For those
+document citation-result rows set `exact_locator_inspected=false`; rule rows
+must inspect every normalized section chunk and set it true.
+
 Use `head -n 100000000 PATH` exactly once or more for every required source
-chunk and every available citation chunk.
-Every chunk is at most 6000 UTF-8 bytes; all contiguous ranges must be seen
+chunk and every required citation-section chunk.
+Every chunk is at most 24000 UTF-8 bytes; all contiguous ranges must be seen
 with exact, untruncated tool output before the parent file or citation counts
 as inspected. `sha256sum` alone is hash evidence, not content-inspection
 evidence. Do not access the unchunked source, derived text, or cached raw
@@ -1680,7 +2184,8 @@ response bodies directly. Do not use any other command, interpreter, pipe,
 redirection, environment expansion, native web/search tool, MCP tool, network
 operation, or file-changing operation. Every unknown event or tool makes the
 review unusable. If a citation entry is unavailable or cannot be read in full,
-its verdict must not be verified and approved must be false.
+its rule verdict must not be verified and approved must be false. An unavailable
+document-only locator also makes approval false.
 """.strip()
     payload = json.dumps(inventory, indent=2, sort_keys=True, ensure_ascii=False)
     prompt = (protocol.rstrip() + "\n\n" + command_contract +
@@ -1713,6 +2218,30 @@ def _split_command(command: str) -> list[str]:
     if not parts:
         raise ValueError("empty command")
     return parts
+
+
+def _codex_shell_event_command(inner_command: str) -> str:
+    """Return the one canonical wrapper emitted by the pinned Codex CLI."""
+
+    if (not isinstance(inner_command, str) or not inner_command
+            or "'" in inner_command):
+        raise ValueError("inner review command cannot use shell quoting")
+    _split_command(inner_command)
+    return f"/bin/bash -lc '{inner_command}'"
+
+
+def _unwrap_codex_shell_event_command(event_command: str) -> str:
+    """Accept only the pinned CLI's exact ``/bin/bash -lc`` event wrapper."""
+
+    prefix = "/bin/bash -lc '"
+    if (not isinstance(event_command, str)
+            or not event_command.startswith(prefix)
+            or not event_command.endswith("'")):
+        raise ValueError("command does not use the canonical Codex shell wrapper")
+    inner = event_command[len(prefix):-1]
+    if _codex_shell_event_command(inner) != event_command:
+        raise ValueError("Codex shell wrapper is not canonical")
+    return inner
 
 
 def _validate_chunk_rows(
@@ -1804,16 +2333,18 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
             )
         elif item.get("chunks") != []:
             raise ValueError("integrity-only source must not expose model chunks")
-    if manifest.get("inspection_contract") != _inspection_contract(files):
-        raise ValueError("review cache inspection-scope contract is stale")
     citations = manifest.get("citations")
     if not isinstance(citations, list):
         raise ValueError("review cache has no citation inventory")
     references_by_url: dict[str, list[str]] = {}
+    rule_references_by_url: dict[str, list[str]] = {}
     for row in _citation_reference_rows(snapshot):
-        references_by_url.setdefault(str(row["citation_url"]), []).append(
-            str(row["reference_id"])
-        )
+        url = str(row["citation_url"])
+        references_by_url.setdefault(url, []).append(str(row["reference_id"]))
+        if row.get("reference_kind") == "rule":
+            rule_references_by_url.setdefault(url, []).append(
+                str(row["reference_id"]),
+            )
     mappings_by_url = {
         str(row["citation_url"]): row for row in _citation_evidence_rows(snapshot)
     }
@@ -1821,7 +2352,7 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
     for entry in citations:
         if not isinstance(entry, dict) or set(entry) != {
             "requested_url", "evidence_url", "resolver_id", "reference_ids",
-            "available", "status",
+            "inspection_required", "identity_verified", "available", "status",
             "final_url", "redirect_chain", "content_type", "body_path",
             "body_sha256", "body_size", "inspection_path",
             "inspection_sha256", "inspection_size", "parser_id",
@@ -1842,6 +2373,10 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
             raise ValueError("review cache citation evidence mapping is stale")
         if entry.get("reference_ids") != sorted(references_by_url.get(url, [])):
             raise ValueError("review cache citation reference inventory is stale")
+        if entry.get("inspection_required") is not bool(
+            rule_references_by_url.get(url),
+        ):
+            raise ValueError("review cache citation inspection scope is stale")
         requested_parts = urlsplit(str(entry["evidence_url"]))
         expected_host = (requested_parts.hostname or "").casefold()
         chain = entry.get("redirect_chain")
@@ -1937,10 +2472,54 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
                 raise ValueError("review cache duplicates a resolver artifact kind")
             resolver_payloads[str(kind)] = payload
         available = entry.get("available")
+        if type(entry.get("identity_verified")) is not bool:
+            raise ValueError("review cache citation identity state is not boolean")
         resolver_id = entry["resolver_id"]
-        if resolver_id == "direct.v1":
+        if resolver_id in {
+            "direct.sha256.v1", "github.raw.document.v1",
+            "github.raw.lines.v1",
+        }:
             if resolver_artifacts:
                 raise ValueError("direct citation has unexpected resolver artifacts")
+            if resolver_id == "github.raw.lines.v1" and available is True:
+                primary_body = _read_private_cache_file(
+                    root, str(entry["body_path"]),
+                )
+                derived = _github_line_range_derivation(
+                    mapping,
+                    TrustedFetch(
+                        status=int(entry["status"]),
+                        final_url=str(entry["final_url"]),
+                        redirect_chain=tuple(entry["redirect_chain"]),
+                        content_type=str(entry["content_type"]),
+                        body=primary_body,
+                        charset="utf-8",
+                    ),
+                )
+                if entry.get("inspection_required") is True:
+                    inspection = _read_private_cache_file(
+                        root, str(entry["inspection_path"]),
+                    )
+                    if inspection != derived.text:
+                        raise ValueError(
+                            "GitHub inspection bytes differ from the bound raw range",
+                        )
+            elif resolver_id in {
+                "direct.sha256.v1", "github.raw.document.v1",
+            } and available is True:
+                primary_body = _read_private_cache_file(
+                    root, str(entry["body_path"]),
+                )
+                _validate_document_identity_body(
+                    mapping,
+                    TrustedFetch(
+                        status=int(entry["status"]),
+                        final_url=str(entry["final_url"]),
+                        redirect_chain=tuple(entry["redirect_chain"]),
+                        content_type=str(entry["content_type"]),
+                        body=primary_body,
+                    ),
+                )
         elif resolver_id == "amd.docs.khub.map.v1":
             if resolver_artifacts:
                 raise ValueError("AMD map citation has unexpected resolver artifacts")
@@ -1972,15 +2551,27 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
             if (not isinstance(entry.get("status"), int)
                     or not 200 <= entry["status"] < 300
                     or not entry.get("body_path")
-                    or not entry.get("inspection_path")
+                    or entry.get("identity_verified") is not True
+                    or entry.get("error_code") is not None):
+                raise ValueError("available citation lacks fetched locator evidence")
+            if entry["inspection_required"] is False:
+                if any(entry.get(key) is not None for key in (
+                    "inspection_path", "inspection_sha256", "inspection_size",
+                    "parser_id", "parser_version", "parser_command_sha256",
+                    "parser_executable_sha256", "parser_version_output_sha256",
+                )) or entry.get("inspection_chunks") != []:
+                    raise ValueError(
+                        "document-only citation claims model content inspection",
+                    )
+                continue
+            if (not entry.get("inspection_path")
                     or not isinstance(entry.get("parser_id"), str)
                     or not entry["parser_id"]
                     or not isinstance(entry.get("parser_version"), str)
                     or not entry["parser_version"]
                     or _SHA256_RE.fullmatch(
                         str(entry.get("parser_command_sha256", ""))
-                    ) is None
-                    or entry.get("error_code") is not None):
+                    ) is None):
                 raise ValueError("available citation lacks fetched parser-bound text")
             if entry.get("parser_id") == "hlsgraph.review.pdftotext.v1":
                 if (_SHA256_RE.fullmatch(str(entry.get("parser_executable_sha256"))) is None
@@ -2005,9 +2596,13 @@ def load_review_cache(cache_root: Path, snapshot: ReviewSnapshot) -> ReviewCache
             raise ValueError("unavailable citation claims inspection chunks")
     if observed_urls != set(snapshot.exact_citation_urls):
         raise ValueError("review cache citation inventory differs from the snapshot")
+    if manifest.get("inspection_contract") != _inspection_contract(files, citations):
+        raise ValueError("review cache inspection-scope contract is stale")
     observed_parser_contracts = sorted({
         str(entry["parser_command_sha256"])
-        for entry in citations if entry.get("available") is True
+        for entry in citations
+        if entry.get("available") is True
+        and entry.get("inspection_required") is True
     })
     if observed_parser_contracts != parser_contracts:
         raise ValueError("review cache parser contract inventory is stale")
@@ -2125,7 +2720,7 @@ def _expected_command(
                 "reference_ids": entry["reference_ids"],
                 "body_sha256": entry["body_sha256"],
                 "inspection_sha256": entry["inspection_sha256"],
-                "parser_id": "hlsgraph.review.citation-text.v1",
+                "parser_id": entry["parser_id"],
                 "parser_contract_sha256": entry["parser_command_sha256"],
                 "chunk_contract_sha256": contract_sha256,
                 "chunk_index": chunk["index"], "chunk_path": chunk["path"],
@@ -2310,7 +2905,9 @@ def _review_result_issues(
         str(item["requested_url"]): {
             str(chunk["path"]) for chunk in item.get("inspection_chunks", [])
         }
-        for item in cache.manifest["citations"] if item.get("available") is True
+        for item in cache.manifest["citations"]
+        if item.get("available") is True
+        and item.get("inspection_required") is True
     }
     inspected_files = {
         path for path, required in required_file_chunks.items()
@@ -2333,24 +2930,33 @@ def _review_result_issues(
         verified = (
             row.get("reference_surface_sha256") == expected.get("reference_surface_sha256")
             and row.get("verdict") == "verified"
-            and row.get("exact_locator_inspected") is True
             and row.get("declared_version_matched") is True
             and row.get("issues") == []
-            and url in inspected_urls
             and cache_by_url[url].get("available") is True
+            and cache_by_url[url].get("identity_verified") is True
         )
         if expected.get("reference_kind") == "rule":
-            verified = verified and all(
+            verified = (
+                verified
+                and row.get("exact_locator_inspected") is True
+                and url in inspected_urls
+                and cache_by_url[url].get("inspection_required") is True
+                and all(
                 row.get(key) is True for key in (
                     "declared_section_matched", "paraphrase_supported",
                     "applicability_not_broader",
                 )
+                )
             )
         else:
-            verified = verified and all(
-                row.get(key) is None for key in (
-                    "declared_section_matched", "paraphrase_supported",
-                    "applicability_not_broader",
+            verified = (
+                verified
+                and row.get("exact_locator_inspected") is False
+                and all(
+                    row.get(key) is None for key in (
+                        "declared_section_matched", "paraphrase_supported",
+                        "applicability_not_broader",
+                    )
                 )
             )
         all_verified = all_verified and verified
@@ -2694,7 +3300,7 @@ def _assert_mutually_disjoint_roots(
 
 
 def _freeze_runtime_manifest(codex_executable: Path) -> dict[str, Any]:
-    """Hash one plain, ext4 Codex runtime tree without recording its host path."""
+    """Hash the exact ext4 Codex+bwrap runtime without recording its host path."""
 
     executable = _resolved_unlinked_path(
         codex_executable, label="Codex executable",
@@ -2717,9 +3323,22 @@ def _freeze_runtime_manifest(codex_executable: Path) -> dict[str, Any]:
         runtime_children = sorted(runtime_root.iterdir(), key=lambda item: item.name)
     except OSError:
         raise RuntimeError("formal review Codex runtime cannot be enumerated") from None
-    if runtime_children != [executable]:
+    resources = runtime_root / PurePosixPath(CODEX_BWRAP_RELATIVE_PATH).parent
+    bwrap = runtime_root / PurePosixPath(CODEX_BWRAP_RELATIVE_PATH)
+    if (executable.name != CODEX_EXECUTABLE_RELATIVE_PATH
+            or runtime_children != sorted(
+                [executable, resources], key=lambda item: item.name,
+            )):
         raise RuntimeError(
-            "formal review Codex runtime must contain exactly its one executable"
+            "formal review Codex runtime must contain exactly codex and codex-resources"
+        )
+    try:
+        resource_children = sorted(resources.iterdir(), key=lambda item: item.name)
+    except OSError:
+        raise RuntimeError("formal review Codex resources cannot be enumerated") from None
+    if resource_children != [bwrap]:
+        raise RuntimeError(
+            "formal review Codex resources must contain exactly bundled bwrap"
         )
 
     entries: list[dict[str, Any]] = []
@@ -2782,9 +3401,10 @@ def _freeze_runtime_manifest(codex_executable: Path) -> dict[str, Any]:
             })
     entries.sort(key=lambda item: item["relative_path"])
     executable_relative = executable.relative_to(runtime_root).as_posix()
-    if len(PurePosixPath(executable_relative).parts) != 1 or len(entries) != 2:
+    if (executable_relative != CODEX_EXECUTABLE_RELATIVE_PATH
+            or len(entries) != 4):
         raise RuntimeError(
-            "formal review Codex runtime is not the exact single-file contract"
+            "formal review Codex runtime is not the exact codex+bwrap contract"
         )
     executable_entry = next((
         item for item in entries
@@ -2798,11 +3418,33 @@ def _freeze_runtime_manifest(codex_executable: Path) -> dict[str, Any]:
         raise RuntimeError(
             "formal review requires the fixed official rust-v0.144.0 Linux musl ELF"
         )
+    bwrap_entry = next((
+        item for item in entries
+        if item["kind"] == "file"
+        and item["relative_path"] == CODEX_BWRAP_RELATIVE_PATH
+    ), None)
+    if (bwrap_entry is None
+            or bwrap_entry["mode"] != "0500"
+            or bwrap_entry["sha256"] != OFFICIAL_CODEX_BWRAP_SHA256):
+        raise RuntimeError(
+            "formal review requires the fixed official rust-v0.144.0 bundled bwrap"
+        )
+    resources_entry = next((
+        item for item in entries
+        if item["kind"] == "dir"
+        and item["relative_path"] == PurePosixPath(
+            CODEX_BWRAP_RELATIVE_PATH
+        ).parent.as_posix()
+    ), None)
+    if resources_entry is None or resources_entry["mode"] != "0500":
+        raise RuntimeError("formal review Codex resources directory is not frozen")
     payload: dict[str, Any] = {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "ownership_policy": RUNTIME_OWNERSHIP_POLICY,
         "executable_relative_path": executable_relative,
         "executable_sha256": executable_entry["sha256"],
+        "bubblewrap_relative_path": CODEX_BWRAP_RELATIVE_PATH,
+        "bubblewrap_sha256": bwrap_entry["sha256"],
         "entries": entries,
     }
     payload["sha256"] = hashlib.sha256(_canonical_json(payload)).hexdigest()
@@ -2812,7 +3454,8 @@ def _freeze_runtime_manifest(codex_executable: Path) -> dict[str, Any]:
 def _validate_runtime_manifest(manifest: Any) -> dict[str, Any]:
     if not isinstance(manifest, dict) or set(manifest) != {
         "schema_version", "ownership_policy", "executable_relative_path",
-        "executable_sha256", "entries", "sha256",
+        "executable_sha256", "bubblewrap_relative_path",
+        "bubblewrap_sha256", "entries", "sha256",
     }:
         raise ValueError("boundary contract has a malformed runtime manifest")
     entries = manifest.get("entries")
@@ -2875,24 +3518,40 @@ def _validate_runtime_manifest(manifest: Any) -> dict[str, Any]:
     executable_relative = manifest.get("executable_relative_path")
     executable_sha256 = manifest.get("executable_sha256")
     executable_entry = entries_by_path.get(str(executable_relative))
+    bubblewrap_relative = manifest.get("bubblewrap_relative_path")
+    bubblewrap_sha256 = manifest.get("bubblewrap_sha256")
+    bubblewrap_entry = entries_by_path.get(str(bubblewrap_relative))
+    resources_relative = PurePosixPath(CODEX_BWRAP_RELATIVE_PATH).parent.as_posix()
     if (manifest.get("ownership_policy") != RUNTIME_OWNERSHIP_POLICY
-            or not isinstance(executable_relative, str)
-            or executable_relative in {"", "."}
-            or len(PurePosixPath(executable_relative).parts) != 1
-            or len(normalized_entries) != 2
-            or set(entries_by_path) != {".", executable_relative}
+            or executable_relative != CODEX_EXECUTABLE_RELATIVE_PATH
+            or len(normalized_entries) != 4
+            or set(entries_by_path) != {
+                ".", CODEX_EXECUTABLE_RELATIVE_PATH,
+                resources_relative, CODEX_BWRAP_RELATIVE_PATH,
+            }
             or executable_entry is None or executable_entry["kind"] != "file"
-            or int(str(executable_entry["mode"]), 8) & 0o100 == 0
+            or executable_entry["mode"] != "0500"
             or not isinstance(executable_sha256, str)
             or _SHA256_RE.fullmatch(executable_sha256) is None
             or executable_entry["sha256"] != executable_sha256
-            or executable_sha256 != OFFICIAL_CODEX_ELF_SHA256):
-        raise ValueError("boundary runtime manifest lacks its exact executable identity")
+            or executable_sha256 != OFFICIAL_CODEX_ELF_SHA256
+            or bubblewrap_relative != CODEX_BWRAP_RELATIVE_PATH
+            or not isinstance(bubblewrap_sha256, str)
+            or _SHA256_RE.fullmatch(bubblewrap_sha256) is None
+            or bubblewrap_entry is None or bubblewrap_entry["kind"] != "file"
+            or bubblewrap_entry["mode"] != "0500"
+            or bubblewrap_entry["sha256"] != bubblewrap_sha256
+            or bubblewrap_sha256 != OFFICIAL_CODEX_BWRAP_SHA256
+            or entries_by_path[resources_relative]["kind"] != "dir"
+            or entries_by_path[resources_relative]["mode"] != "0500"):
+        raise ValueError("boundary runtime manifest lacks its exact Codex+bwrap identity")
     payload = {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "ownership_policy": RUNTIME_OWNERSHIP_POLICY,
         "executable_relative_path": executable_relative,
         "executable_sha256": executable_sha256,
+        "bubblewrap_relative_path": bubblewrap_relative,
+        "bubblewrap_sha256": bubblewrap_sha256,
         "entries": normalized_entries,
     }
     digest = hashlib.sha256(_canonical_json(payload)).hexdigest()
@@ -2928,6 +3587,7 @@ def _build_boundary_contract(
             {"token": "$CODEX_RUNTIME", "access": "read"},
         ],
         "network_enabled": False,
+        "initial_process_path": list(RUNTIME_INITIAL_PATH_TOKENS),
         "runtime_manifest": manifest,
         "cache_manifest_sha256": cache_manifest_sha256,
         "cache_parent_policy": CACHE_PARENT_POLICY,
@@ -2943,6 +3603,7 @@ def _validate_boundary_contract(
 ) -> dict[str, Any]:
     if not isinstance(contract, dict) or set(contract) != {
         "schema_version", "policy", "filesystem_allowlist", "network_enabled",
+        "initial_process_path",
         "runtime_manifest", "cache_manifest_sha256", "cache_parent_policy",
         "evidence_parent_policy", "canary_results", "contract_sha256",
     }:
@@ -2959,10 +3620,22 @@ def _validate_boundary_contract(
             or contract.get("filesystem_allowlist")
             != rebuilt["filesystem_allowlist"]
             or contract.get("network_enabled") is not False
+            or contract.get("initial_process_path")
+            != rebuilt["initial_process_path"]
             or contract.get("cache_manifest_sha256") != expected_cache_sha256
             or contract != rebuilt):
         raise ValueError("receipt boundary contract is not canonical or is stale")
     return rebuilt
+
+
+def _runtime_initial_process_path(runtime_root: Path) -> str:
+    """Expand the pathless receipt contract for the Linux-only subprocess."""
+
+    root = runtime_root.as_posix()
+    return ":".join(
+        token.replace("$CODEX_RUNTIME", root)
+        for token in RUNTIME_INITIAL_PATH_TOKENS
+    )
 
 
 def _official_boundary(
@@ -3065,7 +3738,9 @@ def _official_boundary(
         f"permissions.{PERMISSION_PROFILE}.filesystem=" + _toml_inline_table(filesystem),
         'web_search="disabled"',
     ]
-    return official_process_environment(), profile_values, {
+    environment = official_process_environment()
+    environment["PATH"] = _runtime_initial_process_path(runtime_root)
+    return environment, profile_values, {
         "codex_home": str(codex_home),
         "checkout_root": str(resolved),
         "cache_root": str(resolved_cache),
@@ -3527,6 +4202,7 @@ def review_source_hashes(
         SURFACE_HELPER_PATH, RELEASE_AUDITOR_PATH,
         *(item[key] for item in PROTOCOL_FILES.values()
           for key in ("prompt", "result", "trace", "receipt")),
+        *SUITE_REVIEW_SOURCE_PATHS,
     }
     hashes = {
         relative: hashlib.sha256(
@@ -3746,7 +4422,10 @@ def build_parser() -> argparse.ArgumentParser:
     preflight = commands.add_parser("preflight", help="freeze inputs without network/model")
     preflight.add_argument("--root", type=Path, default=Path.cwd())
     preflight.add_argument("--protocol", choices=sorted(PROTOCOLS), required=True)
-    review = commands.add_parser("review", help="run one formal cached review")
+    review = commands.add_parser(
+        "review",
+        help="run one legacy v4 cached review (not v0.3 release approval)",
+    )
     review.add_argument("--root", type=Path, default=Path.cwd())
     review.add_argument("--protocol", choices=sorted(PROTOCOLS), required=True)
     review.add_argument("--raw-output", type=Path, required=True)
@@ -3756,7 +4435,13 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--fetch-timeout-seconds", type=float, default=60.0)
     review.add_argument("--pdftotext-command")
     review.add_argument("--pdftotext-sha256")
-    seal = commands.add_parser("seal", help="verify two reviews and seal pack attestations")
+    seal = commands.add_parser(
+        "seal",
+        help=(
+            "rebuild a legacy v4 compatibility seal; the v0.3 release gate "
+            "rejects it"
+        ),
+    )
     seal.add_argument("--root", type=Path, default=Path.cwd())
     seal.add_argument("--semantic-raw", type=Path, required=True)
     seal.add_argument("--adversarial-raw", type=Path, required=True)

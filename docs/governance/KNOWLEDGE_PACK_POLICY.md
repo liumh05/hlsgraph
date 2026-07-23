@@ -81,8 +81,11 @@ declared machine review mode. The review must check:
 `human_reviewed` is reserved for an identified human review. Machine review has
 two deliberately different statuses:
 
-- `machine_repeated_reviewed` means two isolated invocations of the same pinned
-  model agreed. The manifest must state that the model family was not diverse.
+- `machine_repeated_reviewed` means two isolated reviews of the same frozen
+  surface by the same pinned model agreed. A review may itself be a fixed,
+  non-overlapping shard suite; every shard invocation and the deterministic
+  aggregate must be retained in the evidence. The manifest must state that
+  the model family was not diverse.
 - `machine_cross_reviewed` means two isolated invocations from distinct model
   families agreed.
 

@@ -15,6 +15,7 @@ from hlsgraph.bundle import GraphBundle
 from hlsgraph.graph import CanonicalGraph
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.mcp import ReadOnlyMcpService, create_mcp
+from hlsgraph.mcp.server import LEGACY_TOOL_NAMES
 from hlsgraph.model import (
     AuthorityClass,
     Diagnostic,
@@ -370,8 +371,4 @@ def test_optional_fastmcp_defaults_to_explore_and_can_opt_in_legacy_tools(
     server = create_mcp(indexed_bundle["bundle"].project_root,
                         snapshot_id=indexed_bundle["first"])
     registered = {item.name for item in asyncio.run(server.list_tools())}
-    assert registered == {"explore",
-        "overview", "search", "context", "module_or_region", "traverse", "impact",
-        "evidence", "feature_evidence", "correspondences", "compare", "health",
-        "runs", "predictions", "variants", "render", "knowledge",
-    }
+    assert registered == {"explore", *LEGACY_TOOL_NAMES}

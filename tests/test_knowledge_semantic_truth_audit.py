@@ -135,7 +135,9 @@ def test_open_ir_uses_pinned_semantic_sources_and_labels_local_policy() -> None:
     assert documents["circt.handshake"].official_url == handshake_source
     handshake = _rule(open_ir, "circt.handshake_has_dataflow_semantics")
     assert handshake.citation_url == handshake_source
-    assert "fine-grained dataflow graph regions" in handshake.summary
+    assert "fine-grained dataflow operations" in handshake.summary
+    assert "Handshake function operation" in handshake.summary
+    assert "dataflow graph regions" not in handshake.summary
     assert "hlsgraph_local_derivation_policy" in handshake.metadata
 
     scalehls = documents["scalehls.paper"]

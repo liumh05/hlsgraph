@@ -26,6 +26,7 @@ mcp = ["mcp>=1.27,<2"]
 pdf = ["pypdf>=6,<7"]
 parquet = ["pyarrow>=15"]
 pyg = ["torch>=2", "torch-geometric>=2.5"]
+review = ["tiktoken==0.13.0"]
 dev = ["pytest>=8", "coverage[toml]>=7"]
 
 [project.scripts]

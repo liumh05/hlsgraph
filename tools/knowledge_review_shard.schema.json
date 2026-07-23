@@ -1,0 +1,196 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "approved": {
+      "type": "boolean"
+    },
+    "assertion_results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "assertion_id": {
+            "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "enum": [
+                "assertion_rejected",
+                "evidence_incomplete",
+                "contract_violation"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "verified",
+              "rejected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "assertion_id",
+          "verdict",
+          "issues"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "citation_evidence_surface_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "citation_results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "applicability_not_broader": {
+            "type": "boolean"
+          },
+          "declared_section_matched": {
+            "type": "boolean"
+          },
+          "declared_version_matched": {
+            "type": "boolean"
+          },
+          "exact_locator_inspected": {
+            "type": "boolean"
+          },
+          "issues": {
+            "items": {
+              "enum": [
+                "locator_unavailable",
+                "resolver_mismatch",
+                "version_mismatch",
+                "section_mismatch",
+                "paraphrase_unsupported",
+                "applicability_too_broad",
+                "inspection_incomplete"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "paraphrase_supported": {
+            "type": "boolean"
+          },
+          "reference_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "reference_surface_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "verified",
+              "unavailable",
+              "rejected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference_id",
+          "reference_surface_sha256",
+          "verdict",
+          "exact_locator_inspected",
+          "declared_version_matched",
+          "declared_section_matched",
+          "paraphrase_supported",
+          "applicability_not_broader",
+          "issues"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "issues": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "semantic_gap",
+              "activation_bypass",
+              "citation_unavailable",
+              "citation_rejected",
+              "contract_violation"
+            ],
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "code"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "protocol_id": {
+      "enum": [
+        "hlsgraph.knowledge-review.semantic.v1",
+        "hlsgraph.knowledge-review.adversarial.v1"
+      ],
+      "type": "string"
+    },
+    "review_snapshot_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "enum": [
+        "hlsgraph.knowledge-review.shard-result.v1"
+      ],
+      "type": "string"
+    },
+    "shard_id": {
+      "enum": [
+        "knowledge_activation",
+        "ir_semantics",
+        "tool_evidence"
+      ],
+      "type": "string"
+    },
+    "shard_plan_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "summary": {
+      "enum": [
+        "approved_no_issues",
+        "rejected_with_controlled_issues"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "protocol_id",
+    "review_snapshot_sha256",
+    "shard_plan_sha256",
+    "shard_id",
+    "citation_evidence_surface_sha256",
+    "assertion_results",
+    "citation_results",
+    "approved",
+    "issues",
+    "summary"
+  ],
+  "type": "object"
+}

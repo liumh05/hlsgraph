@@ -54,10 +54,14 @@ def _review_contract_digest(value: dict[str, object], hash_field: str) -> str:
 def _valid_review_boundary_contract(cache_sha256: str = "a" * 64) -> dict[str, object]:
     empty_sha256 = hashlib.sha256(b"").hexdigest()
     runtime: dict[str, object] = {
-        "schema_version": "hlsgraph.knowledge-review.runtime-manifest.v2",
-        "ownership_policy": "caller_owned_frozen_0500_no_links_v1",
+        "schema_version": "hlsgraph.knowledge-review.runtime-manifest.v3",
+        "ownership_policy": (
+            "caller_owned_frozen_0500_no_links_exact_codex_bwrap_v2"
+        ),
         "executable_relative_path": "codex",
         "executable_sha256": release_audit.REVIEW_OFFICIAL_CODEX_ELF_SHA256,
+        "bubblewrap_relative_path": "codex-resources/bwrap",
+        "bubblewrap_sha256": release_audit.REVIEW_OFFICIAL_CODEX_BWRAP_SHA256,
         "entries": [
             {
                 "relative_path": ".", "kind": "dir", "size": 0,
@@ -67,11 +71,19 @@ def _valid_review_boundary_contract(cache_sha256: str = "a" * 64) -> dict[str, o
                 "relative_path": "codex", "kind": "file", "size": 5,
                 "mode": "0500", "sha256": release_audit.REVIEW_OFFICIAL_CODEX_ELF_SHA256,
             },
+            {
+                "relative_path": "codex-resources", "kind": "dir", "size": 0,
+                "mode": "0500", "sha256": empty_sha256,
+            },
+            {
+                "relative_path": "codex-resources/bwrap", "kind": "file", "size": 5,
+                "mode": "0500", "sha256": release_audit.REVIEW_OFFICIAL_CODEX_BWRAP_SHA256,
+            },
         ],
     }
     runtime["sha256"] = _review_contract_digest(runtime, "sha256")
     contract: dict[str, object] = {
-        "schema_version": "hlsgraph.knowledge-review.boundary-contract.v2",
+        "schema_version": "hlsgraph.knowledge-review.boundary-contract.v3",
         "policy": "default_deny_minimal_allowlist_v1",
         "filesystem_allowlist": [
             {"token": ":minimal", "access": "read"},
@@ -79,6 +91,9 @@ def _valid_review_boundary_contract(cache_sha256: str = "a" * 64) -> dict[str, o
             {"token": "$CODEX_RUNTIME", "access": "read"},
         ],
         "network_enabled": False,
+        "initial_process_path": [
+            "$CODEX_RUNTIME/codex-resources", "/usr/bin", "/bin",
+        ],
         "runtime_manifest": runtime,
         "cache_manifest_sha256": cache_sha256,
         "cache_parent_policy": "caller_owned_0700_single_cache_v1",
@@ -143,6 +158,8 @@ def test_review_boundary_contract_validates_hashes_and_projection() -> None:
         ("false-canary", "invalid canary_results"),
         ("unsafe-runtime-path", "unsafe relative_path"),
         ("missing-executable", "lacks its exact executable identity"),
+        ("bwrap-hash", "does not use the fixed official bwrap"),
+        ("process-path", "invalid initial_process_path"),
         ("orphan-runtime-file", "incomplete directory tree"),
         ("group-writable-runtime", "writable"),
     ],
@@ -188,6 +205,17 @@ def test_review_boundary_contract_rejects_tampering(
     elif mutation == "missing-executable":
         runtime["executable_relative_path"] = "missing-codex"
         runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "bwrap-hash":
+        runtime["bubblewrap_sha256"] = "b" * 64
+        runtime["sha256"] = _review_contract_digest(runtime, "sha256")
+        contract["contract_sha256"] = _review_contract_digest(
+            contract, "contract_sha256",
+        )
+    elif mutation == "process-path":
+        contract["initial_process_path"] = ["/usr/bin", "/bin"]
         contract["contract_sha256"] = _review_contract_digest(
             contract, "contract_sha256",
         )

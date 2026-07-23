@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Restricted external evidence inventory. Paths are deliberately absent: audit_release.py derives the only permitted work-root layout.",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shard_id",
+        "projected_cache_manifest_sha256",
+        "raw_output_sha256",
+        "sanitized_output_sha256",
+        "process_evidence_sha256",
+        "boundary_contract"
+      ],
+      "properties": {
+        "shard_id": {
+          "enum": [
+            "knowledge_activation",
+            "ir_semantics",
+            "tool_evidence"
+          ]
+        },
+        "projected_cache_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "raw_output_sha256": {"$ref": "#/$defs/sha256"},
+        "sanitized_output_sha256": {"$ref": "#/$defs/sha256"},
+        "process_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "boundary_contract": {
+          "type": "object"
+        }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_id",
+        "acquisition_mode",
+        "replay_source_manifest_sha256",
+        "review_snapshot_sha256",
+        "full_cache_manifest_sha256",
+        "full_citation_evidence_surface_sha256",
+        "shards"
+      ],
+      "properties": {
+        "protocol_id": {
+          "enum": [
+            "hlsgraph.knowledge-review.semantic.v1",
+            "hlsgraph.knowledge-review.adversarial.v1"
+          ]
+        },
+        "acquisition_mode": {
+          "enum": ["online_pinned_identity", "offline_replay_from_semantic"]
+        },
+        "replay_source_manifest_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "review_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "full_cache_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "full_citation_evidence_surface_sha256": {"$ref": "#/$defs/sha256"},
+        "shards": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/shard"}
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runtime_manifest",
+    "protocols"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "hlsgraph.knowledge-review.suite-evidence.v1"
+    },
+    "runtime_manifest": {
+      "type": "object"
+    },
+    "protocols": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/protocol"}
+    }
+  }
+}

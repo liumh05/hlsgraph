@@ -119,6 +119,7 @@
         "policy",
         "filesystem_allowlist",
         "network_enabled",
+        "initial_process_path",
         "runtime_manifest",
         "cache_manifest_sha256",
         "cache_parent_policy",
@@ -128,7 +129,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "hlsgraph.knowledge-review.boundary-contract.v2"
+          "const": "hlsgraph.knowledge-review.boundary-contract.v3"
         },
         "policy": {
           "const": "default_deny_minimal_allowlist_v1"
@@ -171,6 +172,17 @@
         "network_enabled": {
           "const": false
         },
+        "initial_process_path": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"const": "$CODEX_RUNTIME/codex-resources"},
+            {"const": "/usr/bin"},
+            {"const": "/bin"}
+          ],
+          "items": false
+        },
         "runtime_manifest": {
           "type": "object",
           "additionalProperties": false,
@@ -179,27 +191,34 @@
             "ownership_policy",
             "executable_relative_path",
             "executable_sha256",
+            "bubblewrap_relative_path",
+            "bubblewrap_sha256",
             "entries",
             "sha256"
           ],
           "properties": {
             "schema_version": {
-              "const": "hlsgraph.knowledge-review.runtime-manifest.v2"
+              "const": "hlsgraph.knowledge-review.runtime-manifest.v3"
             },
             "ownership_policy": {
-              "const": "caller_owned_frozen_0500_no_links_v1"
+              "const": "caller_owned_frozen_0500_no_links_exact_codex_bwrap_v2"
             },
             "executable_relative_path": {
-              "type": "string",
-              "minLength": 1
+              "const": "codex"
             },
             "executable_sha256": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
+              "const": "901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429"
+            },
+            "bubblewrap_relative_path": {
+              "const": "codex-resources/bwrap"
+            },
+            "bubblewrap_sha256": {
+              "const": "77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c"
             },
             "entries": {
               "type": "array",
-              "minItems": 1,
+              "minItems": 4,
+              "maxItems": 4,
               "uniqueItems": true,
               "items": {
                 "type": "object",

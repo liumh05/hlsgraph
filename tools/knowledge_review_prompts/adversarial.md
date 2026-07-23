@@ -1,5 +1,9 @@
 # HLSGraph public knowledge-pack adversarial activation review
 
+Compatibility notice: this is the frozen monolithic v4 prompt retained for
+historical replay. It cannot approve a v0.3 release. The formal v0.3 workflow
+uses `adversarial_shard.md` in three physically isolated invocations.
+
 Perform a fresh, isolated red-team review of the current checkout. Do not edit
 or consult another review. Your task is to find any way a caller
 could activate a public knowledge rule without proving the cited premise.
@@ -9,8 +13,12 @@ surface hashes exactly.
 
 For citation semantics, inspect the closed citation-to-evidence mapping and
 only the frozen derived text associated with each official `evidence_url` in
-the supplied cache manifest. `citation_url` remains the human-facing locator;
-only `direct.v1` requires equality. AMD KHUB mappings must close
+the supplied cache manifest. `citation_url` remains the human-facing locator.
+`direct.sha256.v1` binds the exact document locator, ID, version, content type,
+byte count, and response SHA-256. `github.raw.document.v1` binds an official
+document to an exact repository source; `github.raw.lines.v1` additionally
+binds every assigned rule reference and section, exact commit/path, full-source
+hash, audited line range, and selected-range hash. AMD KHUB mappings must close
 document/version identity and, for topic evidence, TOC/content identity.
 Document-root map metadata proves document identity only and cannot replace a
 topic body for a rule. The trusted runner performed the evidence fetch before this network-disabled
@@ -24,19 +32,21 @@ checkout, sibling repositories, user files, and all network operations are
 unavailable. Native web/search/MCP tools, guessed paths, arbitrary shell
 commands, writes, installs, and project-code execution are forbidden. Read each
 source row explicitly marked `model_inspection_required=true` and every
-available derived citation text in full, one bounded UTF-8 chunk at a time; a
-hash-only command is not inspection evidence. Rows marked `integrity_bound_only`
-still invalidate the snapshot but are not claimed as model inspected. Every
-required chunk's exact, untruncated output and the final result emission must
-appear in the normalized trace.
+available citation with `inspection_required=true` in full, one bounded UTF-8
+chunk at a time; a hash-only command is not inspection evidence. Rows marked
+`integrity_bound_only` and document-only locators marked
+`inspection_required=false` still invalidate the snapshot but are not claimed
+as model content inspection. Every required chunk's exact, untruncated output
+and the final result emission must appear in the normalized trace.
 
 Treat the supplied citation-audit manifest only as the exact reference
 inventory, never as semantic proof. Repeat its raw SHA-256 and emit exactly one
 `citation_results` row for each manifest `reference_id`. Reject missing, extra,
 duplicate, stale-surface, unavailable, or semantically unsupported references.
+Document rows must use `exact_locator_inspected=false` and null rule-semantic
+fields while their deterministic exact fetch and identity remain available.
 For every verified rule require the exact locator, version, section,
-paraphrase, and applicability checks to be true; document-only rows use `null`
-for fields that have no rule semantics.
+paraphrase, and applicability checks to be true.
 
 Pack attestation fields remain `unreviewed` until two invocations approve this
 same semantic surface. Do not report that pending state alone as a finding;

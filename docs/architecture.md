@@ -70,8 +70,10 @@ Only commands explicitly declared by the project owner are executable. Local
 and SSH runners are disabled unless the caller opts in; the CLI additionally
 requires `--allow-execution`. Fake and replay runners support CI and cache tests
 without pretending to be fresh tool truth. Local cache identity includes a hash
-of the inherited environment. SSH quotes one complete `bash -lc` command and
-performs a remote size/SHA-256 handshake for the active snapshot inputs plus an
+of the inherited environment. SSH passes one completely quoted Python remote
+executor command as the final SSH argument; it does not depend on a remote
+`bash -lc` wrapper. That executor creates the unique run directory, receives
+the active snapshot inputs, performs their size/SHA-256 handshake, and runs an
 explicit toolchain/environment probe whose stdout SHA-256 must match the pinned
 value before execution. Failed or unattested runs cannot be replayed as
 successful cache hits or reported as tool truth.

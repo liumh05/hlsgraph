@@ -9,6 +9,13 @@ from typing import Any
 from .service import ReadOnlyMcpService
 
 
+LEGACY_TOOL_NAMES = (
+    "overview", "search", "context", "module_or_region", "traverse",
+    "impact", "evidence", "feature_evidence", "correspondences", "compare",
+    "health", "runs", "predictions", "variants", "render", "knowledge",
+)
+
+
 def _register_legacy_tools(mcp: Any, tools: ReadOnlyMcpService) -> None:
     """Register the v0.2 narrow tools only under explicit operator opt-in."""
 
@@ -168,4 +175,4 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 
 
-__all__ = ["create_mcp", "main", "run_stdio"]
+__all__ = ["LEGACY_TOOL_NAMES", "create_mcp", "main", "run_stdio"]

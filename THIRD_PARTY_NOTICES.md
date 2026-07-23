@@ -64,6 +64,9 @@ extra is requested and are not bundled by HLSGraph source or wheel releases:
   (<https://github.com/modelcontextprotocol/python-sdk/tree/v1.x>);
 - pypdf 6.x — BSD-3-Clause; used only by the explicit, local-only `pdf`
   knowledge-parser extra and not bundled in HLSGraph releases;
+- tiktoken 0.13.0 — MIT; used only by the formal-review `review` extra to
+  enforce the pinned `o200k_base` context budget and not bundled in HLSGraph
+  releases;
 - Apache Arrow / PyArrow — Apache-2.0;
 - PyTorch — a multi-licensed distribution whose exact license expression and
   bundled third-party notices depend on the installed release; consult that

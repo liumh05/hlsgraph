@@ -1,4 +1,374 @@
 {
+  "$defs": {
+    "amd_map_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "document_slug": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        },
+        "publication_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "publication_id",
+        "document_id",
+        "document_slug",
+        "version",
+        "title"
+      ],
+      "type": "object"
+    },
+    "amd_topic_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "content_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "document_slug": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        },
+        "publication_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "toc_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_~-]+$",
+          "type": "string"
+        },
+        "topic_title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "publication_id",
+        "document_id",
+        "document_slug",
+        "version",
+        "title",
+        "toc_id",
+        "content_id",
+        "topic_title"
+      ],
+      "type": "object"
+    },
+    "direct_sha256_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "body_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "body_size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "content_type": {
+          "enum": [
+            "application/pdf",
+            "text/html"
+          ],
+          "type": "string"
+        },
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.~-]+$",
+          "type": "string"
+        },
+        "document_version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "document_version",
+        "body_sha256",
+        "body_size",
+        "content_type"
+      ],
+      "type": "object"
+    },
+    "document_reference_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.~-]+$",
+          "type": "string"
+        },
+        "document_version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "reference_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "reference_kind": {
+          "const": "document"
+        },
+        "reference_surface_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "null"
+        },
+        "rule_surface_sha256": {
+          "type": "null"
+        },
+        "section": {
+          "type": "null"
+        },
+        "section_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_id",
+        "reference_kind",
+        "reference_surface_sha256",
+        "document_id",
+        "document_version",
+        "rule_id",
+        "rule_surface_sha256",
+        "section",
+        "section_sha256"
+      ],
+      "type": "object"
+    },
+    "github_document_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.~-]+$",
+          "type": "string"
+        },
+        "document_version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_./-]+$",
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 3,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_size": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "path",
+        "source_sha256",
+        "source_size",
+        "document_id",
+        "document_version"
+      ],
+      "type": "object"
+    },
+    "github_lines_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "end_line": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_./-]+$",
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 3,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        "slice_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "start_line": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "path",
+        "source_sha256",
+        "start_line",
+        "end_line",
+        "slice_sha256"
+      ],
+      "type": "object"
+    },
+    "reference_binding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/document_reference_binding"
+        },
+        {
+          "$ref": "#/$defs/rule_reference_binding"
+        }
+      ]
+    },
+    "rule_reference_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.~-]+$",
+          "type": "string"
+        },
+        "document_version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "reference_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "reference_kind": {
+          "const": "rule"
+        },
+        "reference_surface_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "rule_id": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "rule_surface_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "section": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$",
+          "type": "string"
+        },
+        "section_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_id",
+        "reference_kind",
+        "reference_surface_sha256",
+        "document_id",
+        "document_version",
+        "rule_id",
+        "rule_surface_sha256",
+        "section",
+        "section_sha256"
+      ],
+      "type": "object"
+    }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -8,59 +378,181 @@
     },
     "entries": {
       "items": {
-        "additionalProperties": false,
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
-              "citation_url": {"format": "uri", "type": "string"},
-              "evidence_url": {"format": "uri", "type": "string"},
-              "identity": {"type": "null"},
-              "resolver_id": {"const": "direct.v1"}
+              "citation_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/direct_sha256_identity"
+              },
+              "reference_bindings": {
+                "items": {
+                  "$ref": "#/$defs/reference_binding"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "resolver_id": {
+                "const": "direct.sha256.v1"
+              }
             },
-            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+            "required": [
+              "citation_url",
+              "evidence_url",
+              "resolver_id",
+              "identity",
+              "reference_bindings"
+            ],
+            "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
-              "citation_url": {"format": "uri", "type": "string"},
-              "evidence_url": {"format": "uri", "type": "string"},
-              "identity": {
-                "additionalProperties": false,
-                "properties": {
-                  "document_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "document_slug": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"},
-                  "publication_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
-                  "version": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"}
-                },
-                "required": ["publication_id", "document_id", "document_slug", "version", "title"],
-                "type": "object"
+              "citation_url": {
+                "format": "uri",
+                "type": "string"
               },
-              "resolver_id": {"const": "amd.docs.khub.map.v1"}
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/github_document_identity"
+              },
+              "reference_bindings": {
+                "items": {
+                  "$ref": "#/$defs/reference_binding"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "resolver_id": {
+                "const": "github.raw.document.v1"
+              }
             },
-            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+            "required": [
+              "citation_url",
+              "evidence_url",
+              "resolver_id",
+              "identity",
+              "reference_bindings"
+            ],
+            "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
-              "citation_url": {"format": "uri", "type": "string"},
-              "evidence_url": {"format": "uri", "type": "string"},
-              "identity": {
-                "additionalProperties": false,
-                "properties": {
-                  "content_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "document_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "document_slug": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"},
-                  "publication_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
-                  "topic_title": {"maxLength": 256, "minLength": 1, "pattern": "^[^\\u0000-\\u001F\\u007F]+$", "type": "string"},
-                  "toc_id": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9_~-]+$", "type": "string"},
-                  "version": {"maxLength": 256, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string"}
-                },
-                "required": ["publication_id", "document_id", "document_slug", "version", "title", "toc_id", "content_id", "topic_title"],
-                "type": "object"
+              "citation_url": {
+                "format": "uri",
+                "type": "string"
               },
-              "resolver_id": {"const": "amd.docs.khub.topic.v1"}
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/github_lines_identity"
+              },
+              "reference_bindings": {
+                "items": {
+                  "$ref": "#/$defs/reference_binding"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "resolver_id": {
+                "const": "github.raw.lines.v1"
+              }
             },
-            "required": ["citation_url", "evidence_url", "resolver_id", "identity"]
+            "required": [
+              "citation_url",
+              "evidence_url",
+              "resolver_id",
+              "identity",
+              "reference_bindings"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "citation_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/amd_map_identity"
+              },
+              "reference_bindings": {
+                "items": {
+                  "$ref": "#/$defs/reference_binding"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "resolver_id": {
+                "const": "amd.docs.khub.map.v1"
+              }
+            },
+            "required": [
+              "citation_url",
+              "evidence_url",
+              "resolver_id",
+              "identity",
+              "reference_bindings"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "citation_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/amd_topic_identity"
+              },
+              "reference_bindings": {
+                "items": {
+                  "$ref": "#/$defs/reference_binding"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "resolver_id": {
+                "const": "amd.docs.khub.topic.v1"
+              }
+            },
+            "required": [
+              "citation_url",
+              "evidence_url",
+              "resolver_id",
+              "identity",
+              "reference_bindings"
+            ],
+            "type": "object"
           }
         ],
         "type": "object"
@@ -70,9 +562,13 @@
       "uniqueItems": true
     },
     "schema_version": {
-      "const": "hlsgraph.knowledge-review.evidence-map.v1"
+      "const": "hlsgraph.knowledge-review.evidence-map.v2"
     }
   },
-  "required": ["schema_version", "citation_audit_sha256", "entries"],
+  "required": [
+    "schema_version",
+    "citation_audit_sha256",
+    "entries"
+  ],
   "type": "object"
 }
