@@ -449,7 +449,7 @@ def build_shard_prompt(
         ],
     }
     separator = "\n\n--- deterministic shard contract ---\n"
-    return (base.rstrip() + separator).encode("utf-8") + _pretty_json(contract)
+    return (base.rstrip() + separator).encode("utf-8") + _canonical_json(contract)
 
 
 def _review_issues(value: Any) -> list[dict[str, str]]:

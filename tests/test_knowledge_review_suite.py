@@ -264,6 +264,10 @@ def test_prompt_requires_only_assigned_assertions_and_rule_references() -> None:
         plan_sha256=shards.shard_plan_sha256(state[1]),
         shard_projection=projection,
     )
+    contract_bytes = prompt.split(
+        b"\n\n--- deterministic shard contract ---\n", 1,
+    )[1]
+    assert contract_bytes == suite._canonical_json(json.loads(contract_bytes))
     text = prompt.decode("utf-8")
     for assertion_id in projection["assertion_ids"]:
         assert assertion_id in text
