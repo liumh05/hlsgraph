@@ -16,6 +16,7 @@ from hlsgraph.extract.base import ExtractionContext
 from hlsgraph.extract.vitis import VitisReportExtractor
 from hlsgraph.extract.vivado import VivadoReportExtractor
 from hlsgraph.graph import CanonicalGraph
+from hlsgraph.knowledge.core import canonical_context_scalar
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.model import (
     ArtifactRef,
@@ -105,7 +106,7 @@ def _typed_report_bytes(
     if artifact_kind in {
         "amd.vivado.utilization", "amd.vivado.post_route_utilization",
     }:
-        return b"LUT=1\n"
+        return b"LUT=1\nFF=1\nDSP=1\nBRAM_18K=1\n"
     if artifact_kind == "amd.vivado.physical_summary":
         return json.dumps({
             "schema_version": "hlsgraph.vivado.physical_summary.v1",
@@ -138,6 +139,8 @@ def _observation_case(
     duplicate_run_ownership: bool = False,
     forge_source_hash: bool = False,
     forge_report_value: bool = False,
+    report_bytes: bytes | None = None,
+    persist_observation: bool = True,
 ):
     root.mkdir()
     (root / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
@@ -209,9 +212,13 @@ def _observation_case(
         metadata=run_metadata,
     )
     source = root / "report.dat"
-    source.write_bytes(_typed_report_bytes(
-        artifact_kind, activity_source=activity_source,
-    ))
+    source.write_bytes(
+        report_bytes
+        if report_bytes is not None
+        else _typed_report_bytes(
+            artifact_kind, activity_source=activity_source,
+        )
+    )
     artifact_metadata: dict[str, object] = {
         "declared_output_path": "declared/report.dat",
         "stage": observation_stage,
@@ -316,7 +323,8 @@ def _observation_case(
         artifacts.append(sibling)
     run.output_artifact_ids = [item.id for item in artifacts]
     commit_attested(bundle,
-        run=run, artifacts=artifacts, observations=[observation],
+        run=run, artifacts=artifacts,
+        observations=[observation] if persist_observation else [],
     )
     return bundle, snapshot, graph, observation, artifact, artifact_path, tool
 
@@ -1050,7 +1058,9 @@ def test_schedule_directive_status_requires_real_declared_report_closure(
         item for item in contexts
         if item.get("directive_instance_id") == {directive.id.casefold()}
     )
-    assert context["requested_directive_present"] == {"true"}
+    assert context["requested_directive_present"] == {
+        canonical_context_scalar(True),
+    }
     assert context["observation_evidence_qualified"] == {
         "derived_from_typed_observation_evidence_v1",
     }
@@ -1148,3 +1158,86 @@ def test_tool_artifact_binding_requires_declared_live_run_output(
     assert not any(HybridRetriever._binding_constraints_match_values(
         binding, item, {"artifact_kind": {artifact_kind}},
     ) for item in changed)
+
+
+@pytest.mark.parametrize(
+    (
+        "case_id", "predicate", "observation_stage", "run_stage",
+        "artifact_kind", "authority", "report_bytes", "persist_observation",
+    ),
+    [
+        (
+            "empty-schedule", "schedule.start_cycle", "schedule", "csynth",
+            "amd.vitis.schedule_json", AuthorityClass.COMPILER_DECISION,
+            b"", False,
+        ),
+        (
+            "partial-schedule", "schedule.start_cycle", "schedule", "csynth",
+            "amd.vitis.schedule_json", AuthorityClass.COMPILER_DECISION,
+            json.dumps({
+                "schema_version": "hlsgraph.vitis.schedule.v1",
+                "top": "dut",
+                "operations": [{
+                    "name": "op0", "architecture_name": "dut",
+                    "start_cycle": 1,
+                }],
+            }).encode(), True,
+        ),
+        (
+            "partial-timing", "timing.wns_ns", "post_route", "post_route",
+            "amd.vivado.timing_summary", AuthorityClass.TOOL_OBSERVATION,
+            b"WNS: 1\n", True,
+        ),
+        (
+            "partial-routed-timing", "timing.wns_ns",
+            "post_route", "post_route", "amd.vivado.post_route_timing",
+            AuthorityClass.TOOL_OBSERVATION, b"WNS: 1\n", True,
+        ),
+        (
+            "partial-utilization", "resource.lut",
+            "post_route", "post_route", "amd.vivado.utilization",
+            AuthorityClass.TOOL_OBSERVATION, b"LUT=1\n", True,
+        ),
+        (
+            "partial-routed-utilization", "resource.lut",
+            "post_route", "post_route",
+            "amd.vivado.post_route_utilization",
+            AuthorityClass.TOOL_OBSERVATION, b"LUT=1\n", True,
+        ),
+    ],
+)
+def test_tool_artifact_binding_rejects_unparsed_or_partial_containers(
+    tmp_path: Path, case_id: str, predicate: str, observation_stage: str,
+    run_stage: str, artifact_kind: str, authority: AuthorityClass,
+    report_bytes: bytes, persist_observation: bool,
+) -> None:
+    bundle, snapshot, graph, _observation, _artifact, _path, _tool = (
+        _observation_case(
+            tmp_path / case_id,
+            predicate=predicate,
+            observation_stage=observation_stage,
+            run_stage=run_stage,
+            artifact_kind=artifact_kind,
+            authority=authority,
+            report_bytes=report_bytes,
+            persist_observation=persist_observation,
+        )
+    )
+    contexts = HybridRetriever(bundle, snapshot.id)._binding_target_contexts(
+        graph, set(graph.entities),
+    )[("artifact_kind", artifact_kind)]
+    assert all(
+        "tool_artifact_evidence_qualified" not in item
+        for item in contexts
+    )
+    binding = next(
+        item for item in bundle.store.knowledge_bindings()
+        if item.target_kind == "artifact_kind"
+        and item.target == artifact_kind
+    )
+    assert not any(
+        HybridRetriever._binding_constraints_match_values(
+            binding, context, {"artifact_kind": {artifact_kind}},
+        )
+        for context in contexts
+    )

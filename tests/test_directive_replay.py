@@ -15,6 +15,7 @@ from hlsgraph.extract.directive_identity import (
 from hlsgraph.extract.directives import ExternalDirectiveExtractor
 from hlsgraph.extract.source import LibClangExtractor, RegexSourceExtractor
 from hlsgraph.graph import CanonicalGraph
+from hlsgraph.knowledge.core import canonical_context_scalar
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.model import (
     AuthorityClass,
@@ -87,6 +88,14 @@ def _requested(result, directive_id: str) -> Observation:
     )
 
 
+def _selected(result, directive_id: str) -> Observation:
+    return next(
+        item for item in result.observations
+        if item.subject_id == directive_id
+        and item.predicate == "directive.declared_selected"
+    )
+
+
 def _context(bundle, snapshot, graph, directive: Entity):
     contexts = HybridRetriever(
         bundle, snapshot.id,
@@ -104,6 +113,18 @@ def _requested_context(bundle, snapshot, graph, directive: Entity):
         bundle, snapshot.id,
     )._binding_target_contexts(graph, set(graph.entities))[
         ("predicate", "directive.requested")
+    ]
+    return next(
+        item for item in contexts
+        if item.get("directive_instance_id") == {directive.id.casefold()}
+    )
+
+
+def _selected_context(bundle, snapshot, graph, directive: Entity):
+    contexts = HybridRetriever(
+        bundle, snapshot.id,
+    )._binding_target_contexts(graph, set(graph.entities))[
+        ("predicate", "directive.declared_selected")
     ]
     return next(
         item for item in contexts
@@ -344,6 +365,143 @@ def test_replay_rejects_forged_options(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    ["value", "anchor", "artifact", "identity"],
+)
+def test_selected_observation_must_match_fixed_replay(
+    tmp_path: Path, tamper: str,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n#pragma HLS pipeline II=1\n}\n",
+    )
+    graph = result.graph
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    requested = _requested(result, directive.id)
+    selected = _selected(result, directive.id)
+    changes: dict[str, object] = {"id": ""}
+    if tamper == "value":
+        changes["value"] = {"ii": 7}
+    elif tamper == "anchor":
+        changes["anchor"] = replace(
+            selected.anchor, end_column=selected.anchor.end_column - 1,
+        )
+    elif tamper == "artifact":
+        changes["artifact_id"] = None
+        changes["anchor"] = None
+    else:
+        changes["metadata"] = {
+            **selected.metadata,
+            "scope_id": "entity.forged",
+        }
+    forged = replace(selected, **changes)
+    _persist(bundle, graph, [requested, forged])
+
+    contexts = HybridRetriever(
+        bundle, snapshot.id,
+    )._binding_target_contexts(graph, set(graph.entities))[
+        ("predicate", "directive.declared_selected")
+    ]
+    assert contexts
+    assert all("requested_directive_present" not in item for item in contexts)
+
+
+def test_duplicate_selected_observation_fails_closed(tmp_path: Path) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n#pragma HLS pipeline II=1\n}\n",
+    )
+    graph = result.graph
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    selected = _selected(result, directive.id)
+    duplicate = replace(
+        selected,
+        id="",
+        metadata={**selected.metadata, "duplicate_fixture": "second"},
+    )
+    _persist(
+        bundle,
+        graph,
+        [_requested(result, directive.id), selected, duplicate],
+    )
+
+    contexts = HybridRetriever(
+        bundle, snapshot.id,
+    )._binding_target_contexts(graph, set(graph.entities))[
+        ("predicate", "directive.declared_selected")
+    ]
+    matching = [
+        item for item in contexts
+        if item.get("directive_instance_id") == {directive.id.casefold()}
+    ]
+    assert len(matching) == 2
+    assert all("requested_directive_present" not in item for item in matching)
+
+
+def test_overridden_directive_cannot_invent_selected_observation(
+    tmp_path: Path,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n#pragma HLS pipeline II=1\n}\n",
+        tcl="set_directive_pipeline -II 2 dut\n",
+    )
+    graph = result.graph
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive"
+        and item.attrs.get("origin") == "source_pragma"
+    )
+    assert directive.attrs["state"] == "overridden_declared"
+    requested = _requested(result, directive.id)
+    forged = replace(
+        requested,
+        id="",
+        predicate="directive.declared_selected",
+        metadata={
+            **requested.metadata,
+            "resolution_policy": "hlsgraph.declared_precedence_v1",
+            "tool_applied": False,
+        },
+    )
+    _persist(bundle, graph, [requested, forged])
+
+    contexts = HybridRetriever(
+        bundle, snapshot.id,
+    )._binding_target_contexts(graph, set(graph.entities))[
+        ("predicate", "directive.declared_selected")
+    ]
+    assert contexts
+    assert all("requested_directive_present" not in item for item in contexts)
+
+
+def test_no_option_selected_directive_remains_replayable(tmp_path: Path) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut() {\n#pragma HLS dataflow\n}\n",
+    )
+    graph = result.graph
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    assert directive.attrs["options"] == {}
+    assert _selected(result, directive.id).value is True
+    _persist(bundle, graph, result.observations)
+
+    context = _selected_context(bundle, snapshot, graph, directive)
+    assert context["requested_directive_present"] == {
+        canonical_context_scalar(True),
+    }
+
+
 def test_replay_rejects_forged_array_operand(tmp_path: Path) -> None:
     bundle, snapshot, result = _fixed_records(
         tmp_path,
@@ -531,7 +689,9 @@ def test_any_snapshot_compiler_input_drift_invalidates_directive_replay(
         if item.get("directive_instance_id") == {directive.id.casefold()}
     )
     assert "directive_source_declaration_qualified" in directive_context
-    assert requested_context["requested_directive_present"] == {"true"}
+    assert requested_context["requested_directive_present"] == {
+        canonical_context_scalar(True),
+    }
 
     (tmp_path / "defs.hpp").write_text("#define LIMIT 3\n", encoding="utf-8")
     rejected_contexts = contexts()

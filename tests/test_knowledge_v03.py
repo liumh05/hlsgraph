@@ -19,6 +19,7 @@ from hlsgraph import (
     CoverageStatus,
     KnowledgeTargetCoverage,
     KnowledgeBinding,
+    KnowledgeRule,
     LocalKnowledgeIndexManifest,
     Entity,
     TargetCoverageStatus,
@@ -497,17 +498,14 @@ def test_binding_alternatives_require_explicit_one_of_in_both_matchers() -> None
         explicit, retrieval_context, targets,
     )
 
-    naked = KnowledgeBinding(
-        **common,
-        required_context={"stage": ["post_place", "post_route"]},
-    )
-    assert not matches_binding_constraints(
-        naked, target_kind="test.target", target="test.value",
-        context=scalar_context,
-    )
-    assert not HybridRetriever._binding_constraints_match_values(
-        naked, retrieval_context, targets,
-    )
+    for alternatives in (
+        ["post_place", "post_route"],
+        ("post_place", "post_route"),
+    ):
+        with pytest.raises(ValueError, match="explicit one_of"):
+            KnowledgeBinding(
+                **common, required_context={"stage": alternatives},
+            )
 
     assert all(
         not isinstance(constraint, list)
@@ -1238,6 +1236,65 @@ def _condition_pack(binding_context: dict[str, object]) -> dict[str, object]:
             "metadata": {},
         }],
     }
+
+
+@pytest.mark.parametrize("invalid", [
+    "TRUE",
+    "hlsgraph.__context_bool__.true.v1",
+    {"equals": "false"},
+    {"one_of": ["ok", "TrUe"]},
+    {"one_of": []},
+    {"required": "true"},
+    {"required": 1},
+    {"unknown": "value"},
+    ["a", "b"],
+    ("a", "b"),
+])
+def test_executable_constraint_boundaries_reject_ambiguous_values(
+    invalid: object,
+) -> None:
+    rule_data = {
+        "document_id": "test.condition.doc", "document_version": "1",
+        "section": "Condition", "rule_id": "test.rule", "title": "Rule",
+        "applicability": {}, "condition": {"premise": invalid}, "effect": {},
+        "citation_url": "https://example.com/condition#rule",
+    }
+    binding_data = {
+        "knowledge_rule_id": "test.condition.doc:1:test.rule",
+        "target_kind": "predicate", "target": "test.predicate",
+        "required_context": {"premise": invalid},
+        "producer": "test.binding", "producer_version": "1",
+    }
+    with pytest.raises(ValueError):
+        KnowledgeRule(**rule_data)
+    with pytest.raises(ValueError):
+        KnowledgeRule.from_dict(rule_data)
+    with pytest.raises(ValueError):
+        KnowledgeBinding(**binding_data)
+    with pytest.raises(ValueError):
+        KnowledgeBinding.from_dict(binding_data)
+
+    pack = _condition_pack({"stage": "csim"})
+    pack["rules"][0]["condition"] = {"csim_result_present": invalid}
+    with pytest.raises(KnowledgePackError):
+        load_pack(pack)
+
+
+def test_executable_constraint_boundaries_keep_json_booleans_typed() -> None:
+    rule = KnowledgeRule(
+        document_id="test.condition.doc", document_version="1",
+        section="Condition", rule_id="test.rule", title="Rule",
+        applicability={}, condition={"premise": True}, effect={},
+        citation_url="https://example.com/condition#rule",
+    )
+    binding = KnowledgeBinding(
+        knowledge_rule_id=rule.id, target_kind="predicate",
+        target="test.predicate", required_context={"premise": True},
+        producer="test.binding", producer_version="1",
+    )
+    assert rule.condition["premise"] is True
+    assert binding.required_context["premise"] is True
+    assert not HybridRetriever._constraint_matches(True, {"TRUE"})
 
 
 def test_pack_load_rejects_unproved_or_weakened_rule_condition() -> None:

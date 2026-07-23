@@ -17,7 +17,7 @@ from hlsgraph.cli import main as cli_main
 from hlsgraph.graph import CanonicalGraph
 from hlsgraph.knowledge import (
     KnowledgeCatalog, LocalKnowledgeSidecar, binding_entails_rule_condition,
-    index_local_document, matches_binding_constraints,
+    canonical_context_scalar, index_local_document, matches_binding_constraints,
 )
 from hlsgraph.knowledge.activation import BindingActivationSession
 from hlsgraph.manifest import minimal_manifest
@@ -165,12 +165,12 @@ def test_flow_spine_excludes_evidence_only_relations(retrieval_project) -> None:
 @pytest.mark.parametrize(
     ("constraint", "generic_actual", "runtime_actual", "expected"),
     [
-        (True, True, {"true"}, True),
-        (True, "true", {"true"}, True),
-        (False, False, {"false"}, True),
-        (False, "false", {"false"}, True),
-        (False, {"false"}, {"false"}, True),
-        (True, False, {"false"}, False),
+        (True, True, {canonical_context_scalar(True)}, True),
+        (True, "true", {"true"}, False),
+        (False, False, {canonical_context_scalar(False)}, True),
+        (False, "false", {"false"}, False),
+        (False, {"false"}, {"false"}, False),
+        (True, False, {canonical_context_scalar(False)}, False),
     ],
 )
 def test_json_boolean_binding_discriminators_match_identically(
@@ -191,8 +191,8 @@ def test_json_boolean_binding_discriminators_match_identically(
         constraint, runtime_actual,
     ) is expected
     assert HybridRetriever._constraint_mentions(
-        constraint, "true" if constraint else "false",
-    )
+        constraint, constraint,
+    ) is True
 
 
 def test_bilingual_identifier_normalization_is_stable() -> None:
@@ -826,19 +826,18 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
     }
     assert HybridRetriever._binding_constraints_match_values(dynamic, closed_context, targets)
 
-    unknown_operator = KnowledgeBinding(
-        knowledge_rule_id=rule_id, target_kind="predicate",
-        target="qor.achieved_ii",
-        required_context={
-            "vendor": "amd", "tool": "vitis_hls",
-            "tool_version": "2024.2", "stage": {"typo_equals": "schedule"},
-        },
-        producer="hlsgraph.builtin", producer_version="0.3",
-        metadata={"dynamic_scope": "static"},
-    )
-    assert not HybridRetriever._binding_constraints_match_values(
-        unknown_operator, schedule_context, targets,
-    )
+    with pytest.raises(ValueError, match="unsupported operators"):
+        KnowledgeBinding(
+            knowledge_rule_id=rule_id, target_kind="predicate",
+            target="qor.achieved_ii",
+            required_context={
+                "vendor": "amd", "tool": "vitis_hls",
+                "tool_version": "2024.2",
+                "stage": {"typo_equals": "schedule"},
+            },
+            producer="hlsgraph.builtin", producer_version="0.3",
+            metadata={"dynamic_scope": "static"},
+        )
 
 
 def test_source_tool_context_never_cross_pairs_tool_and_version(
@@ -1415,21 +1414,29 @@ def test_open_ir_condition_tokens_are_typed_and_current_instance_only(
     HybridRetriever._context_entity_evidence(
         module_context, module, current=True,
     )
-    assert module_context["llvm_container_present"] == {"true"}
+    assert module_context["llvm_container_present"] == {
+        canonical_context_scalar(True),
+    }
     assert "basic_blocks_or_branches_present" not in module_context
 
     block_context: dict[str, set[str]] = {}
     HybridRetriever._context_entity_evidence(
         block_context, block, current=True,
     )
-    assert block_context["basic_blocks_or_branches_present"] == {"true"}
+    assert block_context["basic_blocks_or_branches_present"] == {
+        canonical_context_scalar(True),
+    }
 
     operation_context: dict[str, set[str]] = {}
     HybridRetriever._context_entity_evidence(
         operation_context, add, current=True,
     )
-    assert operation_context["llvm_instruction_present"] == {"true"}
-    assert operation_context["explicit_integer_width_present"] == {"true"}
+    assert operation_context["llvm_instruction_present"] == {
+        canonical_context_scalar(True),
+    }
+    assert operation_context["explicit_integer_width_present"] == {
+        canonical_context_scalar(True),
+    }
     assert "memory_instruction_present" not in operation_context
 
     untyped = Relation(
@@ -1477,14 +1484,18 @@ def test_open_ir_condition_tokens_are_typed_and_current_instance_only(
     HybridRetriever._context_relation_evidence(
         typed_context, typed, graph, current=True,
     )
-    assert typed_context["typed_mlir_location_present"] == {"true"}
+    assert typed_context["typed_mlir_location_present"] == {
+        canonical_context_scalar(True),
+    }
     assert typed_context["mapping_provenance"] == {"mlir.location_anchor"}
     assert typed_context["location_kind"] == {"mlir.filelinecol"}
     assert typed_context["mapping_resolution"] == {"unique_exact"}
     assert typed_context["mapping_resolution_contract"] == {
         "hlsgraph.mlir_location_resolution.v1"
     }
-    assert typed_context["unique_mlir_location_mapping_resolved"] == {"true"}
+    assert typed_context["unique_mlir_location_mapping_resolved"] == {
+        canonical_context_scalar(True),
+    }
     assert typed_context["typed_source_anchor_identity"] == {
         stable_hash(location)
     }
@@ -1988,8 +1999,12 @@ def test_handshake_ir_evidence_is_structural_and_hls_projection_is_not_normative
         complete, (source.id, target.id), graph, {artifact.id: artifact},
         relation.anchors,
     )
-    assert complete["hardware_topology"] == {"false"}
-    assert complete["native_ir_evidence"] == {"true"}
+    assert complete["hardware_topology"] == {
+        canonical_context_scalar(False),
+    }
+    assert complete["native_ir_evidence"] == {
+        canonical_context_scalar(True),
+    }
     assert complete["native_ir_evidence_contract"] == {
         "hlsgraph.mlir.ssa_def_use.v1"
     }

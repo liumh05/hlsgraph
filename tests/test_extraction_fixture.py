@@ -18,6 +18,7 @@ from hlsgraph.extract import (
     VitisReportExtractor,
 )
 from hlsgraph.extract.static_features import derive_static_features
+from hlsgraph.knowledge.core import canonical_context_scalar
 from hlsgraph.manifest import load_manifest, minimal_manifest
 from hlsgraph.model import (
     ArtifactRef, ArtifactSemanticAttestation, ArtifactSemanticClaim,
@@ -306,7 +307,9 @@ def test_pragma_and_tcl_directives_bind_scope_and_keep_declared_tool_and_achieve
             item for item in contexts
             if item.get("directive_instance_id") == {external.id.casefold()}
         )
-        assert context["requested_directive_present"] == {"true"}
+        assert context["requested_directive_present"] == {
+            canonical_context_scalar(True),
+        }
         binding = next(
             item for item in project.bundle.store.knowledge_bindings()
             if item.target_kind == "predicate" and item.target == predicate
@@ -2092,7 +2095,9 @@ def test_mlir_mapping_rules_close_only_to_source_ast_without_semantic_projection
     assert "semantic_attestation_identity" not in context
     assert "semantic_artifact_evidence_qualified" not in context
     assert "language_spec_compatibility_contract" not in context
-    assert context["unique_mlir_location_mapping_resolved"] == {"true"}
+    assert context["unique_mlir_location_mapping_resolved"] == {
+        canonical_context_scalar(True),
+    }
     assert context["typed_source_anchor_identity"] == {
         stable_hash(locations[0])
     }

@@ -50,6 +50,50 @@ def _semantic_identity(item: Observation) -> str:
     })
 
 
+def replay_artifact_observations(
+    *,
+    project_root: Path,
+    manifest: ProjectManifest,
+    snapshot: DesignSnapshot,
+    graph: CanonicalGraph,
+    artifact: ArtifactRef,
+    parser_name: str,
+    parser_version: str,
+    cache: MutableMapping[tuple[str, str, str], tuple[Observation, ...]] | None = None,
+) -> tuple[Observation, ...] | None:
+    """Replay one fixed built-in parser over an exact report artifact.
+
+    ``None`` means the parser identity is not built in or parsing emitted an
+    error.  An empty tuple is a successful parse with no semantic observations;
+    callers must still require the predicates needed by their own contract.
+    """
+
+    parser_type = _BUILTIN_PARSERS.get((parser_name, parser_version))
+    if parser_type is None:
+        return None
+    cache_key = (artifact.id, parser_name, parser_version)
+    parsed = cache.get(cache_key) if cache is not None else None
+    if parsed is not None:
+        return parsed
+    context = ExtractionContext(
+        project_root=Path(project_root).resolve(),
+        manifest=manifest,
+        snapshot=snapshot,
+        artifacts={artifact.id: artifact},
+        options={"existing_graph": graph},
+    )
+    result = parser_type().extract(context)
+    if any(
+        item.severity.value in {"error", "critical"}
+        for item in result.diagnostics
+    ):
+        return None
+    parsed = tuple(result.observations)
+    if cache is not None:
+        cache[cache_key] = parsed
+    return parsed
+
+
 def replay_observation_source_error(
     *,
     project_root: Path,
@@ -87,27 +131,18 @@ def replay_observation_source_error(
     parser_type = _BUILTIN_PARSERS.get(parser_key)
     if parser_type is None:
         return "observation source is not issued by a fixed built-in report parser"
-    cache_key = (artifact.id, source.parser_name, source.parser_version)
-    parsed: tuple[Observation, ...] | None = cache.get(cache_key) if cache is not None else None
+    parsed = replay_artifact_observations(
+        project_root=project_root,
+        manifest=manifest,
+        snapshot=snapshot,
+        graph=graph,
+        artifact=artifact,
+        parser_name=source.parser_name,
+        parser_version=source.parser_version,
+        cache=cache,
+    )
     if parsed is None:
-        context = ExtractionContext(
-            project_root=Path(project_root).resolve(),
-            manifest=manifest,
-            snapshot=snapshot,
-            artifacts={artifact.id: artifact},
-            options={"existing_graph": graph},
-        )
-        result = parser_type().extract(context)
-        parse_errors = [
-            item for item in result.diagnostics
-            if item.severity.value in {"error", "critical"}
-        ]
-        if parse_errors:
-            parsed = ()
-        else:
-            parsed = tuple(result.observations)
-        if cache is not None:
-            cache[cache_key] = parsed
+        return "fixed built-in report parser rejected the artifact"
     wanted = _semantic_identity(observation)
     matches = [item for item in parsed if _semantic_identity(item) == wanted]
     if len(matches) != 1:
@@ -117,4 +152,7 @@ def replay_observation_source_error(
     return None
 
 
-__all__ = ["replay_observation_source_error"]
+__all__ = [
+    "replay_artifact_observations",
+    "replay_observation_source_error",
+]

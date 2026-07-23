@@ -34,7 +34,7 @@ from .directives import ExternalDirectiveExtractor
 from .source import LibClangExtractor
 
 
-DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v4"
+DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +62,7 @@ class DirectiveReplayProof:
     operand_ownership_hash: str | None
     annotates_relation_hash: str
     requested_observation_hash: str
+    selected_observation_hash: str | None
     port_owner_id: str | None
     port_owner_kind: str | None
     port_owner_record_hash: str | None
@@ -88,6 +89,14 @@ class DirectiveReplayIndex:
 
 def _record_hash(value: Any) -> str:
     return stable_hash(json_ready(value))
+
+
+def _directive_observation_value(directive: Entity) -> Any | None:
+    """Return the parser-defined value without accepting malformed falsy data."""
+    options = directive.attrs.get("options")
+    if not isinstance(options, Mapping):
+        return None
+    return dict(options) if options else True
 
 
 def _ownership_closure(
@@ -284,10 +293,29 @@ def _proof_for_directive(
         and str(observation.completeness) == "complete"
         and observation.run_id is None
     ]
-    if len(annotations) != 1 or len(requested) != 1:
+    selected = [
+        observation
+        for observation in observations
+        if observation.snapshot_id == directive.snapshot_id
+        and observation.subject_id == directive.id
+        and observation.predicate == "directive.declared_selected"
+        and observation.stage == "source"
+        and str(observation.authority) == "declared_constraint"
+        and str(observation.completeness) == "complete"
+        and observation.run_id is None
+    ]
+    expected_value = _directive_observation_value(directive)
+    selected_expected = directive.attrs.get("state") == "selected_declared"
+    if (
+        len(annotations) != 1
+        or len(requested) != 1
+        or expected_value is None
+        or len(selected) != (1 if selected_expected else 0)
+    ):
         return None
     annotation = annotations[0]
     observation = requested[0]
+    selected_observation = selected[0] if selected else None
     if (
         len(directive.anchors) != 1
         or len(annotation.anchors) != 1
@@ -296,8 +324,18 @@ def _proof_for_directive(
         or observation.anchor.artifact_id != observation.artifact_id
         or _record_hash(directive.anchors[0]) != _record_hash(observation.anchor)
         or _record_hash(annotation.anchors[0]) != _record_hash(observation.anchor)
-        or _record_hash(observation.value)
-        != _record_hash(directive.attrs.get("options") or True)
+        or _record_hash(observation.value) != _record_hash(expected_value)
+        or (
+            selected_observation is not None
+            and (
+                selected_observation.artifact_id != observation.artifact_id
+                or selected_observation.anchor is None
+                or _record_hash(selected_observation.anchor)
+                != _record_hash(observation.anchor)
+                or _record_hash(selected_observation.value)
+                != _record_hash(expected_value)
+            )
+        )
     ):
         return None
     artifact = artifacts.get(observation.artifact_id)
@@ -355,6 +393,10 @@ def _proof_for_directive(
     operand_hash = _record_hash(operand) if operand is not None else None
     relation_hash = _record_hash(annotation)
     observation_hash = _record_hash(observation)
+    selected_observation_hash = (
+        _record_hash(selected_observation)
+        if selected_observation is not None else None
+    )
     replay_identity = stable_hash({
         "contract": DIRECTIVE_REPLAY_CONTRACT,
         "parser_identity": parser_identity,
@@ -371,6 +413,7 @@ def _proof_for_directive(
         ),
         "annotates_relation_hash": relation_hash,
         "requested_observation_hash": observation_hash,
+        "selected_observation_hash": selected_observation_hash,
         "port_owner_record_hash": (
             _record_hash(port_owner) if port_owner is not None else None
         ),
@@ -409,6 +452,7 @@ def _proof_for_directive(
         ),
         annotates_relation_hash=relation_hash,
         requested_observation_hash=observation_hash,
+        selected_observation_hash=selected_observation_hash,
         port_owner_id=port_owner.id if port_owner is not None else None,
         port_owner_kind=port_owner.kind if port_owner is not None else None,
         port_owner_record_hash=(
@@ -658,10 +702,49 @@ def match_directive_replay(
     return proof
 
 
+def match_directive_replay_observation(
+    index: DirectiveReplayIndex,
+    *,
+    graph: CanonicalGraph,
+    observations: Sequence[Observation],
+    observation: Observation,
+) -> DirectiveReplayProof | None:
+    """Match a current source declaration to its unique replayed counterpart."""
+    proof = match_directive_replay(
+        index,
+        graph=graph,
+        observations=observations,
+        directive_id=observation.subject_id,
+    )
+    if proof is None:
+        return None
+    if observation.predicate == "directive.requested":
+        expected_hash = proof.requested_observation_hash
+    elif observation.predicate == "directive.declared_selected":
+        expected_hash = proof.selected_observation_hash
+        if expected_hash is None:
+            return None
+    else:
+        return proof
+    peers = [
+        item for item in observations
+        if item.subject_id == observation.subject_id
+        and item.predicate == observation.predicate
+    ]
+    if (
+        len(peers) != 1
+        or _record_hash(observation) != expected_hash
+        or _record_hash(peers[0]) != expected_hash
+    ):
+        return None
+    return proof
+
+
 __all__ = [
     "DIRECTIVE_REPLAY_CONTRACT",
     "DirectiveReplayIndex",
     "DirectiveReplayProof",
     "match_directive_replay",
+    "match_directive_replay_observation",
     "replay_directive_declarations",
 ]

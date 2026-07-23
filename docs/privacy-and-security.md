@@ -180,7 +180,7 @@ self-attest. Before retrieval emits `directive_source_declaration_qualified`,
 `dependence_operand_resolved`, it validates the complete immutable snapshot
 input closure and reruns only the built-in `source.libclang` v4 plus literal
 `directive.external` v3 parsers under
-`hlsgraph.directive_parser_replay.v4`. The exact spelling hash, options, source
+`hlsgraph.directive_parser_replay.v5`. The exact spelling hash, options, source
 anchor, scope, operand, annotation, and request record must match one unique
 replayed declaration. Tcl and config are parsed with isolated literal grammars;
 their quoting, comments, substitutions, escapes, and token rules are not mixed.

@@ -70,7 +70,7 @@ def _rule_from_bytes(payload: bytes) -> KnowledgeRule:
     value = json.loads(payload.decode("utf-8"))
     if not isinstance(value, dict):
         raise TypeError("canonical knowledge rule is not an object")
-    return KnowledgeRule(**value)
+    return KnowledgeRule.from_dict(value)
 
 
 def _freeze_context(

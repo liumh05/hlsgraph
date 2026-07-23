@@ -519,6 +519,7 @@ _KNOWLEDGE_SOURCES = (
     "src/hlsgraph/extract/directive_identity.py",
     "src/hlsgraph/extract/directive_replay.py",
     "src/hlsgraph/extract/directives.py",
+    "src/hlsgraph/extract/observation_replay.py",
     "src/hlsgraph/extract/source.py",
     "src/hlsgraph/graph.py",
     "src/hlsgraph/knowledge/activation.py",

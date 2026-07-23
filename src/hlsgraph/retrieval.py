@@ -29,6 +29,7 @@ from .evidence_policy import (
 from .extract.directive_replay import (
     DirectiveReplayIndex,
     match_directive_replay,
+    match_directive_replay_observation,
     replay_directive_declarations,
 )
 from .graph import CanonicalGraph
@@ -322,6 +323,33 @@ _TOOL_ARTIFACT_STAGE_POLICY: dict[str, dict[str, str]] = {
         stage: stage for stage in ("post_synth", "post_place", "post_route")
     },
     "amd.vivado.post_route_utilization": {"post_route": "post_route"},
+}
+# A declared report file is only a container.  Executable artifact guidance
+# additionally requires these semantic fields from a fixed built-in parser
+# replay over the same live bytes.  This prevents empty, malformed, or
+# structurally partial files from satisfying a ``*_report_present`` premise.
+_TOOL_ARTIFACT_REQUIRED_PREDICATES: dict[str, frozenset[str]] = {
+    "amd.vitis.csynth_xml": frozenset({
+        "clock.estimated_period_ns",
+        "qor.latency_best_cycles", "qor.latency_worst_cycles",
+        "qor.interval_min_cycles", "qor.interval_max_cycles",
+    }),
+    "amd.vitis.schedule_json": frozenset({
+        "schedule.start_cycle", "schedule.end_cycle",
+        "schedule.pipeline_stage", "schedule.operation_latency",
+    }),
+    "amd.vivado.timing_summary": frozenset({
+        "timing.wns_ns", "timing.tns_ns",
+    }),
+    "amd.vivado.post_route_timing": frozenset({
+        "timing.wns_ns", "timing.tns_ns",
+    }),
+    "amd.vivado.utilization": frozenset({
+        "resource.lut", "resource.ff", "resource.dsp", "resource.bram_18k",
+    }),
+    "amd.vivado.post_route_utilization": frozenset({
+        "resource.lut", "resource.ff", "resource.dsp", "resource.bram_18k",
+    }),
 }
 _AMD_TYPED_OBSERVATION_PREDICATES = frozenset(
     predicate for predicate, _stage in _OBSERVATION_REPORT_POLICY
@@ -2896,7 +2924,7 @@ class HybridRetriever:
             cls._context_add(context, "llvm_container_present", True)
         elif kind == "ir.llvm.block":
             cls._context_add(
-                context, "basic_blocks_or_branches_present", "true",
+                context, "basic_blocks_or_branches_present", True,
             )
         elif kind == "ir.llvm.operation":
             cls._context_add(context, "llvm_instruction_present", True)
@@ -3666,9 +3694,10 @@ class HybridRetriever:
     def _qualified_tool_artifact_context(
         self, *, artifact: Any, run: Any, artifacts: Mapping[str, Any],
         manifest: Any, vendor_only: Mapping[str, set[str]],
-        toolchains: Mapping[str, Any],
+        toolchains: Mapping[str, Any], graph: CanonicalGraph,
+        parser_replay_cache: dict[tuple[str, str, str], tuple[Any, ...]],
     ) -> dict[str, set[str]] | None:
-        """Close the current report artifact to its declared live run output."""
+        """Close a report to one declared output and fixed-parser semantics."""
         stage_policy = _TOOL_ARTIFACT_STAGE_POLICY.get(str(artifact.kind))
         canonical_stage = (
             stage_policy.get(str(run.stage)) if stage_policy is not None else None
@@ -3712,6 +3741,53 @@ class HybridRetriever:
                 or not self._managed_artifact_bytes_valid(artifact)):
             return None
 
+        required_predicates = _TOOL_ARTIFACT_REQUIRED_PREDICATES.get(
+            str(artifact.kind),
+        )
+        parser_keys = [
+            key for key, kinds in _OBSERVATION_PARSER_POLICY.items()
+            if artifact.kind in kinds
+        ]
+        if required_predicates is None or len(parser_keys) != 1:
+            return None
+        parser_name, parser_version = parser_keys[0]
+        from .extract.observation_replay import replay_artifact_observations
+        parsed = replay_artifact_observations(
+            project_root=self.bundle.project_root,
+            manifest=manifest,
+            snapshot=self.bundle.store.snapshot(self.snapshot_id),
+            graph=graph,
+            artifact=artifact,
+            parser_name=parser_name,
+            parser_version=parser_version,
+            cache=parser_replay_cache,
+        )
+        if parsed is None:
+            return None
+        semantic_rows = [
+            item for item in parsed
+            if item.predicate in required_predicates
+            and item.snapshot_id == self.snapshot_id
+            and item.artifact_id == artifact.id
+            and item.anchor is not None
+            and item.anchor.artifact_id == artifact.id
+            and item.stage == canonical_stage
+            and str(item.completeness) == "complete"
+            and item.source is not None
+            and item.source.artifact_id == artifact.id
+            and item.source.artifact_sha256 == artifact.sha256
+            and item.source.parser_name == parser_name
+            and item.source.parser_version == parser_version
+            and item.source.validation_error(
+                predicate=item.predicate, value=item.value, unit=item.unit,
+            ) is None
+        ]
+        if (
+            {item.predicate for item in semantic_rows} != required_predicates
+            or not self._managed_artifact_bytes_valid(artifact)
+        ):
+            return None
+
         context = self._run_context(run, vendor_only, toolchains)
         context["stage"] = {canonical_stage.casefold()}
         self._context_add(context, "snapshot_id", self.snapshot_id)
@@ -3726,6 +3802,11 @@ class HybridRetriever:
             "sha256": artifact.sha256,
             "size": artifact.size,
             "declared_output_path": output_path,
+            "parser_name": parser_name,
+            "parser_version": parser_version,
+            "semantic_rows": sorted(
+                stable_hash(json_ready(item)) for item in semantic_rows
+            ),
         }))
         self._context_add(context, "tool_artifact_run_identity", stable_hash({
             "run_id": run.id,
@@ -4065,7 +4146,7 @@ class HybridRetriever:
         self, context: Mapping[str, set[str]], *, subject_id: str,
         observations: Sequence[Any], graph: CanonicalGraph,
         artifacts: Mapping[str, Any], directive_replay: DirectiveReplayIndex,
-        require_requested: bool = False, require_unique: bool = False,
+        require_unique: bool = False,
     ) -> tuple[Any, Any, dict[str, set[str]], Any] | None:
         """Return one exact request reproduced by the fixed source parsers."""
         directive = graph.entities.get(subject_id)
@@ -4084,7 +4165,6 @@ class HybridRetriever:
         directive_kind = str(
             directive.attrs.get("directive_kind") or directive.name
         ).upper()
-        expected_value = directive.attrs.get("options") or True
         replay_proof = match_directive_replay(
             directive_replay,
             graph=graph,
@@ -4102,18 +4182,11 @@ class HybridRetriever:
         ):
             if (candidate.snapshot_id != self.snapshot_id
                     or candidate.subject_id != directive.id
-                    or candidate.predicate not in (
-                        {"directive.requested"} if require_requested else {
-                            "directive.requested", "directive.declared_selected",
-                        }
-                    )
+                    or candidate.predicate != "directive.requested"
                     or candidate.stage != "source"
                     or str(candidate.authority) != "declared_constraint"
                     or str(candidate.completeness) != "complete"
                     or candidate.run_id is not None
-                    or stable_hash(candidate.value) != stable_hash(expected_value)
-                    or (candidate.predicate == "directive.declared_selected"
-                        and directive.attrs.get("state") != "selected_declared")
                     or str(candidate.metadata.get(
                         "directive_kind", "",
                     )).upper() != directive_kind
@@ -4249,7 +4322,7 @@ class HybridRetriever:
         evidence = self._directive_source_evidence(
             context, subject_id=directive_id, observations=observations,
             graph=graph, artifacts=artifacts, directive_replay=directive_replay,
-            require_requested=True, require_unique=True,
+            require_unique=True,
         )
         if evidence is None:
             return
@@ -4352,6 +4425,13 @@ class HybridRetriever:
         artifacts: Mapping[str, Any], directive_replay: DirectiveReplayIndex,
     ) -> None:
         """Prove a directive predicate has one exact source request record."""
+        if match_directive_replay_observation(
+            directive_replay,
+            graph=graph,
+            observations=observations,
+            observation=current_observation,
+        ) is None:
+            return
         self._context_directive_source_evidence(
             context, directive_id=current_observation.subject_id,
             observations=observations, graph=graph, artifacts=artifacts,
@@ -4471,7 +4551,7 @@ class HybridRetriever:
         source_evidence = self._directive_source_evidence(
             context, subject_id=directive.id, observations=observations,
             graph=graph, artifacts=artifacts, directive_replay=directive_replay,
-            require_requested=True, require_unique=True,
+            require_unique=True,
         )
         if source_evidence is None:
             return
@@ -4930,7 +5010,7 @@ class HybridRetriever:
                 )
                 if derivation.get("value") is not expected_fit:
                     continue
-                self._context_add(context, "complete_post_route_utilization", "true")
+                self._context_add(context, "complete_post_route_utilization", True)
                 self._context_add(
                     context, "utilization_report_identity",
                     stable_hash(sorted(unique_reports)),
@@ -5276,7 +5356,7 @@ class HybridRetriever:
                         and location_kind in _CONCRETE_MLIR_MAPPING_LOCATION_KINDS
                         and provenance == "mlir.location_anchor"):
                     self._context_add(
-                        context, "typed_mlir_location_present", "true",
+                        context, "typed_mlir_location_present", True,
                     )
                     self._context_add(context, "mapping_kind", mapping_kind)
                     self._context_add(context, "location_kind", location_kind)
@@ -5290,7 +5370,8 @@ class HybridRetriever:
             qualified_artifact = self._qualified_tool_artifact_context(
                 artifact=artifact, run=run, artifacts=artifacts,
                 manifest=manifest, vendor_only=vendor_only,
-                toolchains=toolchains,
+                toolchains=toolchains, graph=graph,
+                parser_replay_cache=parser_replay_cache,
             ) if run is not None else None
             context = (
                 qualified_artifact if qualified_artifact is not None
@@ -5547,7 +5628,7 @@ class HybridRetriever:
                 and str(binding.target_kind) == "predicate"
                 and str(binding.target).startswith("directive.")
                 and context.get(_REQUESTED_DIRECTIVE_CONTEXT_KEY, set())
-                == {"true"}
+                == {canonical_context_scalar(True)}
                 and source_proved
                 and all(singleton(name) for name in (
                     "directive_instance_id", "scope_id", "scope_kind",
@@ -5991,10 +6072,10 @@ class HybridRetriever:
                             required.get("target_entity_stage"), "ast"
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("hardware_topology"), "false"
+                        required.get("hardware_topology"), False
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("typed_mlir_location_present"), "true"
+                            required.get("typed_mlir_location_present"), True
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("mapping_provenance"),
@@ -6011,7 +6092,7 @@ class HybridRetriever:
                         or not HybridRetriever._constraint_mentions(
                             required.get(
                                 "unique_mlir_location_mapping_resolved"
-                            ), "true",
+                            ), True,
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("source_anchor_identity_contract"),
@@ -6036,13 +6117,13 @@ class HybridRetriever:
                             "ir.mlir.operation",
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("hardware_topology"), "false",
+                            required.get("hardware_topology"), False,
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("handshake_operation_present"), "true",
+                            required.get("handshake_operation_present"), True,
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("native_ir_evidence"), "true",
+                            required.get("native_ir_evidence"), True,
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("native_ir_evidence_contract"),
@@ -6094,7 +6175,7 @@ class HybridRetriever:
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("operation_histogram_domain_complete"),
-                            "true",
+                            True,
                         )):
                     return False
                 if HybridRetriever._constraint_mentions(required.get("ir"), "mlir"):
@@ -6105,7 +6186,7 @@ class HybridRetriever:
                             or not HybridRetriever._constraint_mentions(
                                 required.get(
                                     "dialect_qualified_operation_histogram_present"
-                                ), "true",
+                                ), True,
                             )):
                         return False
                 elif HybridRetriever._constraint_mentions(required.get("ir"), "llvm"):
@@ -6116,7 +6197,7 @@ class HybridRetriever:
                             or not HybridRetriever._constraint_mentions(
                                 required.get(
                                     "opcode_qualified_operation_histogram_present"
-                                ), "true",
+                                ), True,
                             )):
                         return False
                 else:
@@ -6143,11 +6224,11 @@ class HybridRetriever:
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("index_histogram_domain_complete"),
-                            "true",
+                            True,
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("typed_index_histogram_present"),
-                            "true",
+                            True,
                         )):
                     return False
             if target_kind == "predicate" and target == "feature.bitwidth":
@@ -6171,11 +6252,11 @@ class HybridRetriever:
                             "llvm.explicit_integer_type_occurrence.v1",
                         )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("bitwidth_domain_complete"), "true",
+                            required.get("bitwidth_domain_complete"), True,
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("typed_bitwidth_histogram_present"),
-                            "true",
+                            True,
                         )):
                     return False
             if target_kind == "predicate" and target == "feature.memory_access":
@@ -6200,12 +6281,12 @@ class HybridRetriever:
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("memory_access_domain_complete"),
-                            "true",
+                            True,
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get(
                                 "typed_memory_access_histogram_present"
-                            ), "true",
+                            ), True,
                         )):
                     return False
 
@@ -6298,7 +6379,7 @@ class HybridRetriever:
                 return False
             if (target == "resource_fits"
                     and not HybridRetriever._constraint_mentions(
-                        required.get("complete_post_route_utilization"), "true"
+                        required.get("complete_post_route_utilization"), True
                     )):
                 return False
 
@@ -6398,7 +6479,7 @@ class HybridRetriever:
             # because model objects remain intentionally mutable.
             if set(constraint) - allowed:
                 return False
-            if constraint.get("required") not in (None, True):
+            if "required" in constraint and constraint["required"] is not True:
                 return False
             candidates = set(canonical_actual)
             if "equals" in constraint:
@@ -6409,6 +6490,8 @@ class HybridRetriever:
                 # reviewed ``one_of`` arrays arrive as tuples.  Caller-owned
                 # pack objects still require lists at load time.
                 if not isinstance(choices, (list, tuple)):
+                    return False
+                if not choices:
                     return False
                 candidates &= {
                     canonical_context_scalar(item) for item in choices

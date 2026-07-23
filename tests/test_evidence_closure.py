@@ -13,6 +13,7 @@ from hlsgraph.extract.base import ExtractionContext
 from hlsgraph.extract.vitis import VitisReportExtractor
 from hlsgraph.extract.vivado import VivadoReportExtractor
 from hlsgraph.graph import CanonicalGraph
+from hlsgraph.knowledge.core import canonical_context_scalar
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.model import (
     ArtifactRef,
@@ -477,7 +478,9 @@ def test_physical_gates_must_share_one_eligible_post_route_run(tmp_path):
         item.get("gate_evidence_qualified") == {
             "derived_from_typed_evidence_v1"
         }
-        and item.get("complete_post_route_utilization") == {"true"}
+        and item.get("complete_post_route_utilization") == {
+            canonical_context_scalar(True),
+        }
         and item.get("target_profile_hash")
         and item.get("target_device_identity")
         and item.get("capacity_identity")

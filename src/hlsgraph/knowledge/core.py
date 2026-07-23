@@ -400,7 +400,8 @@ class KnowledgePack:
         data["documents"] = [DocumentReference.from_dict(item)
                              for item in data.get("documents", [])]
         try:
-            data["rules"] = [KnowledgeRule(**dict(item)) for item in data.get("rules", [])]
+            data["rules"] = [KnowledgeRule.from_dict(item)
+                             for item in data.get("rules", [])]
             data["bindings"] = [KnowledgeBinding.from_dict(item)
                                 for item in data.get("bindings", [])]
             if data.get("coverage") is not None:
@@ -571,19 +572,23 @@ def _version_key(value: Any) -> tuple[tuple[int, Any], ...]:
 def canonical_context_scalar(value: Any) -> Any:
     """Return the canonical scalar representation used by every matcher.
 
-    Retrieval contexts are serialized as lower-case strings, while knowledge
-    packs retain JSON scalar types.  In particular, a JSON boolean must match
-    the corresponding run-time token without making ``True`` equal to integer
-    ``1`` through Python's normal equality rules.
+    JSON booleans use private serialized tokens so they cannot compare equal
+    to integers or boolean-like strings.  Other retrieval context strings
+    remain case-insensitive.
     """
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return (
+            "hlsgraph.__context_bool__.true.v1"
+            if value else "hlsgraph.__context_bool__.false.v1"
+        )
     if isinstance(value, str):
         return value.casefold()
     return value
 
 
 def _same(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
     return canonical_context_scalar(left) == canonical_context_scalar(right)
 
 
@@ -598,20 +603,21 @@ def _constraint_entails(required: Any, condition: Any) -> bool:
     """
     if condition in (None, "*"):
         return True
-    if isinstance(required, list) or isinstance(condition, list):
+    if isinstance(required, (list, tuple)) or isinstance(condition, (list, tuple)):
         return False
     if isinstance(condition, Mapping):
         allowed = {"equals", "one_of", "min_version", "max_version", "required"}
         if set(condition) - allowed:
             return False
-        if condition.get("required") not in (None, True):
+        if "required" in condition and condition["required"] is not True:
             return False
         # Any non-wildcard scalar is a present, singleton value.
         if not isinstance(required, Mapping):
             if required in (None, "*"):
                 return False
             return _matches_constraint(condition, required)
-        if set(required) - allowed or required.get("required") not in (None, True):
+        if (set(required) - allowed
+                or ("required" in required and required["required"] is not True)):
             return False
         if condition.get("required") is True and not required:
             return False
@@ -737,7 +743,7 @@ def _constraint_mentions_exact(constraint: Any, expected: Any) -> bool:
         return isinstance(values, list) and bool(values) and all(
             _same(item, expected) for item in values
         )
-    return not isinstance(constraint, list) and _same(constraint, expected)
+    return not isinstance(constraint, (list, tuple)) and _same(constraint, expected)
 
 
 def _requires_value(constraint: Any) -> bool:
@@ -887,7 +893,7 @@ def _matches_constraint(constraint: Any, actual: Any) -> bool:
         return bool(actual) and any(
             _matches_constraint(constraint, item) for item in actual
         )
-    if isinstance(constraint, list):
+    if isinstance(constraint, (list, tuple)):
         # KnowledgeRule and KnowledgeBinding loaders reject this ambiguous
         # shorthand. Keep the matcher fail-closed for mutated in-memory model
         # instances instead of silently treating a JSON array as ``one_of``.
@@ -897,7 +903,7 @@ def _matches_constraint(constraint: Any, actual: Any) -> bool:
         unknown = set(constraint) - allowed
         if unknown:
             raise KnowledgePackError(f"unsupported applicability operators: {sorted(unknown)}")
-        if constraint.get("required") not in (None, True):
+        if "required" in constraint and constraint["required"] is not True:
             raise KnowledgePackError("applicability required operator only accepts true")
         if actual is None:
             return False
@@ -948,7 +954,7 @@ def matches_binding_constraints(
     return (
         binding.target_kind == target_kind
         and binding.target == target
-        and all(not isinstance(constraint, list)
+        and all(not isinstance(constraint, (list, tuple))
                 and _matches_constraint(constraint, context.get(key))
                 for key, constraint in binding.required_context.items())
     )

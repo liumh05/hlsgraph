@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "86c891bf86a2ddfc898536a3367cd913e1ef1b9c68de3b37ac7513667045656a"
+    "31c7684f4c5bae5d97f01b2ae7963ed1b197912a24ca014376d02359aa60423d"
 )
 
 
@@ -52,7 +52,7 @@ def test_fixed_three_shard_plan_matches_current_closed_audit() -> None:
     assert [row["shard_id"] for row in plan["shards"]] == list(
         shards.SHARD_ORDER
     )
-    assert [len(row["source_paths"]) for row in plan["shards"]] == [16, 10, 18]
+    assert [len(row["source_paths"]) for row in plan["shards"]] == [17, 10, 18]
     assert [len(row["rule_references"]) for row in plan["shards"]] == [10, 15, 13]
     assert sum(len(row["rule_references"]) for row in plan["shards"]) == 38
     assert plan["token_budget_contract"] == (
@@ -99,6 +99,7 @@ def test_knowledge_shard_sees_the_complete_binding_activation_boundary() -> None
         "src/hlsgraph/extract/directive_replay.py",
         "src/hlsgraph/extract/directive_identity.py",
         "src/hlsgraph/extract/directives.py",
+        "src/hlsgraph/extract/observation_replay.py",
         "src/hlsgraph/extract/source.py",
         "src/hlsgraph/bundle.py",
         "src/hlsgraph/graph.py",

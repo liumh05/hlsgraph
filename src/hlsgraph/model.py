@@ -246,6 +246,68 @@ def reject_embedded_body_fields(value: Any, field_name: str = "metadata") -> Non
             reject_embedded_body_fields(item, f"{field_name}[{index}]")
 
 
+_KNOWLEDGE_CONSTRAINT_OPERATORS = frozenset({
+    "equals", "one_of", "min_version", "max_version", "required",
+})
+
+
+def _validate_knowledge_constraints(
+    constraints: Any, field_name: str,
+) -> None:
+    """Validate the closed JSON constraint grammar used for activation."""
+
+    if not isinstance(constraints, dict):
+        raise ValueError(f"{field_name} must be an object")
+
+    def validate_scalar(value: Any, path: str) -> None:
+        if isinstance(value, str):
+            folded = value.casefold()
+            if folded in {"true", "false"}:
+                raise ValueError(
+                    f"{path} must use a JSON boolean, not a boolean-like string"
+                )
+            if folded.startswith("hlsgraph.__context_bool__."):
+                raise ValueError(f"{path} uses a reserved run-time token")
+        if isinstance(value, (Mapping, list, tuple)):
+            raise ValueError(f"{path} must be a scalar JSON value")
+
+    def validate_constraint(value: Any, path: str) -> None:
+        if isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"{path} alternatives require explicit one_of"
+            )
+        if not isinstance(value, Mapping):
+            validate_scalar(value, path)
+            return
+        unknown = set(value) - _KNOWLEDGE_CONSTRAINT_OPERATORS
+        if unknown:
+            raise ValueError(
+                f"{path} has unsupported operators: {sorted(unknown)}"
+            )
+        if not value:
+            raise ValueError(f"{path} must declare an operator")
+        if "required" in value and value["required"] is not True:
+            raise ValueError(f"{path}.required only accepts JSON true")
+        if "equals" in value:
+            validate_scalar(value["equals"], f"{path}.equals")
+        if "one_of" in value:
+            choices = value["one_of"]
+            if not isinstance(choices, list) or not choices:
+                raise ValueError(
+                    f"{path}.one_of must be a non-empty JSON array"
+                )
+            for index, item in enumerate(choices):
+                validate_scalar(item, f"{path}.one_of[{index}]")
+        for operator in ("min_version", "max_version"):
+            if operator in value:
+                validate_scalar(value[operator], f"{path}.{operator}")
+
+    for key, constraint in constraints.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{field_name} keys must be non-empty strings")
+        validate_constraint(constraint, f"{field_name}.{key}")
+
+
 def require_safe_anchor_text(
     value: str | None, field_name: str, *, max_length: int,
 ) -> str | None:
@@ -1983,17 +2045,15 @@ class KnowledgeRule:
     def __post_init__(self) -> None:
         require_namespaced(self.document_id, "knowledge document_id")
         require_namespaced(self.rule_id, "knowledge rule_id")
-        for constraints, label in (
-            (self.applicability, "knowledge applicability"),
-            (self.condition, "knowledge condition"),
-        ):
-            if not isinstance(constraints, dict):
-                raise ValueError(f"{label} must be an object")
-            for key, constraint in constraints.items():
-                if isinstance(constraint, list):
-                    raise ValueError(
-                        f"{label} constraint {key!r} alternatives require explicit one_of"
-                    )
+        if not isinstance(self.applicability, dict):
+            raise ValueError("knowledge applicability must be an object")
+        for key, constraint in self.applicability.items():
+            if isinstance(constraint, (list, tuple)):
+                raise ValueError(
+                    f"knowledge applicability constraint {key!r} "
+                    "alternatives require explicit one_of"
+                )
+        _validate_knowledge_constraints(self.condition, "knowledge condition")
         for value, label in ((self.applicability, "knowledge applicability"),
                              (self.condition, "knowledge condition"),
                              (self.effect, "knowledge effect"),
@@ -2005,6 +2065,10 @@ class KnowledgeRule:
     @property
     def id(self) -> str:
         return f"{self.document_id}:{self.document_version}:{self.rule_id}"
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "KnowledgeRule":
+        return cls(**dict(value))
 
 
 _BUILTIN_KNOWLEDGE_TARGET_KINDS = frozenset({
@@ -2041,6 +2105,9 @@ class KnowledgeBinding:
             raise ValueError("knowledge binding producer_version is required")
         if not isinstance(self.required_context, dict):
             raise ValueError("knowledge binding required_context must be an object")
+        _validate_knowledge_constraints(
+            self.required_context, "knowledge binding required_context",
+        )
         reject_embedded_body_fields(
             self.required_context, "knowledge binding required_context",
         )
