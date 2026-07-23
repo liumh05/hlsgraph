@@ -5,6 +5,7 @@ from typing import Any
 
 from ..bundle import GraphBundle
 from ..model import DatasetManifest, Stage
+from ..query import static_aggregate_receipt_valid
 from ..version import FEATURE_SCHEMA_VERSION
 from .ml import (
     _correspondence_rows,
@@ -151,10 +152,32 @@ def to_pyg_data(bundle: GraphBundle, snapshot_id: str,
         key: {item.id: item for item in bundle.store.runs(key)}
         for key in sorted(graphs)
     }
+    valid_aggregate_ids_by_snapshot: dict[str, frozenset[str]] = {}
+    aggregate_ids_reader = getattr(
+        bundle.store, "valid_static_aggregate_ids", None,
+    )
+    for key in sorted(graphs):
+        if not callable(aggregate_ids_reader):
+            valid_aggregate_ids_by_snapshot[key] = frozenset()
+            continue
+        try:
+            valid_aggregate_ids_by_snapshot[key] = frozenset(
+                aggregate_ids_reader(key)
+            )
+        except Exception:
+            valid_aggregate_ids_by_snapshot[key] = frozenset()
     feature_evidence = _feature_evidence_rows(
         dataset, feature_stages=selected_stages, graphs=graphs,
         exported_node_ids=exported_node_ids, observations=observation_maps,
         derivations=derivation_maps, artifacts=artifact_maps, runs=run_maps,
+        aggregate_receipt_validator=lambda selected_snapshot, item: (
+            static_aggregate_receipt_valid(
+                bundle.store, selected_snapshot, item,
+                valid_ids=valid_aggregate_ids_by_snapshot.get(
+                    selected_snapshot, frozenset(),
+                ),
+            )
+        ),
     )
     correspondences = _correspondence_rows(
         bundle, dataset, feature_stages=selected_stages, graphs=graphs,

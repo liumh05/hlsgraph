@@ -23,6 +23,7 @@ from ..model import (
     ActionMaterialization,
     ArtifactRef,
     AuthorityClass,
+    Completeness,
     Derivation,
     DesignSnapshot,
     Diagnostic,
@@ -48,12 +49,18 @@ from ..model import (
     json_ready,
     reject_embedded_body_fields,
     stable_hash,
+    stable_id,
     utc_now,
 )
 from ..knowledge.supported_targets import canonical_supported_targets
 from ..knowledge.core import knowledge_activation_hash
 from ..runner.core import _consume_execution_authorization, RunnerProtocolError
 from ..runner.staging import StagingError, read_verified_file
+from ..static_aggregate import (
+    STANDARD_STATIC_AGGREGATE_PREDICATES,
+    StaticAggregateError,
+    verify_static_aggregate_receipts,
+)
 from ..version import SCHEMA_VERSION, SUPPORTED_GRAPH_SCHEMA_VERSIONS
 from .migrations import apply_migrations, migration_path
 
@@ -105,6 +112,14 @@ _TOOL_EVIDENCE_AUTHORITIES = frozenset({
     AuthorityClass.VERIFICATION_EVIDENCE,
     AuthorityClass.PHYSICAL_MEASUREMENT,
 })
+
+
+def _is_complete_standard_aggregate(value: Derivation) -> bool:
+    return (
+        value.predicate in STANDARD_STATIC_AGGREGATE_PREDICATES
+        and value.completeness == Completeness.COMPLETE
+        and value.value is not None
+    )
 
 
 DDL = """
@@ -225,6 +240,12 @@ CREATE TABLE IF NOT EXISTS runs (
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runs_snapshot_stage ON runs(snapshot_id, stage, status);
+CREATE TABLE IF NOT EXISTS index_commit_receipts (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  snapshot_id TEXT NOT NULL UNIQUE REFERENCES snapshots(id),
+  payload_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS execution_attestations (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
@@ -476,6 +497,7 @@ class LedgerStore:
             "variants", "predictions", "knowledge_rules", "entity_correspondences",
             "action_materializations", "knowledge_bindings", "knowledge_coverage",
             "execution_attestations", "execution_commit_receipts",
+            "index_commit_receipts",
         }
         if table not in allowed:
             raise StoreError(f"unsupported immutable table: {table}")
@@ -2407,9 +2429,25 @@ class LedgerStore:
         values: list[Derivation],
         *,
         future_observation_ids: frozenset[str] = frozenset(),
+        authorized_static_aggregate_ids: frozenset[str] = frozenset(),
     ) -> None:
         for item in values:
             item = self._revalidate_model(item, Derivation, "derivation")
+            if (
+                item.predicate in STANDARD_STATIC_AGGREGATE_PREDICATES
+                and item.completeness == Completeness.COMPLETE
+                and item.value is None
+            ):
+                raise StoreError(
+                    "a complete standard static aggregate must carry a "
+                    "known value; use missing or partial for unknown"
+                )
+            if (_is_complete_standard_aggregate(item)
+                    and item.id not in authorized_static_aggregate_ids):
+                raise StoreError(
+                    "complete standard static aggregates require a consumed "
+                    "pipeline index authorization"
+                )
             self._require_fact_authority(item.authority, f"derivation {item.id}")
             self._require_subject(connection, item.snapshot_id, item.subject_id)
             for reference in item.evidence_refs:
@@ -2466,6 +2504,192 @@ class LedgerStore:
             return [json.loads(row[0]) for row in connection.execute(
                 "SELECT payload_json FROM derivations WHERE snapshot_id=? ORDER BY id", (snapshot_id,)
             ).fetchall()]
+
+    @staticmethod
+    def _index_commit_receipt_row(
+        connection: sqlite3.Connection, snapshot_id: str,
+    ) -> sqlite3.Row | None:
+        """Return a receipt row, treating pre-receipt v0.3 ledgers as legacy."""
+
+        try:
+            return connection.execute(
+                "SELECT id,run_id,snapshot_id,payload_json "
+                "FROM index_commit_receipts WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).casefold():
+                raise
+            return None
+
+    def index_commit_receipt(self, snapshot_id: str) -> dict[str, Any] | None:
+        """Return the immutable public index receipt, if this snapshot has one."""
+
+        with self.read() as connection:
+            row = self._index_commit_receipt_row(connection, snapshot_id)
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                return None
+            return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _valid_static_aggregate_ids(
+        cls, connection: sqlite3.Connection, snapshot_id: str,
+    ) -> frozenset[str]:
+        """Revalidate the whole index receipt; any inconsistency fails closed."""
+
+        row = cls._index_commit_receipt_row(connection, snapshot_id)
+        if row is None:
+            return frozenset()
+        try:
+            from ..extract.index_authorization import INDEX_COMMIT_RECEIPT_CONTRACT
+
+            payload = json.loads(row["payload_json"])
+            if not isinstance(payload, dict):
+                return frozenset()
+            required_keys = frozenset({
+                "id", "protocol_version", "snapshot_id", "graph_hash",
+                "artifact_hashes", "standard_derivation_hashes",
+                "static_aggregate_receipt_hashes", "origin_manifest_sha256",
+                "run_id", "run_payload_sha256",
+            })
+            if set(payload) != required_keys:
+                return frozenset()
+            identity = dict(payload)
+            claimed_id = identity.pop("id")
+            if (
+                payload["protocol_version"] != INDEX_COMMIT_RECEIPT_CONTRACT
+                or claimed_id != stable_id("index_commit_receipt", identity)
+                or row["id"] != claimed_id
+                or row["run_id"] != payload["run_id"]
+                or row["snapshot_id"] != snapshot_id
+                or payload["snapshot_id"] != snapshot_id
+            ):
+                return frozenset()
+
+            run_row = connection.execute(
+                "SELECT payload_json FROM runs WHERE snapshot_id=? AND id=?",
+                (snapshot_id, payload["run_id"]),
+            ).fetchone()
+            if run_row is None:
+                return frozenset()
+            run = ToolRun.from_dict(json.loads(run_row[0]))
+            if (
+                run.stage != "index"
+                or str(run.status) not in {"succeeded", "cached"}
+                or stable_hash(json_ready(run)) != payload["run_payload_sha256"]
+            ):
+                return frozenset()
+
+            graph = cls._load_graph_from_connection(connection, snapshot_id)
+            if graph.graph_hash != payload["graph_hash"]:
+                return frozenset()
+            artifact_rows = connection.execute(
+                "SELECT a.payload_json FROM artifacts a "
+                "JOIN snapshot_artifacts sa ON a.id=sa.artifact_id "
+                "WHERE sa.snapshot_id=? ORDER BY a.id",
+                (snapshot_id,),
+            ).fetchall()
+            artifacts = [
+                ArtifactRef.from_dict(json.loads(item[0])) for item in artifact_rows
+            ]
+            actual_artifact_hashes = {
+                item.id: item.sha256 for item in artifacts
+            }
+            claimed_artifact_hashes = payload["artifact_hashes"]
+            if (
+                not isinstance(claimed_artifact_hashes, list)
+                or claimed_artifact_hashes != sorted(claimed_artifact_hashes)
+                or len(claimed_artifact_hashes)
+                != len({item[0] for item in claimed_artifact_hashes
+                        if isinstance(item, list) and len(item) == 2})
+                or any(
+                    not isinstance(item, list) or len(item) != 2
+                    or actual_artifact_hashes.get(item[0]) != item[1]
+                    for item in claimed_artifact_hashes
+                )
+            ):
+                return frozenset()
+
+            derivation_rows = connection.execute(
+                "SELECT payload_json FROM derivations "
+                "WHERE snapshot_id=? ORDER BY id",
+                (snapshot_id,),
+            ).fetchall()
+            aggregates = [
+                Derivation.from_dict(json.loads(item[0]))
+                for item in derivation_rows
+            ]
+            aggregates = [
+                item for item in aggregates
+                if _is_complete_standard_aggregate(item)
+            ]
+            actual_derivation_hashes = [
+                [item.id, stable_hash(json_ready(item))] for item in aggregates
+            ]
+            if actual_derivation_hashes != payload["standard_derivation_hashes"]:
+                return frozenset()
+
+            verified_receipts = verify_static_aggregate_receipts(
+                graph, aggregates, artifacts,
+            )
+            if set(verified_receipts) != {item.id for item in aggregates}:
+                return frozenset()
+            actual_receipt_hashes: list[list[str]] = []
+            for item in aggregates:
+                receipt = verified_receipts[item.id]
+                actual_receipt_hashes.append([
+                    receipt.id, stable_hash(json_ready(receipt)),
+                ])
+            actual_receipt_hashes.sort()
+            if actual_receipt_hashes != payload["static_aggregate_receipt_hashes"]:
+                return frozenset()
+            return frozenset(item.id for item in aggregates)
+        except (
+            KeyError, TypeError, ValueError, json.JSONDecodeError,
+            sqlite3.DatabaseError, StoreError, StaticAggregateError,
+        ):
+            return frozenset()
+
+    def valid_static_aggregate_ids(self, snapshot_id: str) -> frozenset[str]:
+        """Return complete standard aggregates closed by the index receipt."""
+
+        with self.read() as connection:
+            return self._valid_static_aggregate_ids(connection, snapshot_id)
+
+    def static_aggregate_receipt_valid(
+        self, snapshot_id: str, derivation: Derivation | dict[str, Any],
+    ) -> bool:
+        """Return whether ``derivation`` is part of a fully valid index commit."""
+
+        try:
+            item = (
+                derivation if isinstance(derivation, Derivation)
+                else Derivation.from_dict(derivation)
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        if item.snapshot_id != snapshot_id or not _is_complete_standard_aggregate(item):
+            return False
+        with self.read() as connection:
+            valid_ids = self._valid_static_aggregate_ids(connection, snapshot_id)
+            if item.id not in valid_ids:
+                return False
+            row = connection.execute(
+                "SELECT payload_json FROM derivations "
+                "WHERE snapshot_id=? AND id=?",
+                (snapshot_id, item.id),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                stored = Derivation.from_dict(json.loads(row[0]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return False
+            return json_ready(stored) == json_ready(item)
 
     def _add_verifications(
         self,
@@ -2675,6 +2899,7 @@ class LedgerStore:
         verifications: list[VerificationResult],
         diagnostics: list[Diagnostic],
         materialization: ActionMaterialization | None = None,
+        index_authorization: object | None = None,
     ) -> None:
         """Atomically publish one successful canonical index result.
 
@@ -2714,6 +2939,37 @@ class LedgerStore:
                    *(item.id for item in diagnostics)]
         if len(all_ids) != len(set(all_ids)):
             raise StoreError("index batch contains duplicate evidence identifiers")
+        complete_aggregate_ids = frozenset(
+            item.id for item in derivations
+            if _is_complete_standard_aggregate(item)
+        )
+        authorization_payload: dict[str, Any] | None = None
+        if complete_aggregate_ids:
+            if index_authorization is None:
+                raise StoreError(
+                    "complete standard static aggregates require a pipeline "
+                    "index authorization"
+                )
+            try:
+                from ..extract.index_authorization import (
+                    IndexAuthorizationError,
+                    _consume_index_authorization,
+                )
+
+                authorization_payload = _consume_index_authorization(
+                    index_authorization, graph, derivations,
+                    self.artifacts(snapshot_id),
+                )
+            except (
+                IndexAuthorizationError, StaticAggregateError,
+                KeyError, TypeError, ValueError,
+            ) as exc:
+                raise StoreError(f"invalid pipeline index authorization: {exc}") from exc
+        elif index_authorization is not None:
+            raise StoreError(
+                "pipeline index authorization supplied without a complete "
+                "standard static aggregate"
+            )
         with self.write() as connection:
             self._save_graph(connection, graph)
             self._add_run(
@@ -2721,7 +2977,10 @@ class LedgerStore:
                 future_diagnostic_ids=diagnostic_ids,
             )
             self._add_observations(connection, observations)
-            self._add_derivations(connection, derivations)
+            self._add_derivations(
+                connection, derivations,
+                authorized_static_aggregate_ids=complete_aggregate_ids,
+            )
             self._add_verifications(
                 connection, verifications,
                 future_evidence_ids=verification_ids | diagnostic_ids,
@@ -2730,7 +2989,82 @@ class LedgerStore:
             if materialization is not None:
                 self._add_materializations(connection, [materialization])
             self._add_run(connection, run)
+            if authorization_payload is not None:
+                self._add_index_commit_receipt(
+                    connection, run, authorization_payload,
+                )
             self._set_active_snapshot(connection, project_id, snapshot_id)
+
+    def _add_index_commit_receipt(
+        self,
+        connection: sqlite3.Connection,
+        run: ToolRun,
+        authorization_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the public half of a consumed pipeline index capability."""
+
+        from ..extract.index_authorization import build_index_commit_receipt
+
+        receipt = build_index_commit_receipt(
+            authorization_payload,
+            run_id=run.id,
+            run_payload_sha256=stable_hash(json_ready(run)),
+        )
+        payload = self._payload(receipt)
+        previous = connection.execute(
+            "SELECT id,payload_json FROM index_commit_receipts "
+            "WHERE run_id=? OR snapshot_id=?",
+            (run.id, run.snapshot_id),
+        ).fetchone()
+        if previous is not None:
+            try:
+                previous_payload = json.loads(previous["payload_json"])
+                previous_identity = dict(previous_payload)
+                previous_id = previous_identity.pop("id")
+                previous_core = {
+                    key: value for key, value in previous_payload.items()
+                    if key not in {
+                        "id", "run_id", "run_payload_sha256", "artifact_hashes",
+                    }
+                }
+                current_core = {
+                    key: value for key, value in authorization_payload.items()
+                    if key != "artifact_hashes"
+                }
+                previous_artifacts = dict(previous_payload["artifact_hashes"])
+                current_artifacts = dict(authorization_payload["artifact_hashes"])
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise StoreError(
+                    "stored index commit receipt is not canonical JSON"
+                ) from exc
+            if (
+                previous["id"] != previous_id
+                or previous_id != stable_id(
+                    "index_commit_receipt", previous_identity,
+                )
+                or previous_core != current_core
+                or any(
+                    current_artifacts.get(identifier) != digest
+                    for identifier, digest in previous_artifacts.items()
+                )
+            ):
+                raise StoreError(
+                    "immutable index commit receipt changed for run or snapshot"
+                )
+            # A deterministic re-index may produce a new bookkeeping run for
+            # the same immutable snapshot.  The first receipt remains the
+            # snapshot's content commitment; later identical authorizations
+            # neither replace it nor create competing truth.
+            return previous_payload
+        if not self._immutable_payload(
+            connection, "index_commit_receipts", receipt["id"], payload,
+        ):
+            connection.execute(
+                "INSERT INTO index_commit_receipts("
+                "id,run_id,snapshot_id,payload_json) VALUES(?,?,?,?)",
+                (receipt["id"], run.id, run.snapshot_id, payload),
+            )
+        return receipt
 
     def commit_index_failure(
         self, *, run: ToolRun, diagnostics: list[Diagnostic],

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from ..bundle import GraphBundle
 from ..evidence_policy import (
@@ -28,7 +28,15 @@ from ..run_projection import (
     public_identifier_list, public_sha256, public_timestamp,
     sanitize_run_metadata,
 )
-from ..query import managed_artifact_integrity, static_feature_predicate_allowed
+from ..query import (
+    managed_artifact_integrity,
+    static_aggregate_receipt_valid,
+    static_feature_predicate_allowed,
+)
+from ..static_aggregate import (
+    STANDARD_STATIC_AGGREGATE_PREDICATES,
+    static_aggregate_receipt_required,
+)
 from ..version import FEATURE_SCHEMA_VERSION, SCHEMA_VERSION
 
 
@@ -686,6 +694,9 @@ def _feature_evidence_rows(
     derivations: Mapping[str, Mapping[str, Mapping[str, Any]]],
     artifacts: Mapping[str, Mapping[str, Any]],
     runs: Mapping[str, Mapping[str, Any]],
+    aggregate_receipt_validator: (
+        Callable[[str, Mapping[str, Any]], bool] | None
+    ) = None,
 ) -> list[dict[str, Any]]:
     selected_predicates = set(dataset.feature_evidence_predicates)
     if not selected_predicates:
@@ -700,6 +711,42 @@ def _feature_evidence_rows(
         )
     selected_keys: set[tuple[str, str]] = set()
     included_keys: set[tuple[str, str]] = set()
+
+    def aggregate_valid(snapshot_id: str, item: Mapping[str, Any]) -> bool:
+        if not static_aggregate_receipt_required(item):
+            return True
+        if aggregate_receipt_validator is None:
+            return False
+        try:
+            return aggregate_receipt_validator(snapshot_id, item) is True
+        except Exception:
+            return False
+
+    def evidence_chain_valid(
+        snapshot_id: str, derivation_id: str,
+        visiting: frozenset[tuple[str, str]] = frozenset(),
+    ) -> bool:
+        key = (snapshot_id, derivation_id)
+        if key in visiting:
+            return False
+        item = derivations.get(snapshot_id, {}).get(derivation_id)
+        if (
+            item is None
+            or str(item.get("completeness")) != "complete"
+            or item.get("value") is None
+            or not aggregate_valid(snapshot_id, item)
+        ):
+            return False
+        next_visiting = visiting | {key}
+        for ref in item.get("evidence_refs", []):
+            if not isinstance(ref, Mapping) or str(ref.get("kind")) != "derivation":
+                continue
+            child_snapshot = str(ref.get("snapshot_id") or snapshot_id)
+            if not evidence_chain_valid(
+                child_snapshot, str(ref.get("target_id")), next_visiting,
+            ):
+                return False
+        return True
 
     def include(snapshot_id: str, derivation_id: str, *, selected: bool) -> None:
         key = (snapshot_id, derivation_id)
@@ -738,23 +785,47 @@ def _feature_evidence_rows(
         item = derivations[snapshot_id][derivation_id]
         refs = [dict(value) for value in item.get("evidence_refs", [])]
         completeness = str(item.get("completeness"))
-        rows.append({
+        receipt_chain_valid = evidence_chain_valid(snapshot_id, derivation_id)
+        aggregate_receipt_valid = (
+            aggregate_valid(snapshot_id, item)
+            if static_aggregate_receipt_required(item)
+            else None
+        )
+        withhold_value = (
+            aggregate_receipt_valid is False
+            or (
+                completeness == "complete"
+                and item.get("value") is not None
+                and not receipt_chain_valid
+            )
+        )
+        row = {
             "snapshot_id": snapshot_id,
             "subject_id": item.get("subject_id"),
             "predicate": item.get("predicate"),
-            "value": _static_evidence_value(item.get("value")),
+            "value": (
+                _static_evidence_value(item.get("value"))
+                if not withhold_value else None
+            ),
             "unit": item.get("unit"),
             "stage": item.get("stage"),
             "authority": str(item.get("authority")),
             "completeness": completeness,
-            "mask": completeness == "complete" and item.get("value") is not None,
+            "mask": (
+                completeness == "complete"
+                and item.get("value") is not None
+                and receipt_chain_valid
+            ),
             "derivation_id": derivation_id,
             "algorithm": item.get("algorithm"),
             "algorithm_version": item.get("algorithm_version"),
             "selected_as_feature": (snapshot_id, derivation_id) in selected_keys,
             "evidence_ids": sorted({str(value.get("target_id")) for value in refs}),
             "evidence_refs": refs,
-        })
+        }
+        if aggregate_receipt_valid is not None:
+            row["aggregate_receipt_valid"] = aggregate_receipt_valid
+        rows.append(row)
     return rows
 
 
@@ -1151,11 +1222,33 @@ def export_dataset(bundle: GraphBundle, snapshot_id: str, output_dir: str | Path
         key: {item["node_id"] for item in node_rows if item["snapshot_id"] == key}
         for key in sorted(declared_snapshots)
     }
+    valid_aggregate_ids_by_snapshot: dict[str, frozenset[str]] = {}
+    aggregate_ids_reader = getattr(
+        bundle.store, "valid_static_aggregate_ids", None,
+    )
+    for key in sorted(graphs):
+        if not callable(aggregate_ids_reader):
+            valid_aggregate_ids_by_snapshot[key] = frozenset()
+            continue
+        try:
+            valid_aggregate_ids_by_snapshot[key] = frozenset(
+                aggregate_ids_reader(key)
+            )
+        except Exception:
+            valid_aggregate_ids_by_snapshot[key] = frozenset()
     feature_evidence_rows = _feature_evidence_rows(
         dataset, feature_stages=feature_stages, graphs=graphs,
         exported_node_ids=exported_node_ids_by_snapshot,
         observations=observation_maps, derivations=derivation_maps,
         artifacts=artifact_maps, runs=run_maps,
+        aggregate_receipt_validator=lambda selected_snapshot, item: (
+            static_aggregate_receipt_valid(
+                bundle.store, selected_snapshot, item,
+                valid_ids=valid_aggregate_ids_by_snapshot.get(
+                    selected_snapshot, frozenset(),
+                ),
+            )
+        ),
     )
     correspondence_rows = _correspondence_rows(
         bundle, dataset, feature_stages=feature_stages, graphs=graphs,

@@ -1937,9 +1937,6 @@ def _audit_citation_evidence_mapping(
                 and isinstance(row.get("section"), str)
             ]
             aliases = {
-                "Memory Access and Addressing Instructions": (
-                    "memory-access-and-addressing-operations"
-                ),
                 "Blocks and Regions": "blocks",
             }
             anchors = {

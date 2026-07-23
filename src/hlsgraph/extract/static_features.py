@@ -25,7 +25,7 @@ from ..model import (
 from .base import ExtractionResult
 
 
-ALGORITHM_VERSION = "1"
+ALGORITHM_VERSION = "2"
 
 _SCOPE_KINDS = frozenset({
     "hls.kernel", "hls.function", "hls.loop", "hls.process", "hls.region",
@@ -42,6 +42,7 @@ _BASE_PREDICATES = (
     "feature.memory_access",
 )
 _LOOP_PREDICATES = ("feature.trip_count", "feature.loop_bounds")
+_MLIR_LOOP_OPERATIONS = frozenset({"affine.for", "scf.for", "hls.loop"})
 _SOFTWARE_CALL_PREDICATE = "feature.software_call_targets"
 _STAGE_RANK = {
     Stage.SOURCE.value: 0,
@@ -70,6 +71,10 @@ _LLVM_MEMORY_ACCESS_KINDS = {
     "atomicrmw": "atomic",
     "cmpxchg": "atomic",
     "fence": "ordering",
+}
+_STATIC_FEATURE_DOMAIN_CONTRACTS = {
+    ("ir.mlir_text", "3"): "hlsgraph.ir.mlir_text.static_feature_domain.v1",
+    ("ir.llvm_text", "2"): "hlsgraph.ir.llvm_text.static_feature_domain.v1",
 }
 
 
@@ -212,14 +217,70 @@ def _scope_operations(
     )
 
 
-def _domain_complete(scope: Entity, truncated_artifacts: set[str]) -> bool:
+def _parser_domain_complete(entity: Entity) -> bool:
+    """Require the fixed text parser to issue an explicit coverage receipt.
+
+    ``Entity.completeness`` describes the entity record, not whether a text
+    parser understood every construct in the enclosing IR domain.  Aggregate
+    features therefore require a separate parser-issued contract whose
+    artifact identity is anchored by the entity itself.
+    """
+    parser = entity.attrs.get("static_feature_parser")
+    version = entity.attrs.get("static_feature_parser_version")
+    expected = _STATIC_FEATURE_DOMAIN_CONTRACTS.get((parser, version))
+    artifact_id = entity.attrs.get("static_feature_artifact_id")
+    artifact_sha256 = entity.attrs.get("static_feature_artifact_sha256")
+    layer_matches = (
+        parser == "ir.mlir_text"
+        and entity.stage == Stage.MLIR.value
+        and entity.kind.startswith("ir.mlir.")
+    ) or (
+        parser == "ir.llvm_text"
+        and entity.stage == Stage.LLVM.value
+        and entity.kind.startswith("ir.llvm.")
+    )
+    return bool(
+        expected is not None
+        and layer_matches
+        and entity.completeness == Completeness.COMPLETE
+        and entity.attrs.get("static_feature_domain_contract") == expected
+        and entity.attrs.get("static_feature_domain_complete") is True
+        and entity.attrs.get("static_feature_unparsed_construct_count") == 0
+        and isinstance(artifact_id, str)
+        and isinstance(artifact_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", artifact_sha256)
+        and any(anchor.artifact_id == artifact_id for anchor in entity.anchors)
+    )
+
+
+def _domain_complete(
+    scope: Entity,
+    operations: Iterable[Entity],
+    truncated_artifacts: set[str],
+) -> bool:
     if any(anchor.artifact_id in truncated_artifacts for anchor in scope.anchors):
         return False
-    if scope.kind.startswith("ir.llvm."):
-        return scope.completeness == Completeness.COMPLETE
-    if scope.stage in {Stage.MLIR.value, Stage.HLS_IR.value}:
-        return scope.attrs.get("static_feature_domain_complete") is True
-    return False
+    operation_values = list(operations)
+    if not _parser_domain_complete(scope):
+        return False
+    scope_identity = (
+        scope.attrs.get("static_feature_parser"),
+        scope.attrs.get("static_feature_parser_version"),
+        scope.attrs.get("static_feature_domain_contract"),
+        scope.attrs.get("static_feature_artifact_id"),
+        scope.attrs.get("static_feature_artifact_sha256"),
+    )
+    return all(
+        _parser_domain_complete(item)
+        and (
+            item.attrs.get("static_feature_parser"),
+            item.attrs.get("static_feature_parser_version"),
+            item.attrs.get("static_feature_domain_contract"),
+            item.attrs.get("static_feature_artifact_id"),
+            item.attrs.get("static_feature_artifact_sha256"),
+        ) == scope_identity
+        for item in operation_values
+    )
 
 
 def _histogram(values: Iterable[str]) -> dict[str, int]:
@@ -238,6 +299,32 @@ def _known_or_missing(value: dict[str, int], *, complete_domain: bool,
         # explicit contract, so the scope is not certified empty.
         return None, Completeness.PARTIAL
     return None, Completeness.MISSING
+
+
+def _require_aggregate_qualification(
+    value: dict[str, int] | None,
+    completeness: Completeness,
+    metadata: dict[str, Any],
+    *,
+    proof_key: str,
+    observed_items: bool,
+) -> tuple[dict[str, int] | None, Completeness]:
+    """Make an adapter qualification failure affect the public feature mask.
+
+    The qualification metadata is evidence, not decoration.  If the
+    predicate-specific adapter cannot prove its complete schema/domain, an
+    observed non-empty count may remain partial evidence, while an empty count
+    becomes unknown rather than numeric zero.
+    """
+    if (completeness != Completeness.COMPLETE
+            or metadata.get(proof_key) is True):
+        return value, completeness
+    if value:
+        return value, Completeness.PARTIAL
+    return (
+        None,
+        Completeness.PARTIAL if observed_items else Completeness.MISSING,
+    )
 
 
 def _operation_name(operation: Entity) -> str | None:
@@ -479,10 +566,11 @@ def _loop_fact(
     if key == "loop_bounds" and not isinstance(value, dict):
         return None, Completeness.MISSING, owners
     def complete_owner(item: Entity) -> bool:
-        return (
-            item.completeness == Completeness.COMPLETE
-            or item.attrs.get("static_feature_domain_complete") is True
-        )
+        # Source syntax can provide useful bounds evidence but cannot prove an
+        # exact dynamic trip count: the body may break, return, mutate the
+        # induction variable, or trigger integer wraparound.  Only a complete
+        # versioned IR parser domain can upgrade loop facts to consumable truth.
+        return _parser_domain_complete(item)
 
     complete = all(complete_owner(item) for item in owners) and complete_owner(scope)
     return value, (Completeness.COMPLETE if complete else Completeness.PARTIAL), owners
@@ -557,7 +645,13 @@ def derive_static_features(result: ExtractionResult) -> None:
             if item.kind in _SCOPE_KINDS
             or (
                 item.kind == "ir.mlir.operation"
-                and any(key in item.attrs for key in ("trip_count", "loop_bounds"))
+                and (
+                    item.attrs.get("operation") in _MLIR_LOOP_OPERATIONS
+                    or any(
+                        key in item.attrs
+                        for key in ("trip_count", "loop_bounds")
+                    )
+                )
             )
         ),
         key=lambda item: item.id,
@@ -566,7 +660,9 @@ def derive_static_features(result: ExtractionResult) -> None:
         operations, operation_entities, operation_relations = _scope_operations(
             scope.id, closure_ids, parent, graph.entities, mappings,
         )
-        complete_domain = _domain_complete(scope, truncated_artifacts)
+        complete_domain = _domain_complete(
+            scope, operations, truncated_artifacts,
+        )
 
         operation_names = [
             value for item in operations
@@ -579,14 +675,22 @@ def derive_static_features(result: ExtractionResult) -> None:
                              and len(operation_names) == len(operations)),
             observed_items=bool(operations),
         )
+        operation_metadata = _operation_histogram_metadata(
+            operations, operation_completeness,
+        )
+        operation_value, operation_completeness = (
+            _require_aggregate_qualification(
+                operation_value, operation_completeness, operation_metadata,
+                proof_key="operation_histogram_domain_complete",
+                observed_items=bool(operations),
+            )
+        )
         if (scope.id, _BASE_PREDICATES[0]) not in existing:
             _append_derivation(
                 result, scope, _BASE_PREDICATES[0], operation_value,
                 operation_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_ir_operation_entities",
-                metadata=_operation_histogram_metadata(
-                    operations, operation_completeness,
-                ),
+                metadata=operation_metadata,
             )
 
         index_histogram = _histogram(
@@ -596,15 +700,21 @@ def derive_static_features(result: ExtractionResult) -> None:
             index_histogram, complete_domain=complete_domain,
             observed_items=False,
         )
+        index_metadata = _llvm_feature_histogram_metadata(
+            _BASE_PREDICATES[1], index_value, operations,
+            operation_entities, index_completeness,
+        )
+        index_value, index_completeness = _require_aggregate_qualification(
+            index_value, index_completeness, index_metadata,
+            proof_key="index_histogram_domain_complete",
+            observed_items=bool(operations),
+        )
         if (scope.id, _BASE_PREDICATES[1]) not in existing:
             _append_derivation(
                 result, scope, _BASE_PREDICATES[1], index_value,
                 index_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_constant_and_dynamic_index_operands",
-                metadata=_llvm_feature_histogram_metadata(
-                    _BASE_PREDICATES[1], index_value, operations,
-                    operation_entities, index_completeness,
-                ),
+                metadata=index_metadata,
             )
 
         bitwidth_entities: dict[str, Entity] = {
@@ -630,16 +740,24 @@ def derive_static_features(result: ExtractionResult) -> None:
             bitwidth_histogram, complete_domain=complete_domain,
             observed_items=False,
         )
+        bitwidth_metadata = _llvm_feature_histogram_metadata(
+            _BASE_PREDICATES[2], bitwidth_value, operations,
+            bitwidth_entities.values(), bitwidth_completeness,
+        )
+        bitwidth_value, bitwidth_completeness = (
+            _require_aggregate_qualification(
+                bitwidth_value, bitwidth_completeness, bitwidth_metadata,
+                proof_key="bitwidth_domain_complete",
+                observed_items=bool(bitwidth_entities),
+            )
+        )
         if (scope.id, _BASE_PREDICATES[2]) not in existing:
             _append_derivation(
                 result, scope, _BASE_PREDICATES[2], bitwidth_value,
                 bitwidth_completeness, bitwidth_entities.values(),
                 bitwidth_relations.values(),
                 semantic="histogram_of_explicit_integer_type_width_occurrences",
-                metadata=_llvm_feature_histogram_metadata(
-                    _BASE_PREDICATES[2], bitwidth_value, operations,
-                    bitwidth_entities.values(), bitwidth_completeness,
-                ),
+                metadata=bitwidth_metadata,
             )
 
         memory_histogram = _histogram(
@@ -650,15 +768,21 @@ def derive_static_features(result: ExtractionResult) -> None:
             memory_histogram, complete_domain=complete_domain,
             observed_items=False,
         )
+        memory_metadata = _llvm_feature_histogram_metadata(
+            _BASE_PREDICATES[3], memory_value, operations,
+            operation_entities, memory_completeness,
+        )
+        memory_value, memory_completeness = _require_aggregate_qualification(
+            memory_value, memory_completeness, memory_metadata,
+            proof_key="memory_access_domain_complete",
+            observed_items=bool(operations),
+        )
         if (scope.id, _BASE_PREDICATES[3]) not in existing:
             _append_derivation(
                 result, scope, _BASE_PREDICATES[3], memory_value,
                 memory_completeness, operation_entities, operation_relations,
                 semantic="histogram_of_explicit_ir_memory_access_kinds",
-                metadata=_llvm_feature_histogram_metadata(
-                    _BASE_PREDICATES[3], memory_value, operations,
-                    operation_entities, memory_completeness,
-                ),
+                metadata=memory_metadata,
             )
 
         if (scope.kind in {"hls.kernel", "hls.function"}
@@ -695,7 +819,13 @@ def derive_static_features(result: ExtractionResult) -> None:
             scope.kind == "hls.loop"
             or (
                 scope.kind == "ir.mlir.operation"
-                and any(key in scope.attrs for key in ("trip_count", "loop_bounds"))
+                and (
+                    scope.attrs.get("operation") in _MLIR_LOOP_OPERATIONS
+                    or any(
+                        key in scope.attrs
+                        for key in ("trip_count", "loop_bounds")
+                    )
+                )
             )
         ):
             for predicate, key in zip(

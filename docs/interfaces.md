@@ -353,9 +353,15 @@ name inference.
 
 The indexer supplies built-in static feature derivations without consumer-side
 injection. Each selected feature-evidence row includes `algorithm`,
-`algorithm_version`, `stage`, `completeness`, `evidence_refs`, and `mask`. A
-`null` value is retained with `mask=false`; consumers must not coerce it to
-zero. `feature.software_call_targets` is an ML-only sorted unique `list[str]`
+`algorithm_version`, `stage`, `completeness`, `evidence_refs`, and `mask`.
+Protected canonical static derivations also include
+`aggregate_receipt_valid` whenever a complete value requires a receipt; a
+false value forces the projected value to `null` and the mask to false in SDK
+query, GraphRAG, JSONL/Parquet, and optional PyG output. This covers the
+MLIR/LLVM aggregates and any complete proven loop/dependence facts. Source-AST
+loop-header evidence remains partial. Consumers must not coerce a masked
+`null` to zero.
+`feature.software_call_targets` is an ML-only sorted unique `list[str]`
 of explicit software-call target entity IDs (`unit=entity_ids`) and must not be
 interpreted as HLS instance topology.
 

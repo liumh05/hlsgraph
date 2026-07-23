@@ -197,12 +197,12 @@ MODEL_INSPECTION_EXACT_PATHS = frozenset({
     "src/hlsgraph/retrieval.py",
     "src/hlsgraph/model.py",
     "src/hlsgraph/evidence_policy.py",
-    "src/hlsgraph/run_projection.py",
     "src/hlsgraph/runner/core.py",
     "src/hlsgraph/runner/staging.py",
     "src/hlsgraph/store/migrations.py",
     "src/hlsgraph/store/sqlite.py",
     "src/hlsgraph/extract/base.py",
+    "src/hlsgraph/extract/index_authorization.py",
     "src/hlsgraph/extract/directives.py",
     "src/hlsgraph/extract/directive_identity.py",
     "src/hlsgraph/extract/directive_replay.py",
@@ -213,6 +213,7 @@ MODEL_INSPECTION_EXACT_PATHS = frozenset({
     "src/hlsgraph/extract/static_features.py",
     "src/hlsgraph/extract/vitis.py",
     "src/hlsgraph/extract/vivado.py",
+    "src/hlsgraph/static_aggregate.py",
 })
 # The result/evidence schemas remain mandatory, immutable snapshot inputs and
 # are validated by the trusted runner.  The model sees the corresponding
@@ -536,9 +537,6 @@ _GITHUB_DOCUMENT_SOURCES = {
     ),
 }
 _GITHUB_SECTION_ANCHOR_ALIASES = {
-    "Memory Access and Addressing Instructions": (
-        "memory-access-and-addressing-operations"
-    ),
     "Blocks and Regions": "blocks",
 }
 _AMD_ID_RE = re.compile(r"[A-Za-z0-9_~-]+")

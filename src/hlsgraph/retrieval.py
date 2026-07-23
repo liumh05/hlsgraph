@@ -48,6 +48,10 @@ from .model import (
     AuthorityClass, Entity, hash_artifact_bytes, json_ready,
     reject_embedded_body_fields, stable_hash, stable_id,
 )
+from .static_aggregate import (
+    STANDARD_STATIC_AGGREGATE_PREDICATES,
+    static_aggregate_receipt_required,
+)
 from .version import RETRIEVAL_PROFILE_SCHEMA_VERSION, SCHEMA_VERSION
 
 
@@ -1249,6 +1253,88 @@ class HybridRetriever:
         self.adapters = tuple(adapters)
         self._directive_replay_cache: tuple[str, DirectiveReplayIndex] | None = None
 
+    def _valid_static_aggregate_ids(self) -> frozenset[str]:
+        """Read one fresh batch validation result for the pinned snapshot."""
+
+        bundle = getattr(self, "bundle", None)
+        reader = getattr(
+            getattr(bundle, "store", None),
+            "valid_static_aggregate_ids",
+            None,
+        )
+        if not callable(reader):
+            return frozenset()
+        try:
+            return frozenset(reader(getattr(self, "snapshot_id", "")))
+        except Exception:
+            return frozenset()
+
+    def _static_aggregate_receipt_valid(
+        self, derivation: Mapping[str, Any], *,
+        valid_ids: frozenset[str] | None = None,
+    ) -> bool:
+        """Require a store-revalidated receipt for canonical IR aggregates."""
+
+        if not static_aggregate_receipt_required(derivation):
+            return True
+        bundle = getattr(self, "bundle", None)
+        selected_snapshot = derivation.get("snapshot_id")
+        if (not isinstance(selected_snapshot, str)
+                or selected_snapshot != getattr(self, "snapshot_id", None)):
+            return False
+        if valid_ids is not None:
+            return str(derivation.get("id", "")) in valid_ids
+        validator = getattr(
+            getattr(bundle, "store", None),
+            "static_aggregate_receipt_valid",
+            None,
+        )
+        if not callable(validator):
+            return False
+        try:
+            return validator(selected_snapshot, derivation) is True
+        except Exception:
+            return False
+
+    def _derivation_receipt_chain_valid(
+        self,
+        derivation: Mapping[str, Any],
+        derivations: Mapping[str, Mapping[str, Any]],
+        *,
+        valid_ids: frozenset[str],
+        visiting: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Close complete derivations over every nested derivation receipt."""
+
+        identifier = str(derivation.get("id", ""))
+        if (
+            not identifier
+            or identifier in visiting
+            or str(derivation.get("completeness")) != "complete"
+            or derivation.get("value") is None
+            or not self._static_aggregate_receipt_valid(
+                derivation, valid_ids=valid_ids,
+            )
+        ):
+            return False
+        evidence = derivation.get("evidence_refs")
+        if not isinstance(evidence, list) or not evidence:
+            return False
+        trail = visiting | {identifier}
+        for reference in evidence:
+            if not isinstance(reference, Mapping):
+                return False
+            if reference.get("snapshot_id") not in {None, self.snapshot_id}:
+                return False
+            if str(reference.get("kind", "")) != "derivation":
+                continue
+            child = derivations.get(str(reference.get("target_id", "")))
+            if child is None or not self._derivation_receipt_chain_valid(
+                child, derivations, valid_ids=valid_ids, visiting=trail,
+            ):
+                return False
+        return True
+
     def retrieve(self, spec: RetrievalSpec) -> RetrievalResult:
         started = perf_counter()
         snapshot_id = spec.snapshot_id or self.snapshot_id
@@ -1992,14 +2078,50 @@ class HybridRetriever:
                     ),
                 ))
             derivations = self.bundle.store.derivations(self.snapshot_id)
+            derivation_map = {
+                str(item.get("id", "")): item for item in derivations
+            }
+            valid_aggregate_ids = self._valid_static_aggregate_ids()
             for derivation in derivations:
                 subject_id = str(derivation.get("subject_id", ""))
                 if subject_id not in allowed_ids:
                     continue
                 identifier = str(derivation.get("id", ""))
                 predicate = str(derivation.get("predicate", "derivation.unknown"))
+                receipt_required = static_aggregate_receipt_required(
+                    derivation,
+                )
+                aggregate_receipt_valid = (
+                    self._static_aggregate_receipt_valid(
+                        derivation, valid_ids=valid_aggregate_ids,
+                    )
+                    if receipt_required else None
+                )
+                effective_completeness = str(
+                    derivation.get("completeness", "incomplete")
+                )
+                complete_value_claim = (
+                    effective_completeness == "complete"
+                    and derivation.get("value") is not None
+                )
+                evidence_chain_valid = (
+                    self._derivation_receipt_chain_valid(
+                        derivation, derivation_map,
+                        valid_ids=valid_aggregate_ids,
+                    )
+                    if complete_value_claim else None
+                )
+                withhold_value = (
+                    complete_value_claim and evidence_chain_valid is not True
+                )
+                if withhold_value:
+                    effective_completeness = "incomplete"
                 evidence_subjects[identifier] = subject_id
-                value = _text(derivation.get("value"), 300)
+                public_value = (
+                    None if withhold_value
+                    else derivation.get("value")
+                )
+                value = _text(public_value, 300)
                 fields = (
                     identifier, predicate,
                     str(derivation.get("algorithm", "")),
@@ -2020,15 +2142,25 @@ class HybridRetriever:
                     item=RetrievalItem(
                         record_id=identifier, plane="evidence", record_kind="derivation",
                         title=predicate,
-                        summary=(f"Deterministic derivation {predicate}={value} from "
-                                 "explicit evidence references."),
+                        summary=(
+                            f"Deterministic derivation {predicate}={value} from "
+                            "explicit evidence references."
+                            if not withhold_value
+                            else (
+                                f"Derivation {predicate} value withheld because "
+                                "its evidence chain is incomplete or contains an "
+                                "unavailable aggregate receipt."
+                            )
+                        ),
                         authority_class=str(derivation.get("authority", "derived_fact")),
                         stage=str(derivation.get("stage", "unknown")),
-                        completeness=str(derivation.get("completeness", "incomplete")),
+                        completeness=effective_completeness,
                         entity_id=subject_id, evidence_ids=evidence_ids,
                         data={
                             "subject_id": subject_id, "predicate": predicate,
-                            "value": json_ready(derivation.get("value")),
+                            "value": json_ready(public_value),
+                            "aggregate_receipt_valid": aggregate_receipt_valid,
+                            "evidence_chain_valid": evidence_chain_valid,
                             "unit": derivation.get("unit"),
                             "algorithm": derivation.get("algorithm"),
                             "algorithm_version": derivation.get("algorithm_version"),
@@ -3022,9 +3154,20 @@ class HybridRetriever:
 
     def _context_derivation_evidence(
         self, context: dict[str, set[str]], derivation: Mapping[str, Any],
-        graph: CanonicalGraph, artifacts: Mapping[str, Any],
+        graph: CanonicalGraph, artifacts: Mapping[str, Any], *,
+        valid_aggregate_ids: frozenset[str] | None = None,
     ) -> None:
         """Qualify a derivation from its own typed evidence closure only."""
+        if valid_aggregate_ids is None:
+            valid_aggregate_ids = self._valid_static_aggregate_ids()
+        if (
+            str(derivation.get("completeness")) != "complete"
+            or derivation.get("value") is None
+            or not self._static_aggregate_receipt_valid(
+                derivation, valid_ids=valid_aggregate_ids,
+            )
+        ):
+            return
         identifier = derivation.get("id")
         if isinstance(identifier, str):
             self._context_add(context, "derivation_instance_id", identifier)
@@ -3070,7 +3213,7 @@ class HybridRetriever:
                 "feature.bitwidth", "feature.memory_access",
         } or derivation.get("algorithm") != (
             f"hlsgraph.static.{predicate.removeprefix('feature.')}"
-        ) or str(derivation.get("algorithm_version")) != "1"
+        ) or str(derivation.get("algorithm_version")) != "2"
                 or str(derivation.get("completeness")) != "complete"
                 or derivation.get("subject_id") not in evidence_entities):
             return
@@ -4908,6 +5051,10 @@ class HybridRetriever:
         artifacts = {item.id: item for item in self.bundle.store.artifacts(self.snapshot_id)}
         observations = self.bundle.store.observations(self.snapshot_id)
         derivations = self.bundle.store.derivations(self.snapshot_id)
+        derivation_map = {
+            str(item.get("id", "")): item for item in derivations
+        }
+        valid_aggregate_ids = self._valid_static_aggregate_ids()
         verifications = self.bundle.store.verifications(self.snapshot_id)
         needs_directive_replay = any(
             entity_id in allowed_ids and entity.kind == "hls.directive"
@@ -5057,6 +5204,19 @@ class HybridRetriever:
             predicate = derivation.get("predicate")
             if not isinstance(predicate, str):
                 continue
+            if (
+                str(derivation.get("completeness")) != "complete"
+                or derivation.get("value") is None
+                or not self._derivation_receipt_chain_valid(
+                    derivation, derivation_map,
+                    valid_ids=valid_aggregate_ids,
+                )
+            ):
+                # A graph-carried payload can reproduce the legacy derivation
+                # ID while changing its value or metadata.  Without the
+                # store-issued receipt, or without a complete value claim, this
+                # aggregate cannot create a binding context.
+                continue
             stage = derivation.get("stage")
             context = self._context_copy(
                 source_tool_context if stage == "source" else vendor_only
@@ -5073,6 +5233,7 @@ class HybridRetriever:
                         context[key] = {value.casefold()}
             self._context_derivation_evidence(
                 context, derivation, graph, artifacts,
+                valid_aggregate_ids=valid_aggregate_ids,
             )
             result[("predicate", predicate)].append(context)
 
@@ -5896,10 +6057,8 @@ class HybridRetriever:
                         )):
                     return False
             aggregate_feature = (
-                target_kind == "predicate" and target in {
-                    "feature.operation_histogram", "feature.index_histogram",
-                    "feature.bitwidth", "feature.memory_access",
-                }
+                target_kind == "predicate"
+                and target in STANDARD_STATIC_AGGREGATE_PREDICATES
             )
             if aggregate_feature and (
                 metadata.get("aggregate_evidence_recomputed") is not True
@@ -5927,7 +6086,7 @@ class HybridRetriever:
                         "hlsgraph.static.operation_histogram",
                     )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("derivation_algorithm_version"), "1"
+                            required.get("derivation_algorithm_version"), "2"
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("operation_histogram_provenance"),
@@ -5968,7 +6127,7 @@ class HybridRetriever:
                         "hlsgraph.static.index_histogram",
                     )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("derivation_algorithm_version"), "1"
+                            required.get("derivation_algorithm_version"), "2"
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("index_histogram_schema"),
@@ -5997,7 +6156,7 @@ class HybridRetriever:
                         "hlsgraph.static.bitwidth",
                     )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("derivation_algorithm_version"), "1"
+                            required.get("derivation_algorithm_version"), "2"
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("bitwidth_schema"),
@@ -6025,7 +6184,7 @@ class HybridRetriever:
                         "hlsgraph.static.memory_access",
                     )
                         or not HybridRetriever._constraint_mentions(
-                            required.get("derivation_algorithm_version"), "1"
+                            required.get("derivation_algorithm_version"), "2"
                         )
                         or not HybridRetriever._constraint_mentions(
                             required.get("memory_access_schema"),

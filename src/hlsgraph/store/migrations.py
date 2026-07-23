@@ -173,6 +173,12 @@ def _migrate_v02_to_v03(connection: sqlite3.Connection) -> None:
       payload_json TEXT NOT NULL
     )""")
     statements = (
+        """CREATE TABLE IF NOT EXISTS index_commit_receipts (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+          snapshot_id TEXT NOT NULL UNIQUE REFERENCES snapshots(id),
+          payload_json TEXT NOT NULL
+        )""",
         """CREATE TABLE IF NOT EXISTS execution_attestations (
           id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
@@ -213,6 +219,9 @@ def _migrate_v02_to_v03(connection: sqlite3.Connection) -> None:
     )
     for statement in statements:
         connection.execute(statement)
+    _require_columns(connection, "index_commit_receipts", frozenset({
+        "id", "run_id", "snapshot_id", "payload_json",
+    }))
     _require_columns(connection, "execution_attestations", frozenset({
         "id", "run_id", "snapshot_id", "payload_json",
     }))

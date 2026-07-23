@@ -59,6 +59,11 @@ class ExtractionResult:
     artifact_semantic_claims: list[ArtifactSemanticClaim] = field(default_factory=list)
     coverage: dict[str, Any] = field(default_factory=dict)
     capabilities: list[str] = field(default_factory=list)
+    # Process-local proof of which live extractor produced each graph record.
+    # It is deliberately non-serializable and is consumed once by Project.index.
+    _index_origin_capability: object | None = field(
+        default=None, repr=False,
+    )
 
 
 @runtime_checkable
@@ -114,16 +119,24 @@ class ExtractionPipeline:
         return []
 
     def run(self, context: ExtractionContext) -> ExtractionResult:
+        from .index_authorization import (
+            _issue_origin_capability,
+            _new_origin_accumulator,
+            _record_extractor_result,
+        )
+
         merged = ExtractionResult(graph=CanonicalGraph(snapshot_id=context.snapshot.id))
+        origin_accumulator = _new_origin_accumulator(context.snapshot.id)
         semantic_attestations: dict[str, ArtifactSemanticAttestation] = {}
         for position, extractor in enumerate(self.extractors):
             if not extractor.supports(context):
                 continue
             try:
+                runtime_extractor_identity = self._identity(extractor)
                 extractor_identity = (
                     self.extractor_identities[position]
                     if self.extractor_identities is not None
-                    else self._identity(extractor)
+                    else runtime_extractor_identity
                 )
                 context.options["existing_graph"] = merged.graph
                 result = extractor.extract(context)
@@ -136,6 +149,11 @@ class ExtractionPipeline:
                 attestations = self._attest_claims(
                     result, context=context, extractor=extractor,
                     extractor_identity=extractor_identity,
+                )
+                _record_extractor_result(
+                    origin_accumulator, result.graph,
+                    runtime_extractor_identity,
+                    extractor,
                 )
                 if result.graph.metadata:
                     merged.graph.metadata.setdefault("extractor_metadata", {})[extractor.name] = result.graph.metadata
@@ -186,5 +204,16 @@ class ExtractionPipeline:
                 json_ready(semantic_attestations[key])
                 for key in sorted(semantic_attestations)
             ]
+        from ..static_aggregate import (
+            STANDARD_STATIC_AGGREGATE_PREDICATES,
+        )
+        if any(
+            item.predicate in STANDARD_STATIC_AGGREGATE_PREDICATES
+            and str(item.completeness) == "complete"
+            for item in merged.derivations
+        ):
+            merged._index_origin_capability = _issue_origin_capability(
+                origin_accumulator, merged.graph,
+            )
         reject_embedded_body_fields(merged.graph.metadata, "merged extractor graph metadata")
         return merged

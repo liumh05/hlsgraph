@@ -17,11 +17,13 @@ from hlsgraph.extract import (
     LibClangExtractor,
     VitisReportExtractor,
 )
+from hlsgraph.extract.static_features import derive_static_features
 from hlsgraph.manifest import load_manifest, minimal_manifest
 from hlsgraph.model import (
     ArtifactRef, ArtifactSemanticAttestation, ArtifactSemanticClaim,
-    AuthorityClass, DatasetManifest, Entity, LanguageSpecCompatibility,
-    Relation, Stage, ToolchainContext, json_ready, stable_hash,
+    AuthorityClass, Completeness, DatasetManifest, Entity,
+    LanguageSpecCompatibility, Relation, SourceAnchor, Stage,
+    ToolchainContext, json_ready, stable_hash,
 )
 from hlsgraph.retrieval import HybridRetriever
 from hlsgraph.sdk import Project
@@ -127,6 +129,49 @@ def test_golden_fixture_preserves_planes_without_promoting_native_ssa_to_topolog
                      if item.kind == "cross.maps_to"]
     assert schedule_maps == []
     assert graph.by_kind("hls.scheduled_operation")
+
+
+def test_source_loop_headers_never_claim_exact_trip_truth(
+    tmp_path,
+) -> None:
+    if not LibClangExtractor.available():
+        pytest.skip("source loop evidence requires the standard libclang extractor")
+    (tmp_path / "kernel.cpp").write_text(
+        "void dut() {\n"
+        "  for (unsigned char i = 0; i < 300; ++i) {}\n"
+        "  for (int j = 0; j < 16; ++j) { break; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    project = Project(GraphBundle.create(
+        tmp_path,
+        minimal_manifest(
+            "test.source_loop_partial", "source loop partial",
+            "dut", "kernel.cpp",
+        ),
+    ))
+    result = project.index()
+    assert result.success
+    graph = project.service().graph()
+    loops = [
+        item for item in graph.entities.values()
+        if item.kind == "hls.loop"
+    ]
+    assert len(loops) == 2
+    for loop in loops:
+        rows = {
+            item["predicate"]: item
+            for item in project.feature_evidence(
+                loop.id,
+                predicates=["feature.trip_count", "feature.loop_bounds"],
+            )["items"]
+        }
+        assert rows["feature.trip_count"]["value"] in {16, 300}
+        assert rows["feature.trip_count"]["completeness"] == "partial"
+        assert rows["feature.trip_count"]["mask"] is False
+        assert "aggregate_receipt_valid" not in rows["feature.trip_count"]
+        assert rows["feature.loop_bounds"]["completeness"] == "partial"
+        assert rows["feature.loop_bounds"]["mask"] is False
 
 
 def test_missing_and_ambiguous_cross_layer_mappings_are_diagnostic_not_guessed(golden):
@@ -953,7 +998,13 @@ def test_static_features_are_scope_level_evidence_with_explicit_masks(golden):
     }
     assert all(llvm_rows[predicate]["completeness"] == "complete"
                for predicate in complete_llvm_predicates)
-    assert llvm_rows["feature.operation_histogram"]["metadata"] == {
+    llvm_operation_metadata = dict(
+        llvm_rows["feature.operation_histogram"]["metadata"]
+    )
+    llvm_operation_receipt = llvm_operation_metadata.pop(
+        "static_aggregate_receipt"
+    )
+    assert llvm_operation_metadata == {
         "operation_histogram_domain_complete": True,
         "operation_histogram_provenance": "typed_ir_entity_evidence.v1",
         "operation_histogram_qualification": "opcode_qualified",
@@ -961,7 +1012,16 @@ def test_static_features_are_scope_level_evidence_with_explicit_masks(golden):
         "semantic": "histogram_of_explicit_ir_operation_entities",
         "unknown_is_zero": False,
     }
-    assert all(item["algorithm_version"] == "1" for item in llvm_rows.values())
+    assert llvm_operation_receipt["contract"] == (
+        "hlsgraph.static_aggregate_receipt.v1"
+    )
+    assert llvm_operation_receipt["derivation_id"] == (
+        llvm_rows["feature.operation_histogram"]["id"]
+    )
+    assert llvm_operation_receipt["predicate"] == (
+        "feature.operation_histogram"
+    )
+    assert all(item["algorithm_version"] == "2" for item in llvm_rows.values())
     assert any(
         reference["kind"] == "relation"
         for item in llvm_rows.values() for reference in item["evidence_refs"]
@@ -997,6 +1057,9 @@ def test_static_features_are_scope_level_evidence_with_explicit_masks(golden):
         "comparison": "lt", "lower": 0, "step": 1, "upper": 16,
         "upper_inclusive": False,
     }
+    assert "static_aggregate_receipt" not in (
+        loop_rows["feature.trip_count"]["metadata"]
+    )
     assert loop_rows["feature.operation_histogram"]["value"] is None
     assert loop_rows["feature.operation_histogram"]["completeness"] == "missing"
     loop_query = project.feature_evidence(
@@ -1006,8 +1069,12 @@ def test_static_features_are_scope_level_evidence_with_explicit_masks(golden):
     masks = {item["predicate"]: item["mask"] for item in loop_query["items"]}
     assert masks == {
         "feature.operation_histogram": False,
-        "feature.trip_count": True,
+        "feature.trip_count": False,
     }
+    assert "aggregate_receipt_valid" not in next(
+        item for item in loop_query["items"]
+        if item["predicate"] == "feature.trip_count"
+    )
 
     mlir_function = _by_name(graph, "ir.mlir.function", "dut")
     mlir_operation = project.feature_evidence(
@@ -1355,6 +1422,208 @@ entry:
     assert all(item["mask"] is True for item in exported_function)
 
 
+def test_quoted_llvm_ssa_result_is_included_in_complete_operation_domain(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.ll").write_text(
+        """define i32 @dut() {
+entry:
+  %"x y" = add i32 1, 2
+  ret i32 %"x y"
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.llvm_quoted_ssa", "LLVM quoted SSA", "dut", "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.ll", "kind": "ir.llvm", "role": "llvm_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    function = _by_name(graph, "ir.llvm.function", "dut")
+    row = project.feature_evidence(
+        function.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert row["value"] == {"add": 1, "ret": 1}
+    assert row["completeness"] == "complete"
+    assert row["mask"] is True
+    assert not [
+        item for item in project.bundle.store.diagnostics(result.snapshot_id)
+        if item.code == "llvm.static_feature_domain_incomplete"
+    ]
+
+
+def test_llvm_line_comments_cannot_inject_complete_static_features(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.ll").write_text(
+        """define i32 @dut() {
+entry:
+  %sum = add i32 1, 2 ; i777, call i32 @forged()
+  call void asm sideeffect "review i777", ""()
+  ret i32 %sum ; i999
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.llvm_comment_domain", "LLVM comment domain", "dut",
+        "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.ll", "kind": "ir.llvm", "role": "llvm_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    function = _by_name(
+        project.service().graph(), "ir.llvm.function", "dut",
+    )
+    rows = {
+        item["predicate"]: item
+        for item in project.feature_evidence(
+            function.id,
+            predicates=[
+                "feature.operation_histogram", "feature.bitwidth",
+            ],
+        )["items"]
+    }
+    assert rows["feature.operation_histogram"]["value"] == {
+        "add": 1, "call": 1, "ret": 1,
+    }
+    assert rows["feature.bitwidth"]["value"] == {"32": 3}
+    assert all(
+        item["mask"] is True
+        and item["aggregate_receipt_valid"] is True
+        for item in rows.values()
+    )
+
+
+def test_unclosed_llvm_function_cannot_receive_complete_receipt(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.ll").write_text(
+        "define i32 @dut() {\n"
+        "entry:\n"
+        "  %sum = add i32 1, 2\n"
+        "  ret i32 %sum\n",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.llvm_unclosed", "LLVM unclosed function", "dut", "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.ll", "kind": "ir.llvm", "role": "llvm_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    function = _by_name(
+        project.service().graph(), "ir.llvm.function", "dut",
+    )
+    row = project.feature_evidence(
+        function.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert row["value"] == {"add": 1, "ret": 1}
+    assert row["completeness"] == "partial"
+    assert row["mask"] is False
+    assert "aggregate_receipt_valid" not in row
+
+
+def test_nested_llvm_define_cannot_close_as_a_complete_domain(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.ll").write_text(
+        "define i32 @first() {\n"
+        "entry:\n"
+        "  ret i32 1\n"
+        "define i32 @dut() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.llvm_nested_define", "LLVM nested define", "dut",
+        "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.ll", "kind": "ir.llvm", "role": "llvm_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    llvm_functions = [
+        item for item in graph.entities.values()
+        if item.kind == "ir.llvm.function"
+    ]
+    assert llvm_functions
+    for function in llvm_functions:
+        row = project.feature_evidence(
+            function.id, predicates=["feature.operation_histogram"],
+        )["items"][0]
+        assert row["completeness"] in {"partial", "missing"}
+        assert row["mask"] is False
+        assert "aggregate_receipt_valid" not in row
+
+
+def test_missing_llvm_adapter_fields_cannot_become_complete_empty_counts() -> None:
+    snapshot_id = "snapshot.s09_adapter_fields"
+    artifact_id = "artifact.s09_adapter_fields"
+    domain = {
+        "static_feature_domain_complete": True,
+        "static_feature_domain_contract": (
+            "hlsgraph.ir.llvm_text.static_feature_domain.v1"
+        ),
+        "static_feature_parser": "ir.llvm_text",
+        "static_feature_parser_version": "2",
+        "static_feature_unparsed_construct_count": 0,
+        "static_feature_artifact_id": artifact_id,
+        "static_feature_artifact_sha256": "a" * 64,
+    }
+    graph = CanonicalGraph(snapshot_id)
+    function = graph.add_entity(Entity(
+        kind="ir.llvm.function", name="dut", snapshot_id=snapshot_id,
+        stage="llvm", attrs=dict(domain),
+        anchors=[SourceAnchor(artifact_id)],
+    ))
+    operation = graph.add_entity(Entity(
+        kind="ir.llvm.operation", name="getelementptr",
+        snapshot_id=snapshot_id, stage="llvm",
+        attrs={"opcode": "getelementptr", **domain},
+        anchors=[SourceAnchor(artifact_id)],
+    ))
+    graph.add_relation(Relation(
+        function.id, operation.id, "ir.contains", snapshot_id, stage="llvm",
+    ))
+    extraction = ExtractionResult(graph)
+    derive_static_features(extraction)
+    rows = {
+        item.predicate: item for item in extraction.derivations
+        if item.subject_id == function.id
+    }
+    for predicate, qualification in (
+        ("feature.index_histogram", "index_histogram_qualification"),
+        ("feature.memory_access", "memory_access_qualification"),
+    ):
+        assert rows[predicate].value is None
+        assert rows[predicate].completeness == Completeness.PARTIAL
+        assert rows[predicate].metadata[qualification] == "unknown_or_mixed"
+
+
 def test_supported_untruncated_mlir_is_a_complete_static_feature_domain(tmp_path):
     (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
     (tmp_path / "dut.mlir").write_text(
@@ -1415,11 +1684,13 @@ def test_supported_untruncated_mlir_is_a_complete_static_feature_domain(tmp_path
     }
     assert loop_rows["feature.trip_count"]["value"] == 4
     assert loop_rows["feature.trip_count"]["mask"] is True
+    assert loop_rows["feature.trip_count"]["aggregate_receipt_valid"] is True
     assert loop_rows["feature.loop_bounds"]["value"] == {
         "comparison": "lt", "lower": 0, "step": 2, "upper": 8,
         "upper_inclusive": False,
     }
     assert loop_rows["feature.loop_bounds"]["mask"] is True
+    assert loop_rows["feature.loop_bounds"]["aggregate_receipt_valid"] is True
 
     dataset = DatasetManifest(
         dataset_id="dataset.mlir_complete_features",
@@ -1441,6 +1712,290 @@ def test_supported_untruncated_mlir_is_a_complete_static_feature_domain(tmp_path
     assert any(item["subject_id"] == loop.id
                and item["predicate"] == "feature.trip_count"
                and item["mask"] is True for item in exported)
+
+
+def test_quoted_mlir_generic_operation_is_included_in_complete_domain(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.mlir").write_text(
+        """module {
+  "arith.addi"() : () -> ()
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.mlir_quoted_generic", "MLIR quoted generic", "dut",
+        "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.mlir", "kind": "ir.mlir", "role": "hls_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    module = next(
+        item for item in graph.entities.values()
+        if item.kind == "ir.mlir.module"
+    )
+    row = project.feature_evidence(
+        module.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert row["value"] == {"arith.addi": 1}
+    assert row["completeness"] == "complete"
+    assert row["mask"] is True
+    assert not [
+        item for item in project.bundle.store.diagnostics(result.snapshot_id)
+        if item.code == "mlir.static_feature_domain_incomplete"
+    ]
+
+
+def test_mlir_line_comments_cannot_inject_loop_facts_or_braces(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.mlir").write_text(
+        """module {
+  func.func @dut(%lb: index, %ub: index) {
+    scf.for %i = %lb to %ub {note = "%fake = 0 to 9 step 1", width = "i777"} { // %fake = 0 to 9 } i777
+      func.return // }
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.mlir_comment_domain", "MLIR comment domain", "dut",
+        "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.mlir", "kind": "ir.mlir", "role": "hls_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    function = _by_name(graph, "ir.mlir.function", "dut")
+    loop = next(
+        item for item in graph.entities.values()
+        if item.kind == "ir.mlir.operation"
+        and item.attrs.get("operation") == "scf.for"
+    )
+    loop_rows = {
+        item["predicate"]: item
+        for item in project.feature_evidence(
+            loop.id,
+            predicates=["feature.trip_count", "feature.loop_bounds"],
+        )["items"]
+    }
+    assert loop_rows["feature.trip_count"]["value"] is None
+    assert loop_rows["feature.trip_count"]["mask"] is False
+    assert loop_rows["feature.loop_bounds"]["value"] is None
+    assert loop_rows["feature.loop_bounds"]["mask"] is False
+    function_histogram = project.feature_evidence(
+        function.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert function_histogram["value"] == {
+        "func.func": 1, "func.return": 1, "scf.for": 1,
+    }
+    assert function_histogram["mask"] is True
+    assert function_histogram["aggregate_receipt_valid"] is True
+    loop_histogram = project.feature_evidence(
+        loop.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert loop_histogram["value"] == {
+        "func.return": 1, "scf.for": 1,
+    }
+    assert loop_histogram["mask"] is True
+    assert loop_histogram["aggregate_receipt_valid"] is True
+
+
+def test_mlir_ssa_def_use_is_lexically_scoped(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text(
+        "void nested() {}\n", encoding="utf-8",
+    )
+    (tmp_path / "dut.mlir").write_text(
+        """module {
+  handshake.func @first() {
+    %0 = handshake.constant
+    %1 = handshake.addi %0
+  }
+  handshake.func @second() {
+    %0 = handshake.constant
+    %1 = handshake.addi %0
+  }
+  func.func @nested(%lb: index, %ub: index) {
+    %0 = arith.constant 1 : i32
+    scf.for %i = %lb to %ub {
+      %0 = arith.constant 2 : i32
+      %1 = arith.addi %0, %0 : i32
+    }
+    %2 = arith.addi %0, %0 : i32
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.mlir_ssa_scope", "MLIR SSA scope", "nested", "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.mlir", "kind": "ir.mlir", "role": "hls_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    owner = {
+        relation.dst: relation.src
+        for relation in graph.relations.values()
+        if relation.kind == "ir.contains"
+    }
+    handshake_edges = [
+        relation for relation in graph.relations.values()
+        if relation.kind == "handshake.dataflow"
+    ]
+    assert len(handshake_edges) == 2
+    assert all(
+        owner[relation.src] == owner[relation.dst]
+        and graph.entities[owner[relation.src]].kind == "ir.mlir.function"
+        for relation in handshake_edges
+    )
+
+    nested_adds = sorted(
+        (
+            entity for entity in graph.entities.values()
+            if entity.kind == "ir.mlir.operation"
+            and entity.attrs.get("operation") == "arith.addi"
+        ),
+        key=lambda item: item.qualified_name or "",
+    )
+    assert len(nested_adds) == 2
+    uses = {
+        relation.dst: graph.entities[relation.src]
+        for relation in graph.relations.values()
+        if relation.kind == "ir.ssa_use"
+        and relation.dst in {item.id for item in nested_adds}
+    }
+    inner_add = next(
+        item for item in nested_adds
+        if graph.entities[owner[item.id]].attrs.get("operation") == "scf.for"
+    )
+    outer_add = next(
+        item for item in nested_adds
+        if graph.entities[owner[item.id]].kind == "ir.mlir.function"
+    )
+    assert graph.entities[owner[inner_add.id]].attrs["operation"] == "scf.for"
+    assert owner[uses[inner_add.id].id] == owner[inner_add.id]
+    assert graph.entities[owner[outer_add.id]].kind == "ir.mlir.function"
+    assert owner[uses[outer_add.id].id] == owner[outer_add.id]
+
+
+def test_mlir_function_declaration_does_not_capture_following_module_op(
+    tmp_path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text(
+        "void decl() {}\n", encoding="utf-8",
+    )
+    (tmp_path / "dut.mlir").write_text(
+        """module {
+  func.func private @decl(%arg0: i32) -> i32
+  %0 = arith.constant 1 : i32
+}
+""",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.mlir_declaration_scope", "MLIR declaration scope", "decl",
+        "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.mlir", "kind": "ir.mlir", "role": "hls_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    graph = project.service().graph()
+    module = next(
+        item for item in graph.entities.values()
+        if item.kind == "ir.mlir.module"
+    )
+    constant = next(
+        item for item in graph.entities.values()
+        if item.kind == "ir.mlir.operation"
+        and item.attrs.get("operation") == "arith.constant"
+    )
+    owner = next(
+        relation.src for relation in graph.relations.values()
+        if relation.kind == "ir.contains" and relation.dst == constant.id
+    )
+    assert owner == module.id
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "module {\n"
+            "  func.func @dut() {\n"
+            "    scf.execute_region { %0 = arith.constant 1 : i32\n"
+            "      scf.yield\n"
+            "    }\n"
+            "    func.return\n"
+            "  }\n"
+            "}\n"
+        ),
+        (
+            "module {\n"
+            "  func.func @dut() {\n"
+            "    %0 = arith.constant 1 : i32\n"
+        ),
+        (
+            "module {\n"
+            "  func.func @dut() {\n"
+            "    %0 = arith.constant 1 : i32\n"
+            "    func.return\n"
+            "  }\n"
+            "}\n"
+            "}\n"
+        ),
+    ],
+    ids=["inline-region-body", "unclosed-regions", "extra-close"],
+)
+def test_uncovered_mlir_structure_cannot_receive_complete_receipt(
+    tmp_path, body,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "dut.mlir").write_text(body, encoding="utf-8")
+    manifest = minimal_manifest(
+        "test.mlir_structure_incomplete", "MLIR structure incomplete",
+        "dut", "kernel.cpp",
+    )
+    manifest.artifact_paths.append({
+        "path": "dut.mlir", "kind": "ir.mlir", "role": "hls_ir",
+        "access": "project", "license": "Apache-2.0",
+    })
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    result = project.index(degraded=True)
+    assert result.success
+    function = _by_name(
+        project.service().graph(), "ir.mlir.function", "dut",
+    )
+    row = project.feature_evidence(
+        function.id, predicates=["feature.operation_histogram"],
+    )["items"][0]
+    assert row["completeness"] in {"partial", "missing"}
+    assert row["mask"] is False
+    assert "aggregate_receipt_valid" not in row
 
 
 def test_mlir_mapping_rules_close_only_to_source_ast_without_semantic_projection(
@@ -1700,7 +2255,7 @@ def test_mixed_ir_operation_histogram_has_no_qualified_schema() -> None:
         and item.predicate == "feature.operation_histogram"
     )
     assert histogram.value == {"add": 1, "arith.addi": 1}
-    assert histogram.completeness == "complete"
+    assert histogram.completeness == "partial"
     assert histogram.metadata["operation_histogram_qualification"] == (
         "unknown_or_mixed"
     )

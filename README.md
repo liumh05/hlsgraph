@@ -137,7 +137,13 @@ bitwidths, memory accesses, and software-call targets. Unknown values remain
 `null`/masked rather than becoming zero; dependence-distance rows receive a
 non-null value only when explicitly proven. These derivations cite entity,
 relation, and artifact evidence and never turn software calls or LLVM CFG into
-hardware topology.
+hardware topology. Complete operation/index/bitwidth/memory aggregates,
+trip counts, loop bounds, and proven dependence distances from supported
+complete IR domains are additionally recomputed and content-bound
+by an index receipt. Legacy, injected, or plugin-claimed values without that
+receipt remain only as incomplete provenance or partial evidence: they never
+receive a consumable mask, and a row that still claims `complete` has its value
+withheld by query, retrieval, JSONL, Parquet, and PyG.
 
 The fully supported v0.3 unit is one HLS kernel/component. Component/system entities, host code,
 multiple compute units, memory-bank connectivity, and accelerator runtime

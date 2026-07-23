@@ -533,7 +533,6 @@ _IR_SOURCES = (
     "src/hlsgraph/extract/llvm.py",
     "src/hlsgraph/extract/mlir.py",
     "src/hlsgraph/extract/source.py",
-    "src/hlsgraph/extract/static_features.py",
     "src/hlsgraph/graph.py",
     "src/hlsgraph/model.py",
     "src/hlsgraph/retrieval.py",
@@ -541,16 +540,19 @@ _IR_SOURCES = (
 
 _TOOL_SOURCES = (
     *projected_model_source_paths("tool_evidence"),
-    "src/hlsgraph/bundle.py",
     "src/hlsgraph/evidence_policy.py",
+    "src/hlsgraph/extract/base.py",
+    "src/hlsgraph/extract/index_authorization.py",
+    "src/hlsgraph/extract/llvm.py",
+    "src/hlsgraph/extract/mlir.py",
     "src/hlsgraph/extract/observation_replay.py",
+    "src/hlsgraph/extract/static_features.py",
     "src/hlsgraph/extract/vitis.py",
     "src/hlsgraph/extract/vivado.py",
     "src/hlsgraph/manifest.py",
-    "src/hlsgraph/model.py",
-    "src/hlsgraph/run_projection.py",
     "src/hlsgraph/runner/core.py",
     "src/hlsgraph/runner/staging.py",
+    "src/hlsgraph/static_aggregate.py",
     "src/hlsgraph/store/migrations.py",
     "src/hlsgraph/store/sqlite.py",
 )
@@ -581,7 +583,6 @@ SHARD_DEFINITIONS = (
         semantic_assertion_ids=(
             "S07.language_spec_contract_and_non_topology",
             "S08.cross_layer_mapping_unique_typed_anchored",
-            "S09.aggregate_static_feature_recomputation",
             "S10.retrieval_plane_isolation",
         ),
         adversarial_assertion_ids=(
@@ -589,7 +590,6 @@ SHARD_DEFINITIONS = (
             "A08.graph_metadata_semantic_attestation",
             "A09.llvm_cfg_software_call_handshake_topology_promotion",
             "A10.ambiguous_cross_layer_mapping_promotion",
-            "A11.aggregate_feature_spoof",
             "A12.retrieval_plane_rank_budget_pollution",
         ),
     ),
@@ -600,8 +600,10 @@ SHARD_DEFINITIONS = (
             "S04.fresh_real_run_authorization_receipt",
             "S05.canonical_report_artifact_single_anchor",
             "S06.requested_effective_achieved_stage_and_three_gate_separation",
+            "S09.aggregate_static_feature_recomputation",
         ),
         adversarial_assertion_ids=(
+            "A11.aggregate_feature_spoof",
             "A13.fabricated_sdk_toolrun_runner_receipt",
             "A14.one_use_authorization_or_receipt_replay",
             "A15.sibling_snapshot_run_stage_artifact_workload_reuse",
@@ -749,7 +751,7 @@ RULE_REFERENCE_SPECS = (
         "ir_semantics",
         _LLVM_BASE
         + "llvm/docs/LangRef.md#memory-access-and-addressing-operations",
-        "Memory Access and Addressing Instructions",
+        "Memory Access and Addressing Operations",
     ),
     _spec(
         f"llvm.ir.langref:git-{_LLVM_COMMIT}:"

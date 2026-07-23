@@ -3,7 +3,7 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
-## 0.3.0 — 2026-07-21
+## 0.3.0 — 2026-07-23
 
 Developer-preview retrieval and knowledge update:
 
@@ -22,6 +22,9 @@ Developer-preview retrieval and knowledge update:
 - add a private project-local knowledge sidecar and bounded, hash-revalidated
   source excerpts that never enter the canonical ledger, bundle, REST, or ML
   export; and
+- require authorized recomputation and immutable ledger receipts before a
+  canonical static aggregate can be exposed as complete, while incomplete
+  source/MLIR/LLVM domains remain masked; and
 - provide the explicit additive `0.2.0 -> 0.3.0` migration while preserving
   historical snapshot, entity, observation, artifact, run, and graph-hash
   semantics.

@@ -127,6 +127,20 @@ Deterministic computations are stored separately as `Derivation` records that
 name the algorithm/version and cite their input observation IDs. Verification
 results are also separate records.
 
+Seven protected canonical static derivations have an additional integrity
+boundary: operation, index, bitwidth, and memory-access histograms; trip count;
+loop bounds; and proven dependence distance. The extraction pipeline records
+the exact built-in MLIR/LLVM parser object that produced every cited
+entity/relation, recomputes the value from that closed evidence domain, and
+embeds a content-bound `StaticAggregateReceipt`. The atomic index transaction
+consumes a one-shot authorization and persists one immutable
+`IndexCommitReceipt` for the snapshot. This separate receipt is required
+because legacy `Derivation` IDs intentionally do not include mutable value and
+metadata fields. A same-named plugin is downgraded to partial/missing evidence
+before commit. A directly injected or stale row that still claims `complete`
+has no valid receipt; read surfaces retain its provenance, withhold the claimed
+value, mark it incomplete, and set its ML mask false.
+
 ### 4. Canonical Architecture Graph
 
 The graph is the bounded, agent-friendly projection of entities and explicit

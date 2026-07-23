@@ -174,6 +174,8 @@ both manifest and toolchain snapshot hashes.
 | `ObservationSource` | One canonical report commitment tying its artifact SHA-256 and fixed parser identity to the observation's predicate/value/unit payload. |
 | `EvidenceRef` | Typed reference to an observation, derivation, artifact, entity anchor, or explicit relation, with an explicit snapshot and optional anchor. |
 | `Derivation` | Recomputable deterministic output with algorithm/version and generic `EvidenceRef` inputs. Legacy observation-ID inputs normalize to evidence references without changing legacy stable IDs. |
+| `StaticAggregateReceipt` | Content commitment for one exactly recomputed complete built-in MLIR/LLVM aggregate, including its parser-domain proof and exact entity/relation/artifact evidence. |
+| `IndexCommitReceipt` | Immutable snapshot-level commitment proving that all complete standard aggregates entered through the pipeline's one-shot index authorization. |
 | `EntityCorrespondence` | Explicit evidence-backed entity mapping across snapshots, with mapping kind, producer/version, authority, and completeness. It never arises from name matching. |
 | `Diagnostic` | Structured extraction/tool health event with stage, severity, subject/artifact, and guidance. |
 | `VerificationResult` | Independent correctness evidence for a specific method and optional workload. |
@@ -249,10 +251,9 @@ Indexing derives versioned scope-level ML evidence directly from canonical
 entities and relations. The built-in predicates are
 `feature.operation_histogram`, `feature.index_histogram`,
 `feature.trip_count`, `feature.loop_bounds`, `feature.bitwidth`,
-`feature.memory_access`, and `feature.software_call_targets`.
-`feature.dependence_distance` has the same stable per-scope row contract, but
-its value remains `null` unless an entity or relation explicitly records a
-proven distance.
+`feature.memory_access`, `feature.dependence_distance`, and
+`feature.software_call_targets`. Dependence distance remains `null` unless an
+entity or relation explicitly records a proven distance.
 
 Static derivation evidence and normative guidance are separate contracts. In
 particular, the generic MLIR Regions rule does not prove
@@ -262,16 +263,26 @@ the v0.3 public knowledge inventory classifies their generic specification
 binding as `no_normative`.
 
 Every row records its algorithm/version, stage, authority, completeness, and
-typed evidence references. Unknown values are `null` with `missing` or
-`partial` completeness, and public query/ML projections set `mask=false`.
+typed evidence references. The seven protected canonical predicates—every
+predicate above except `feature.software_call_targets`—use static-feature
+algorithm version 2 and a parser-origin integrity boundary. A `complete`
+protected value is consumable only when its embedded `StaticAggregateReceipt`
+and the snapshot's immutable
+`IndexCommitReceipt` both revalidate against the stored graph and artifact
+hashes. A missing/invalid receipt withholds the public value, reports
+`aggregate_receipt_valid=false`, and sets `mask=false`. Unknown values are
+`null` with `missing` or `partial` completeness.
 Zero is never substituted for missing evidence. An empty histogram/map/list is
-valid only when a complete evidence plane proves the scope empty. The current
-text LLVM adapter can prove its directly contained operation plane complete
-unless it reports truncation. An untruncated MLIR artifact whose dialects all
-have registered adapters explicitly marks its static-feature domain complete;
-unsupported dialects and truncation keep that domain partial. Degraded source
-scanning never upgrades operation, bitwidth, memory, call, or loop facts to
-complete.
+valid only when a complete evidence plane proves the scope empty. The fixed
+LLVM text adapter proves completeness only when every relevant construct is in
+its supported instruction/module grammar and no truncation occurred. The fixed
+MLIR text adapter likewise requires supported dialects, single-line constructs
+covered by its grammar, and no truncation. Source-AST loop headers remain
+partial because syntax alone cannot prove that the body does not exit early,
+mutate the induction variable, or wrap its integer type. Unknown or multiline
+constructs, unsupported dialects, adapter-field gaps, and untrusted plugins
+keep the value partial/missing. Degraded source scanning never upgrades
+operation, bitwidth, memory, call, or loop facts to complete.
 
 Cross-plane evidence is followed only through `hls.contains`, `ir.contains`,
 and explicit `cross.maps_to`/`cross.projects_to` relations. No name matching is

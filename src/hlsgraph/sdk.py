@@ -302,6 +302,60 @@ class Project:
             "extraction_hash": extraction_hash,
             "extractor_identities": extractor_identities,
         })
+        index_authorization: object | None = None
+        if result._index_origin_capability is not None:
+            try:
+                from .extract.index_authorization import (
+                    _finalize_index_authorization,
+                )
+                (
+                    result.derivations,
+                    index_authorization,
+                    withheld_aggregates,
+                ) = _finalize_index_authorization(
+                    result._index_origin_capability,
+                    result.graph,
+                    result.derivations,
+                    context.artifacts,
+                )
+                if withheld_aggregates:
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=snapshot.id,
+                        code="static_feature.aggregate_receipt_withheld",
+                        severity=DiagnosticSeverity.WARNING,
+                        stage="unknown",
+                        message=(
+                            "one or more static IR aggregates could not prove "
+                            "their complete parser domain and were downgraded"
+                        ),
+                        metadata={
+                            "count": len(withheld_aggregates),
+                            "derivation_ids": withheld_aggregates,
+                        },
+                    ))
+            except Exception as exc:
+                # A receipt is an authorization boundary, not optional
+                # presentation metadata.  Fail the candidate atomically when
+                # the process-local proof itself cannot be validated.
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=snapshot.id,
+                    code="static_feature.aggregate_authorization_failed",
+                    severity=DiagnosticSeverity.ERROR,
+                    stage="unknown",
+                    message=(
+                        "static IR aggregate authorization failed; candidate "
+                        "graph was not committed"
+                    ),
+                    metadata={
+                        "error_type": type(exc).__name__,
+                        "error_fingerprint": stable_hash({
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }),
+                    },
+                ))
+            finally:
+                result._index_origin_capability = None
         entity_ids = set(result.graph.entities)
         relation_ids = set(result.graph.relations)
         artifact_ids = set(context.artifacts)
@@ -440,6 +494,7 @@ class Project:
                 verifications=result.verifications,
                 diagnostics=result.diagnostics,
                 materialization=materialization,
+                index_authorization=index_authorization,
             )
         else:
             self.bundle.store.commit_index_failure(

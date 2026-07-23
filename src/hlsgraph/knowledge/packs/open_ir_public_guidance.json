@@ -411,7 +411,7 @@
     {
       "document_id": "llvm.ir.langref",
       "document_version": "git-429c88d37f1f02e68ebc1fc7b0da4511ce6407e3",
-      "section": "Memory Access and Addressing Instructions",
+      "section": "Memory Access and Addressing Operations",
       "rule_id": "llvm.memory_access_histograms_require_opcode_schema",
       "title": "Require typed LLVM memory-access aggregates",
       "applicability": {

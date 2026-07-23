@@ -198,7 +198,7 @@ def test_correspondence_generic_evidence_and_materialization_attempts(tmp_path) 
     )
     bundle.store.add_observations([observation])
     derivation = Derivation(
-        parent.id, parent_entity.id, "feature.bitwidth", 32,
+        parent.id, parent_entity.id, "feature.test_bitwidth", 32,
         "hlsgraph.feature.lookup", "1",
         evidence_refs=[EvidenceRef(
             EvidenceKind.OBSERVATION, observation.id, parent.id,

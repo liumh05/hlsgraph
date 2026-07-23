@@ -20,6 +20,10 @@ from .retrieval import (
     HybridRetriever, RetrievalAdapter, RetrievalResult, RetrievalSpec,
     default_retrieval_adapters,
 )
+from .static_aggregate import (
+    STANDARD_STATIC_AGGREGATE_PREDICATES,
+    static_aggregate_receipt_required,
+)
 from .version import SCHEMA_VERSION
 
 
@@ -93,6 +97,33 @@ def static_feature_predicate_allowed(predicate: str) -> bool:
         or any(token.startswith(marker + "_") for marker in _FEATURE_OUTCOME_MARKERS)
         for token in tokens
     )
+
+
+def static_aggregate_receipt_valid(
+    store: Any, snapshot_id: str, derivation: Mapping[str, Any],
+    *, valid_ids: frozenset[str] | None = None,
+) -> bool:
+    """Fail closed unless the ledger revalidates a standard aggregate receipt.
+
+    Older stores intentionally do not have this method. A missing capability,
+    migration gap, malformed receipt, or validator failure all mean that the
+    aggregate remains visible as provenance but cannot be consumed as a known
+    feature value.
+    """
+
+    if not static_aggregate_receipt_required(derivation):
+        return True
+    if derivation.get("snapshot_id") != snapshot_id:
+        return False
+    if valid_ids is not None:
+        return str(derivation.get("id", "")) in valid_ids
+    validator = getattr(store, "static_aggregate_receipt_valid", None)
+    if not callable(validator):
+        return False
+    try:
+        return validator(snapshot_id, derivation) is True
+    except Exception:
+        return False
 
 
 def _static_feature_value_allowed(value: Any) -> bool:
@@ -541,6 +572,17 @@ class CoreService:
             item.id: item for item in self.bundle.store.artifacts(self.snapshot_id)
         }
         runs = {item.id: item for item in self.bundle.store.runs(self.snapshot_id)}
+        valid_aggregate_ids: frozenset[str] | None = None
+        aggregate_ids_reader = getattr(
+            self.bundle.store, "valid_static_aggregate_ids", None,
+        )
+        if callable(aggregate_ids_reader):
+            try:
+                valid_aggregate_ids = frozenset(
+                    aggregate_ids_reader(self.snapshot_id)
+                )
+            except Exception:
+                valid_aggregate_ids = frozenset()
 
         def eligible_reference(ref: Mapping[str, Any], trail: set[str]) -> bool:
             if ref.get("snapshot_id") not in {None, self.snapshot_id}:
@@ -605,8 +647,14 @@ class CoreService:
             if (child is None
                     or str(child.get("authority")) not in _STATIC_FEATURE_AUTHORITIES
                     or child.get("stage") not in _STATIC_FEATURE_STAGES
+                    or str(child.get("completeness")) != "complete"
+                    or child.get("value") is None
                     or not static_feature_predicate_allowed(
                         str(child.get("predicate", ""))
+                    )
+                    or not static_aggregate_receipt_valid(
+                        self.bundle.store, self.snapshot_id, child,
+                        valid_ids=valid_aggregate_ids,
                     )
                     or not _static_feature_value_allowed(child.get("value"))):
                 return False
@@ -641,6 +689,14 @@ class CoreService:
                 rejected += 1
                 continue
             metadata = item.get("metadata", {})
+            receipt_required = static_aggregate_receipt_required(item)
+            aggregate_receipt_valid = (
+                static_aggregate_receipt_valid(
+                    self.bundle.store, self.snapshot_id, item,
+                    valid_ids=valid_aggregate_ids,
+                )
+                if receipt_required else None
+            )
             rows.append({
                 key: item.get(key) for key in (
                     "id", "snapshot_id", "subject_id", "predicate", "value",
@@ -652,13 +708,21 @@ class CoreService:
                     str(value.get("target_id"))
                     for value in item.get("evidence_refs", [])
                 }),
+                "value": (
+                    None if aggregate_receipt_valid is False
+                    else item.get("value")
+                ),
                 "metadata_present": bool(metadata),
                 "metadata_sha256": stable_hash(metadata),
                 "mask": (
                     str(item.get("completeness")) == "complete"
                     and item.get("value") is not None
+                    and aggregate_receipt_valid is not False
                 ),
-            })
+            } | (
+                {"aggregate_receipt_valid": aggregate_receipt_valid}
+                if receipt_required else {}
+            ))
         rows.sort(key=lambda item: str(item.get("id", "")))
         truncated = len(rows) > bounded_limit
         return {

@@ -1301,6 +1301,9 @@ def test_v02_to_v03_migration_is_additive_and_keeps_graph_marker(tmp_path: Path)
         assert connection.execute(
             "SELECT COUNT(*) FROM knowledge_bindings"
         ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM index_commit_receipts"
+        ).fetchone()[0] == 0
     assert path.read_bytes() != original
 
 

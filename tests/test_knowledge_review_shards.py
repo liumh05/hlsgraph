@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "2ebb0f3d86b68f0364bf672edc0153eda2695adb534f5374d95fc8c235b04c68"
+    "86c891bf86a2ddfc898536a3367cd913e1ef1b9c68de3b37ac7513667045656a"
 )
 
 
@@ -52,7 +52,7 @@ def test_fixed_three_shard_plan_matches_current_closed_audit() -> None:
     assert [row["shard_id"] for row in plan["shards"]] == list(
         shards.SHARD_ORDER
     )
-    assert [len(row["source_paths"]) for row in plan["shards"]] == [16, 11, 15]
+    assert [len(row["source_paths"]) for row in plan["shards"]] == [16, 10, 18]
     assert [len(row["rule_references"]) for row in plan["shards"]] == [10, 15, 13]
     assert sum(len(row["rule_references"]) for row in plan["shards"]) == 38
     assert plan["token_budget_contract"] == (
@@ -345,11 +345,15 @@ def test_assertion_owner_sets_are_closed_disjoint_and_complete() -> None:
     )
     assert semantic["S10.retrieval_plane_isolation"] == "ir_semantics"
     assert semantic[
+        "S09.aggregate_static_feature_recomputation"
+    ] == "tool_evidence"
+    assert semantic[
         "S06.requested_effective_achieved_stage_and_three_gate_separation"
     ] == "tool_evidence"
     assert adversarial[
         "A19.requested_achieved_estimate_postroute_confusion"
     ] == "tool_evidence"
+    assert adversarial["A11.aggregate_feature_spoof"] == "tool_evidence"
     with pytest.raises(shards.ShardPlanError, match="unknown review protocol"):
         shards.assertion_owners("unknown")
 

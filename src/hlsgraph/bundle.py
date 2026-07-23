@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,21 @@ class BundleError(RuntimeError):
 
 
 _LEGACY_PUBLIC_VERSIONS = frozenset({"0.1.0", "0.2.0"})
+
+
+def _unlink_execution_lock(path: Path) -> None:
+    """Remove a closed lock with a bounded Windows sharing-violation retry."""
+
+    delays = (0.0, 0.005, 0.01, 0.02, 0.04, 0.08)
+    for position, delay in enumerate(delays):
+        if delay:
+            time.sleep(delay)
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if position == len(delays) - 1:
+                raise
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -130,7 +146,7 @@ def _bundle_migration_lock(bundle_root: Path):
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        path.unlink(missing_ok=True)
+        _unlink_execution_lock(path)
 
 
 def _require_schema_version(value: object, *, subject: str) -> None:
@@ -427,7 +443,7 @@ class GraphBundle:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            path.unlink(missing_ok=True)
+            _unlink_execution_lock(path)
 
     def refresh_manifest(self) -> bool:
         """Refresh the internal copy during an explicit write/index operation."""

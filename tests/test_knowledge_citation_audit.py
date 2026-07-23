@@ -147,6 +147,22 @@ def test_v2_reference_surfaces_bind_exact_documents_rules_and_review_surfaces() 
                 )
 
 
+def test_llvm_memory_access_reference_uses_the_pinned_heading() -> None:
+    manifest = AUDIT.audit_builtin_citations()
+    row = next(
+        item for item in manifest["references"]
+        if item["rule_id"] is not None
+        and item["rule_id"].endswith(
+            ":llvm.memory_access_histograms_require_opcode_schema"
+        )
+    )
+
+    assert row["section"] == "Memory Access and Addressing Operations"
+    assert row["citation_url"].endswith(
+        "/llvm/docs/LangRef.md#memory-access-and-addressing-operations"
+    )
+
+
 def test_reference_identity_and_surface_have_separate_tamper_domains() -> None:
     kwargs = {
         "pack_id": "hlsgraph.test.pack",
