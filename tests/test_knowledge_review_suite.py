@@ -282,6 +282,10 @@ def test_prompt_requires_only_assigned_assertions_and_rule_references() -> None:
     }
     assert all(reference_id not in text for reference_id in document_ids)
     assert "Document references are suite-generated" in text
+    assert "assertion_results sorted by assertion_id" in text
+    assert "citation_results sorted by reference_id" in text
+    assert "top-level issues sorted by severity then code" in text
+    assert "never duplicate an issue" in text
 
 
 @pytest.mark.parametrize(

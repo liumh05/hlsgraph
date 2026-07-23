@@ -441,6 +441,11 @@ def build_shard_prompt(
             "Emit citation results only for shard_manifest.rule_references.",
             "Document references are suite-generated and must not be reviewed or emitted.",
             "Do not infer evidence from another shard or an unlisted source path.",
+            (
+                "Emit assertion_results sorted by assertion_id, citation_results sorted "
+                "by reference_id, and top-level issues sorted by severity then code; "
+                "never duplicate an issue."
+            ),
         ],
     }
     separator = "\n\n--- deterministic shard contract ---\n"
