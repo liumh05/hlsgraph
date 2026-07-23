@@ -165,6 +165,11 @@ instead of assuming it:
 physically isolated review protocols over the frozen evidence. It does not
 claim human review or cross-model agreement.
 
+The bundled packs in this Technical Preview currently report `unreviewed`;
+the complete six-invocation formal review attestation is deferred. This does
+not affect retrieval availability, but clients must not present the guidance
+as machine-, human-, or cross-model-reviewed.
+
 ```bash
 hlsgraph knowledge list --project /path/to/project
 hlsgraph knowledge coverage --project /path/to/project
