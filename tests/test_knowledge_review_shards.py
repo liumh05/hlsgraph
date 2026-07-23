@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "77159d8d1b8fef1837c2dedf8d2281d73d92f7dca001e9f35f64a05fe9f6613e"
+    "2ebb0f3d86b68f0364bf672edc0153eda2695adb534f5374d95fc8c235b04c68"
 )
 
 
@@ -52,7 +52,7 @@ def test_fixed_three_shard_plan_matches_current_closed_audit() -> None:
     assert [row["shard_id"] for row in plan["shards"]] == list(
         shards.SHARD_ORDER
     )
-    assert [len(row["source_paths"]) for row in plan["shards"]] == [18, 11, 15]
+    assert [len(row["source_paths"]) for row in plan["shards"]] == [16, 11, 15]
     assert [len(row["rule_references"]) for row in plan["shards"]] == [10, 15, 13]
     assert sum(len(row["rule_references"]) for row in plan["shards"]) == 38
     assert plan["token_budget_contract"] == (
@@ -176,6 +176,23 @@ def test_suite_tcb_is_frozen_but_not_exposed_as_model_content() -> None:
         shards.SEMANTIC_PROTOCOL_ID, shards.ADVERSARIAL_PROTOCOL_ID,
     ):
         assert expected <= review.required_read_paths(ROOT, protocol_id)
+
+
+def test_validation_schemas_are_integrity_bound_but_not_model_visible() -> None:
+    validation_schemas = {
+        review.REVIEW_SCHEMA_PATH,
+        review.CITATION_EVIDENCE_SCHEMA_PATH,
+    }
+    assigned = set().union(*(
+        set(shard.source_paths) for shard in shards.SHARD_DEFINITIONS
+    ))
+
+    assert validation_schemas.isdisjoint(review.MODEL_INSPECTION_EXACT_PATHS)
+    assert validation_schemas.isdisjoint(assigned)
+    for protocol_id in (
+        shards.SEMANTIC_PROTOCOL_ID, shards.ADVERSARIAL_PROTOCOL_ID,
+    ):
+        assert validation_schemas <= review.required_read_paths(ROOT, protocol_id)
 
 
 def test_tokenizer_contract_fingerprints_tables_and_pinned_version() -> None:

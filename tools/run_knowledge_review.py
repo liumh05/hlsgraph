@@ -186,10 +186,8 @@ CONTROLLED_CITATION_ISSUE_CODES = frozenset({
     "applicability_too_broad", "inspection_incomplete",
 })
 MODEL_INSPECTION_EXACT_PATHS = frozenset({
-    REVIEW_SCHEMA_PATH,
     CITATION_AUDIT_PATH,
     CITATION_EVIDENCE_PATH,
-    CITATION_EVIDENCE_SCHEMA_PATH,
     "src/hlsgraph/bundle.py",
     "src/hlsgraph/graph.py",
     "src/hlsgraph/manifest.py",
@@ -216,6 +214,11 @@ MODEL_INSPECTION_EXACT_PATHS = frozenset({
     "src/hlsgraph/extract/vitis.py",
     "src/hlsgraph/extract/vivado.py",
 })
+# The result/evidence schemas remain mandatory, immutable snapshot inputs and
+# are validated by the trusted runner.  The model sees the corresponding
+# shard contract and projected evidence values, so duplicating these generic
+# validation schemas as citation chunks spends context without adding HLS
+# implementation evidence.
 
 
 def _model_inspection_required(path: str) -> bool:
