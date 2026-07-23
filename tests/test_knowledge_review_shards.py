@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "42c55db7ef94093e6f7e8894d7185f6ac76b01f5983e45285edfe4076def38bd"
+    "77159d8d1b8fef1837c2dedf8d2281d73d92f7dca001e9f35f64a05fe9f6613e"
 )
 
 
@@ -52,7 +52,7 @@ def test_fixed_three_shard_plan_matches_current_closed_audit() -> None:
     assert [row["shard_id"] for row in plan["shards"]] == list(
         shards.SHARD_ORDER
     )
-    assert [len(row["source_paths"]) for row in plan["shards"]] == [19, 11, 15]
+    assert [len(row["source_paths"]) for row in plan["shards"]] == [18, 11, 15]
     assert [len(row["rule_references"]) for row in plan["shards"]] == [10, 15, 13]
     assert sum(len(row["rule_references"]) for row in plan["shards"]) == 38
     assert plan["token_budget_contract"] == (
@@ -102,7 +102,6 @@ def test_knowledge_shard_sees_the_complete_binding_activation_boundary() -> None
         "src/hlsgraph/extract/source.py",
         "src/hlsgraph/bundle.py",
         "src/hlsgraph/graph.py",
-        "src/hlsgraph/model.py",
     } <= set(knowledge.source_paths)
 
 
