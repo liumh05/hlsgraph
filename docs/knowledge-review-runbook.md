@@ -247,6 +247,17 @@ that literal form and then verifies output byte-for-byte.  Unknown events,
 wrapper or command drift, incomplete chunks, output truncation, writes,
 interpreters, search, chaining, source mutation, or cache mutation fail closed.
 
+The raw stream may contain at most 128 exact Codex HTTP reconnect notices when
+a proxy interrupts SSE.  Replay accepts only the two pinned HTTP failure
+reasons, attempts 1–5, the exact ChatGPT Responses endpoint, and no extra
+fields.  Each accepted notice becomes a `transport_retry` summary row, with
+its original event index, in the normalized shard trace and remains bound by
+the raw-stream hash.  The same stream must still finish
+one turn, read every assigned chunk exactly once, emit one valid final result,
+and exit zero.  A terminal error, unknown reason or endpoint, retry after the
+final result, excessive retries, or incomplete lifecycle remains a hard
+failure; known retries do not count as unknown events.
+
 ## Audit first, then atomically attest
 
 Do not hand-edit `review_status`, `reviewers`, `source_hashes`, or

@@ -62,7 +62,7 @@ PROTOCOL_ORDER = (
     shard_plan.ADVERSARIAL_PROTOCOL_ID,
 )
 
-EXECUTOR_CONTRACT_VERSION = "hlsgraph.knowledge-review.suite-executor.v2"
+EXECUTOR_CONTRACT_VERSION = "hlsgraph.knowledge-review.suite-executor.v3"
 COMMAND_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-command.v2"
 MODEL_PROVIDER_ID = "hlsgraph_review_http"
 MODEL_PROVIDER_SELECTION = f'model_provider="{MODEL_PROVIDER_ID}"'
@@ -73,7 +73,7 @@ MODEL_PROVIDER_DEFINITION = (
     'wire_api="responses",requires_openai_auth=true,'
     "supports_websockets=false}"
 )
-REPLAY_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-replay-binding.v1"
+REPLAY_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-replay-binding.v2"
 CHUNK_INVENTORY_VERSION = "hlsgraph.knowledge-review.shard-chunks.v1"
 SUITE_EVIDENCE_SCHEMA_VERSION = "hlsgraph.knowledge-review.suite-evidence.v1"
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import hashlib
+import re
 from typing import Any, Mapping
 
 from tools import knowledge_review_shards as shard_plan
@@ -18,7 +19,20 @@ from tools import run_knowledge_review as review
 from tools import run_knowledge_review_suite as suite
 
 
-SHARD_TRACE_SCHEMA_VERSION = "hlsgraph.knowledge-review.shard-trace.v1"
+SHARD_TRACE_SCHEMA_VERSION = "hlsgraph.knowledge-review.shard-trace.v2"
+MAX_RECOVERABLE_TRANSPORT_RETRY_EVENTS = 128
+_TRANSPORT_RETRY_RE = re.compile(
+    r"Reconnecting\.\.\. (?P<attempt>[1-5])/5 "
+    r"\(stream disconnected before completion: (?P<reason>.+)\)"
+)
+_TRANSPORT_RETRY_REASONS = {
+    "Transport error: network error: error decoding response body":
+        "http_response_decode",
+    (
+        "error sending request for url "
+        "(https://chatgpt.com/backend-api/codex/responses)"
+    ): "http_request_send",
+}
 
 
 class ShardReplayError(ValueError):
@@ -37,6 +51,7 @@ class ShardReviewReplay:
     reported_output_tokens: int
     reported_reasoning_output_tokens: int
     derived_input_plus_output_tokens: int
+    transport_retry_event_count: int
     result: dict[str, Any] = field(repr=False)
     result_bytes: bytes = field(repr=False)
     trace_bytes: bytes = field(repr=False)
@@ -107,6 +122,45 @@ def _validate_closed_item(item: Mapping[str, Any], *, index: int) -> None:
         raise ShardReplayError(f"raw item event {index} is not a closed item object")
     if "type" not in item:
         raise ShardReplayError(f"raw item event {index} omits its type")
+
+
+def _recoverable_transport_retry(
+    event: Mapping[str, Any], *, index: int,
+) -> dict[str, Any]:
+    """Normalize one exact Codex HTTP reconnect notice.
+
+    A reconnect notice is telemetry, not a successful review event.  It is
+    accepted only when the same raw stream later closes its full turn,
+    command inventory, evidence reads, and final result.  Terminal errors,
+    unknown messages, alternate endpoints, and open event objects still fail.
+    """
+
+    if set(event) != {"type", "message"} or event.get("type") != "error":
+        raise ShardReplayError(
+            f"raw transport event {index} is not a closed event object"
+        )
+    message = event.get("message")
+    if not isinstance(message, str) or len(message) > 512:
+        raise ShardReplayError(
+            f"raw transport event {index} has an invalid message"
+        )
+    match = _TRANSPORT_RETRY_RE.fullmatch(message)
+    if match is None:
+        raise ShardReplayError(
+            f"raw transport event {index} is not a recognized recoverable retry"
+        )
+    reason_code = _TRANSPORT_RETRY_REASONS.get(match.group("reason"))
+    if reason_code is None:
+        raise ShardReplayError(
+            f"raw transport event {index} has an unapproved retry reason"
+        )
+    return {
+        "kind": "transport_retry",
+        "raw_event_index": index,
+        "attempt": int(match.group("attempt")),
+        "retry_limit": 5,
+        "reason_code": reason_code,
+    }
 
 
 def _validate_turn_usage(value: Any) -> dict[str, int]:
@@ -419,9 +473,26 @@ def _replay(
     turn_completed = 0
     turn_usage: dict[str, int] | None = None
     final_message_seen = False
+    transport_retries: list[dict[str, Any]] = []
 
     for index, event in enumerate(events, 1):
         event_type = event.get("type")
+        if event_type == "error":
+            if final_message_seen:
+                raise ShardReplayError(
+                    "raw shard stream has a transport retry after final JSON"
+                )
+            transport_retries.append(
+                _recoverable_transport_retry(event, index=index)
+            )
+            if (
+                len(transport_retries)
+                > MAX_RECOVERABLE_TRANSPORT_RETRY_EVENTS
+            ):
+                raise ShardReplayError(
+                    "raw shard stream exceeds the recoverable retry limit"
+                )
+            continue
         if event_type not in review._ALLOWED_EVENT_TYPES:
             raise ShardReplayError(
                 f"raw event {index} has forbidden or unknown type {event_type!r}"
@@ -560,11 +631,19 @@ def _replay(
         f"{raw_sha256[:32]}"
     )
     trace_rows: list[dict[str, Any]] = []
-    for sequence, operation in enumerate(operations, 1):
+    for retry in transport_retries:
         trace_rows.append({
             "schema_version": SHARD_TRACE_SCHEMA_VERSION,
             "shard_id": shard_id,
-            "shard_sequence": sequence,
+            "shard_sequence": len(trace_rows) + 1,
+            "invocation_id": invocation_id,
+            **retry,
+        })
+    for operation in operations:
+        trace_rows.append({
+            "schema_version": SHARD_TRACE_SCHEMA_VERSION,
+            "shard_id": shard_id,
+            "shard_sequence": len(trace_rows) + 1,
             "invocation_id": invocation_id,
             **operation,
         })
@@ -589,6 +668,7 @@ def _replay(
         derived_input_plus_output_tokens=(
             turn_usage["input_tokens"] + turn_usage["output_tokens"]
         ),
+        transport_retry_event_count=len(transport_retries),
         result=normalized_result,
         result_bytes=result_bytes,
         trace_bytes=review._canonical_jsonl(trace_rows),
@@ -613,6 +693,7 @@ def replay_shard_raw_review(
 
 __all__ = [
     "SHARD_TRACE_SCHEMA_VERSION",
+    "MAX_RECOVERABLE_TRANSPORT_RETRY_EVENTS",
     "ShardReplayError",
     "ShardReviewReplay",
     "replay_shard_raw_review",

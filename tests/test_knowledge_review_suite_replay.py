@@ -287,6 +287,7 @@ def test_replay_accepts_exact_raw_stream_and_emits_shard_trace(
     assert actual.reported_output_tokens == 100
     assert actual.reported_reasoning_output_tokens == 25
     assert actual.derived_input_plus_output_tokens == 1100
+    assert actual.transport_retry_event_count == 0
     assert actual.result == result
     assert json.loads(actual.result_bytes) == result
     assert len(trace) == expected_reads + 1
@@ -299,6 +300,134 @@ def test_replay_accepts_exact_raw_stream_and_emits_shard_trace(
     assert trace[-1]["result_sha256"] == hashlib.sha256(
         actual.result_bytes
     ).hexdigest()
+
+
+def test_replay_accepts_and_records_exact_recovered_http_retries(
+    tmp_path: Path,
+) -> None:
+    cache, manifest, result = _fixture(tmp_path)
+    rows = _events(_raw_stream(cache, manifest, result))
+    rows.insert(2, {
+        "type": "error",
+        "message": (
+            "Reconnecting... 1/5 (stream disconnected before completion: "
+            "Transport error: network error: error decoding response body)"
+        ),
+    })
+    rows.insert(-2, {
+        "type": "error",
+        "message": (
+            "Reconnecting... 2/5 (stream disconnected before completion: "
+            "error sending request for url "
+            "(https://chatgpt.com/backend-api/codex/responses))"
+        ),
+    })
+    raw = review._canonical_jsonl(rows)
+
+    actual = replay.replay_shard_raw_review(
+        raw, cache=cache, shard_manifest=manifest,
+    )
+    trace = review._strict_jsonl(actual.trace_bytes, label="shard trace")
+
+    assert actual.transport_retry_event_count == 2
+    assert [row["kind"] for row in trace[:2]] == [
+        "transport_retry", "transport_retry",
+    ]
+    assert [row["reason_code"] for row in trace[:2]] == [
+        "http_response_decode", "http_request_send",
+    ]
+    assert [row["raw_event_index"] for row in trace[:2]] == [3, len(rows) - 2]
+    assert trace[-1]["kind"] == "shard_result_emit"
+
+
+@pytest.mark.parametrize(
+    "event, message",
+    [
+        (
+            {"type": "error", "message": "transport warning"},
+            "not a recognized recoverable retry",
+        ),
+        (
+            {
+                "type": "error",
+                "message": (
+                    "Reconnecting... 1/5 (stream disconnected before completion: "
+                    "error sending request for url "
+                    "(https://example.invalid/responses))"
+                ),
+            },
+            "unapproved retry reason",
+        ),
+        (
+            {
+                "type": "error",
+                "message": (
+                    "Reconnecting... 1/5 (stream disconnected before completion: "
+                    "Transport error: network error: error decoding response body)"
+                ),
+                "detail": "open",
+            },
+            "not a closed event object",
+        ),
+    ],
+)
+def test_replay_rejects_unapproved_transport_events(
+    tmp_path: Path, event: dict[str, object], message: str,
+) -> None:
+    cache, manifest, result = _fixture(tmp_path)
+    rows = _events(_raw_stream(cache, manifest, result))
+    rows.insert(2, event)
+
+    with pytest.raises(replay.ShardReplayError, match=message):
+        replay.replay_shard_raw_review(
+            review._canonical_jsonl(rows),
+            cache=cache,
+            shard_manifest=manifest,
+        )
+
+
+def test_replay_rejects_transport_retry_after_final_json(tmp_path: Path) -> None:
+    cache, manifest, result = _fixture(tmp_path)
+    rows = _events(_raw_stream(cache, manifest, result))
+    rows.insert(-1, {
+        "type": "error",
+        "message": (
+            "Reconnecting... 1/5 (stream disconnected before completion: "
+            "Transport error: network error: error decoding response body)"
+        ),
+    })
+
+    with pytest.raises(replay.ShardReplayError, match="after final JSON"):
+        replay.replay_shard_raw_review(
+            review._canonical_jsonl(rows),
+            cache=cache,
+            shard_manifest=manifest,
+        )
+
+
+def test_replay_rejects_more_than_bounded_transport_retries(
+    tmp_path: Path,
+) -> None:
+    cache, manifest, result = _fixture(tmp_path)
+    rows = _events(_raw_stream(cache, manifest, result))
+    retry = {
+        "type": "error",
+        "message": (
+            "Reconnecting... 1/5 (stream disconnected before completion: "
+            "Transport error: network error: error decoding response body)"
+        ),
+    }
+    rows[2:2] = [
+        copy.deepcopy(retry)
+        for _ in range(replay.MAX_RECOVERABLE_TRANSPORT_RETRY_EVENTS + 1)
+    ]
+
+    with pytest.raises(replay.ShardReplayError, match="exceeds"):
+        replay.replay_shard_raw_review(
+            review._canonical_jsonl(rows),
+            cache=cache,
+            shard_manifest=manifest,
+        )
 
 
 def test_replay_accepts_existing_citation_redaction_markers(tmp_path: Path) -> None:
