@@ -54,6 +54,29 @@ _FORBIDDEN_CONTENT_FIELDS = frozenset({
 })
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
+
+def knowledge_activation_hash(
+    rules: Iterable[KnowledgeRule],
+    bindings: Iterable[KnowledgeBinding],
+    coverage: CoverageManifest | None,
+) -> str:
+    """Hash the complete executable knowledge surface stored in a bundle.
+
+    Rule and binding IDs alone do not commit mutable fields such as rule prose,
+    applicability, effects, or binding metadata.  This digest is recorded in
+    the immutable pack inventory and recomputed at every read-side activation
+    gate so altered ledger payloads become lexical-only.
+    """
+
+    rule_values = sorted(rules, key=lambda item: item.id)
+    binding_values = sorted(bindings, key=lambda item: item.id)
+    return stable_hash({
+        "contract": "hlsgraph.knowledge_activation_surface.v1",
+        "rules": [json_ready(item) for item in rule_values],
+        "bindings": [json_ready(item) for item in binding_values],
+        "coverage": json_ready(coverage) if coverage is not None else None,
+    })
+
 # A rule condition may be supplied directly by a binding's required context,
 # or it may be a premise that follows from the *current binding target
 # instance*.  The latter cases are deliberately enumerated here.  Pack authors
@@ -397,6 +420,9 @@ class KnowledgePack:
             "pack_id": self.pack_id,
             "pack_schema_version": self.schema_version,
             "content_hash": self.content_hash,
+            "activation_hash": knowledge_activation_hash(
+                self.rules, self.bindings, self.coverage,
+            ),
             "documents": [
                 {
                     "document_id": item.document_id,
@@ -807,19 +833,19 @@ def matches_applicability(rule: KnowledgeRule, context: Mapping[str, Any]) -> bo
                for key, constraint in rule.applicability.items())
 
 
-def matches_binding(
+def matches_binding_constraints(
     binding: KnowledgeBinding,
     *,
     target_kind: str,
     target: str,
     context: Mapping[str, Any],
 ) -> bool:
-    """Match a binding only when target and every required context value agree.
+    """Inspect whether author-supplied scalar values satisfy a binding shape.
 
-    A bare JSON array is deliberately not an alternatives operator here.  Pack
-    authors must spell alternatives as ``{"one_of": [...]}``, avoiding a
-    scalar-vs-set interpretation split between this generic matcher and the
-    hybrid retriever.
+    This helper has no design-instance authority.  It is intended for pack
+    authoring and tests only; executable retrieval requires a process-local
+    ``AttestedBindingContext`` issued from current graph and ledger evidence.
+    A bare JSON array is deliberately not an alternatives operator here.
     """
     return (
         binding.target_kind == target_kind
@@ -930,13 +956,13 @@ class KnowledgeCatalog:
         return filter_rules(self.all_rules(), document_id=document_id,
                             document_version=document_version, applicability=applicability)
 
-    def bindings_for(
-        self, *, target_kind: str, target: str, context: Mapping[str, Any],
+    def binding_candidates_for(
+        self, *, target_kind: str, target: str,
     ) -> list[KnowledgeBinding]:
+        """Return metadata candidates by exact public target, never activate."""
         return sorted(
-            (item for item in self.all_bindings() if matches_binding(
-                item, target_kind=target_kind, target=target, context=context,
-            )),
+            (item for item in self.all_bindings()
+             if item.target_kind == target_kind and item.target == target),
             key=lambda item: item.id,
         )
 

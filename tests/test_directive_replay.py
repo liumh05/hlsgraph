@@ -160,6 +160,62 @@ def _retarget(
     )
 
 
+def test_external_interface_preserves_component_and_port_scope(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "void helper(int *input) { input[0] = 0; }\n"
+        "void dut(int *input) { input[0] += 1; }\n"
+    )
+    good_root = tmp_path / "good"
+    good_root.mkdir()
+    bundle, snapshot, result = _fixed_records(
+        good_root, source,
+        tcl="set_directive_interface -mode m_axi dut input\n",
+    )
+    directive = next(
+        item for item in result.graph.entities.values()
+        if item.kind == "hls.directive"
+        and item.name == "INTERFACE"
+        and item.attrs.get("origin") == "tcl"
+    )
+    port = result.graph.entities[directive.attrs["scope_id"]]
+    assert port.kind == "hls.port"
+    owner = next(
+        relation for relation in result.graph.relations.values()
+        if relation.kind == "hls.contains" and relation.dst == port.id
+    )
+    assert result.graph.entities[owner.src].kind == "hls.kernel"
+    assert result.graph.entities[owner.src].name == "dut"
+    _persist(bundle, result.graph, result.observations)
+    context = _context(bundle, snapshot, result.graph, directive)
+    assert context["port_owner_id"] == {owner.src.casefold()}
+    assert context["configured_component_id"] == {owner.src.casefold()}
+    assert context["port_ownership_qualified"] == {
+        "derived_from_unique_current_component_port_v1",
+    }
+
+    bad_root = tmp_path / "bad"
+    bad_root.mkdir()
+    _bad_bundle, _bad_snapshot, bad = _fixed_records(
+        bad_root, source,
+        tcl="set_directive_interface -mode m_axi helper input\n",
+    )
+    rejected = next(
+        item for item in bad.graph.entities.values()
+        if item.kind == "hls.directive"
+        and item.name == "INTERFACE"
+        and item.attrs.get("origin") == "tcl"
+    )
+    assert str(rejected.completeness) == "ambiguous"
+    assert "scope_id" not in rejected.attrs
+    assert not any(
+        item.subject_id == rejected.id
+        and item.predicate == "directive.requested"
+        for item in bad.observations
+    )
+
+
 def test_direct_save_cannot_invent_a_source_directive(tmp_path: Path) -> None:
     bundle, snapshot, result = _fixed_records(tmp_path, "void dut() {}\n")
     graph = result.graph
@@ -537,3 +593,40 @@ def test_external_directive_is_replayed_and_option_tamper_is_rejected(
         forged_bundle, forged_snapshot, forged_graph, forged_directive,
     )
     assert "directive_source_declaration_qualified" not in rejected
+
+
+def test_replay_rejects_changed_scope_or_operand_ownership_lineage(
+    tmp_path: Path,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        "void dut(int *left) { left[0] += 1; }\n",
+        tcl=(
+            "set_directive_array_partition -type complete dut left\n"
+        ),
+    )
+    graph = result.graph
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive"
+        and item.name == "ARRAY_PARTITION"
+        and item.attrs.get("origin") == "tcl"
+    )
+    _persist(bundle, graph, [_requested(result, directive.id)])
+    qualified = _context(bundle, snapshot, graph, directive)
+    assert "directive_source_declaration_qualified" in qualified
+
+    operand = graph.entities[directive.attrs["scope_id"]]
+    alternate = graph.add_entity(Entity(
+        kind="hls.function", name="alternate", qualified_name="alternate",
+        snapshot_id=snapshot.id, authority=AuthorityClass.STATIC_FACT,
+        stage="ast",
+    ))
+    graph.add_relation(Relation(
+        alternate.id, operand.id, "hls.contains", snapshot.id,
+        authority=AuthorityClass.STATIC_FACT, stage="ast",
+    ))
+    rejected = _context(bundle, snapshot, graph, directive)
+    assert "directive_source_declaration_qualified" not in rejected
+    assert "directive_operand_linked" not in rejected
+    assert "directive_operand_identity" not in rejected

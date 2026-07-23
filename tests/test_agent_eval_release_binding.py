@@ -540,6 +540,35 @@ def test_raw_closure_invokes_full_run_set_validation(
         )
 
 
+def _stub_release_archive_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "hlsgraph-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "hlsgraph-0.3.0.tar.gz").write_bytes(b"sdist")
+    suite_evidence = tmp_path / "suite-evidence"
+    monkeypatch.setattr(release_audit, "_audit_source_tree", lambda _root: [])
+    monkeypatch.setattr(release_audit, "_audit_sbom", lambda _data, _root: [])
+    monkeypatch.setattr(release_audit, "_audit_wheel", lambda *_args: [])
+    monkeypatch.setattr(release_audit, "_audit_sdist", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        release_audit, "_audit_knowledge_review_release_gate",
+        lambda *_args, **_kwargs: [],
+    )
+    strict_file_bytes = release_audit._strict_file_bytes
+
+    def read_release_input(path: Path, label: str, **kwargs: object) -> bytes:
+        if label in {"release wheel", "release sdist"}:
+            return b"archive"
+        return strict_file_bytes(path, label, **kwargs)
+
+    monkeypatch.setattr(release_audit, "_strict_file_bytes", read_release_input)
+    monkeypatch.setattr(release_audit, "_release_wheel_package_digest", lambda _data: "d")
+    monkeypatch.setattr(release_audit, "_release_sdist_package_digest", lambda _data: "d")
+    return dist, suite_evidence
+
+
 def test_formal_release_audit_cannot_omit_evaluation_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -559,6 +588,108 @@ def test_formal_release_audit_cannot_omit_evaluation_inputs(
     monkeypatch.setattr(release_audit, "_release_sdist_package_digest", lambda _data: "d")
     assert release_audit.main([str(dist)]) == 1
     assert "formal release audit requires" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("preview_label", ["Technical Preview", "Developer Preview"])
+def test_explicit_technical_preview_can_omit_all_agent_evaluation_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], preview_label: str,
+) -> None:
+    dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
+    notes = tmp_path / "release-notes.md"
+    notes.write_text(
+        f"# HLSGraph 0.3.0\n\n{preview_label}. Comparative performance is not claimed.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        release_audit, "_audit_evaluation_release_gate",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the preview path must not consume Agent A/B evaluation evidence"
+        ),
+    )
+    assert release_audit.main([
+        str(dist),
+        "--technical-preview-without-agent-eval",
+        "--knowledge-review-suite-evidence", str(suite_evidence),
+        "--release-notes", str(notes),
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "Preview release" in output
+    assert "performance-advantage approval were omitted" in output
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--eval-identity", "--static-report", "--bootstrap-report",
+        "--scores", "--run-set",
+    ],
+)
+def test_technical_preview_rejects_every_agent_evaluation_evidence_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], option: str,
+) -> None:
+    dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
+    notes = tmp_path / "release-notes.md"
+    notes.write_text("# HLSGraph 0.3.0\n\nTechnical Preview.\n", encoding="utf-8")
+    supplied_evidence = tmp_path / "partial-evidence.json"
+    supplied_evidence.write_text("{}\n", encoding="utf-8")
+    assert release_audit.main([
+        str(dist),
+        "--technical-preview-without-agent-eval",
+        "--knowledge-review-suite-evidence", str(suite_evidence),
+        "--release-notes", str(notes),
+        option, str(supplied_evidence),
+    ]) == 1
+    assert (
+        "requires every Agent A/B evaluation evidence input to be omitted"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize(
+    ("notes_text", "expected"),
+    [
+        (
+            "# HLSGraph 0.3.0\n\nPreview release.\n",
+            "must explicitly say Technical Preview or Developer Preview",
+        ),
+        (
+            "# HLSGraph 0.3.0\n\nTechnical Preview that outperforms other tools.\n",
+            "claim an advantage without a completed Agent A/B evaluation",
+        ),
+    ],
+)
+def test_technical_preview_requires_preview_label_and_forbids_advantage_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], notes_text: str, expected: str,
+) -> None:
+    dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
+    notes = tmp_path / "release-notes.md"
+    notes.write_text(notes_text, encoding="utf-8")
+    assert release_audit.main([
+        str(dist),
+        "--technical-preview-without-agent-eval",
+        "--knowledge-review-suite-evidence", str(suite_evidence),
+        "--release-notes", str(notes),
+    ]) == 1
+    assert expected in capsys.readouterr().err
+
+
+def test_technical_preview_requires_release_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
+    assert release_audit.main([
+        str(dist),
+        "--technical-preview-without-agent-eval",
+        "--knowledge-review-suite-evidence", str(suite_evidence),
+    ]) == 1
+    assert (
+        "--technical-preview-without-agent-eval requires --release-notes"
+        in capsys.readouterr().err
+    )
 
 
 def test_preflight_is_explicit_and_never_claims_release_approval(

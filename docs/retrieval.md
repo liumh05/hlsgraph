@@ -32,12 +32,27 @@ string truthiness.
 Knowledge applicability is target-instance scoped and fail-closed. Before a
 binding is even considered, retrieval revalidates that it belongs to one
 installed pack whose immutable coverage and inventory both agree that the pack
-is `review_ready`. This is independent of the catalog and SQLite write gates;
-old or directly injected rows remain inert. Pack loading also proves that each
-binding entails its rule condition and occurs exactly once under that rule in
-coverage. Retrieval then re-proves every condition from one instance-local
-context. Missing, conflicting, or multi-valued evidence cannot borrow a value
-from a sibling entity, report, run, workload, or scope.
+is `review_ready`. The inventory's activation hash commits the complete
+serialized rules, bindings, and coverage, and retrieval recomputes that hash
+from the exact rows it loaded. This is independent of the catalog and SQLite
+write gates; old, altered, or directly injected rows remain inert. Pack loading
+also proves that each binding entails its rule condition and occurs exactly
+once under that rule in coverage. Retrieval then re-proves every condition from
+one instance-local context. Missing, conflicting, or multi-valued evidence
+cannot borrow a value from a sibling entity, report, run, workload, or scope.
+
+Scalar constraint matching is deliberately non-authorizing. For each retrieval
+call, HLSGraph derives and registers the exact target contexts from the pinned
+ledger snapshot and current graph, then retains canonical bytes and hashes for
+the complete binding, complete rule, and context values inside one session.
+Matching decodes fresh local copies and runs inside one atomic session method,
+with identity and hashes checked before and after evaluation; no returned
+snapshot or result is accepted later as authorization. Only the same retriever
+can present the issued opaque object while the session is live. A serialized
+or caller-created `DesignSnapshot`, plain dictionary, copied object,
+caller-selected target, omitted condition, another retriever, or an object
+replayed after session close cannot activate guidance even when all visible
+IDs and scalar values match.
 
 OpenIR is intentionally more conservative in v0.3. The public MLIR, LLVM, and
 CIRCT material is citation metadata with every supported target explicitly
@@ -61,7 +76,8 @@ catalog matcher and hybrid retriever use the same canonical boolean tokens.
 
 Once a reviewed pack is explicitly installed, the same instance-local boundary
 applies to Arm AXI references. `m_axi`, `s_axilite`, or
-`axis` on an exactly scoped Vitis `INTERFACE` directive proves only the AMD
+`axis` on an exactly scoped Vitis `INTERFACE` directive for a unique direct
+port of the configured top component proves only the AMD
 2024.2 source request. It does not supply an Arm specification revision,
 endpoint roles, channel direction, or a realized interface instance. Arm
 IHI0022 H.c and IHI0051 B are therefore `citation_only`; generic `hls.port`,
@@ -70,7 +86,10 @@ IHI0022 H.c and IHI0051 B are therefore `citation_only`; generic `hls.port`,
 AMD implementation and verification bindings apply the same rule. An XDC
 target qualifies only when its ledger artifact carries the recorded SHA-256,
 is attached to the queried snapshot, and is one of that snapshot's declared
-constraint inputs for an explicitly mapped Vivado stage. Gate guidance is not
+constraint inputs for an explicitly mapped Vivado stage. Stage, tool identity,
+and version come from the same stage-to-toolchain selection; artifact metadata
+cannot donate them, and different selected Vivado builds make the projection
+incomplete rather than producing cross-paired contexts. Gate guidance is not
 selected from a free-standing run/stage claim: correctness must close to
 workload-scoped typed observations and their managed report; resource fit must
 close to one complete post-route utilization set plus the matching target,
@@ -141,7 +160,7 @@ predicates and correctness gate remain queryable.
 reserved `directive_operand_linked` marker and a derived operand identity. A
 stable ID and a self-consistent `hls.annotates` relation are necessary but are
 not proof: before minting either value, retrieval independently replays the
-fixed `source.libclang` v2 and `directive.external` v1 parsers over the exact
+fixed `source.libclang` v3 and `directive.external` v3 parsers over the exact
 live snapshot inputs. The current directive, complete option map, source
 spelling hash, anchor, resolved scope/operand entity, annotation, and unique
 `directive.requested` observation must match the replay byte-for-byte at the
@@ -158,6 +177,15 @@ agree. Metadata and another directive cannot donate either value. Binding
 alternatives always use the explicit `{"one_of": [...]}` operator; a bare
 array is rejected at the binding boundary.
 
+`INTERFACE` has an additional owner closure. Source and external-directive
+resolution accept only the unique complete AST `hls.contains` relation from the
+configured `hls.kernel` to the named `hls.port`; helper-function ports and
+graph-wide same-name fallback are rejected. Replay records and rechecks the
+owner entity and containment-relation hashes before retrieval mints
+`port_ownership_qualified`, `port_owner_id`, `configured_component_id`, and the
+derived ownership identity. Tool name and version are also selected from one
+Vitis HLS toolchain record, never from independent manifest-wide unions.
+
 Every `directive.*` observation binding additionally requires
 `requested_directive_present=true`. The retriever derives that marker only from
 the current exact directive instance and its own unique, complete source-stage
@@ -168,6 +196,14 @@ or regex-degraded extraction fails closed. `save_graph()` and caller-written
 metadata remain ordinary data operations and cannot issue this capability. A
 similarly named directive, sibling scope, tool-status record, or copied metadata
 flag cannot supply it.
+
+Tcl and Vitis config inputs use separate conservative literal grammars; neither
+parser borrows the other's quoting, comment, substitution, escape, or token
+rules. Tcl command names and directive target spellings must match exactly.
+Syntax-aware grouping may expose a literal word, but arbitrary braces, quotes,
+leading/trailing slashes, or case changes are never stripped or normalized into
+a different valid scope. Unsupported or ambiguous spellings produce a
+diagnostic and no requested-directive fact.
 
 Extractor-specific fields that are merely name-adjacent to a cited rule are
 not auto-bound. In particular, requested clock, available capacities,
@@ -364,4 +400,8 @@ call graph cannot establish HLS hardware topology.
 The public retrieval evaluation harness compares native file tools, the pinned
 CodeGraph build, the v0.2 narrow HLSGraph surface, and v0.3 unified retrieval.
 Published advantage claims require the frozen evidence scorer and paired
-bootstrap gates described by that harness.
+bootstrap gates described by that harness.  A v0.3 Technical/Developer Preview
+may explicitly omit that Agent A/B evaluation, but its release notes must make
+the preview status clear and cannot claim a comparative performance advantage;
+all functional, privacy, knowledge, and formal knowledge-review gates still
+apply.

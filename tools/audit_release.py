@@ -4401,6 +4401,27 @@ def _audit_evaluation_release_gate(
     return issues
 
 
+def _audit_technical_preview_release_notes(release_notes: Path) -> list[str]:
+    """Allow an unevaluated preview only when its claims are explicitly bounded."""
+
+    try:
+        notes_bytes = _strict_file_bytes(release_notes, "release notes")
+        notes = notes_bytes.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return [f"cannot read UTF-8 release notes: {exc}"]
+    if re.search(r"(?i)\b(?:Technical|Developer)\s+Preview\b", notes) is None:
+        return [
+            "release notes must explicitly say Technical Preview or Developer "
+            "Preview when the Agent A/B evaluation is omitted"
+        ]
+    if any(pattern.search(notes) for pattern in _ADVANTAGE_CLAIM_PATTERNS):
+        return [
+            "release notes claim an advantage without a completed Agent A/B "
+            "evaluation"
+        ]
+    return []
+
+
 def _audit_wheel(path: Path, root: Path, root_sbom: bytes) -> list[str]:
     issues: list[str] = []
     with zipfile.ZipFile(path) as archive:
@@ -4695,6 +4716,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--technical-preview-without-agent-eval", action="store_true",
+        help=(
+            "approve only a Technical/Developer Preview without Agent A/B evidence; "
+            "all evaluation evidence options must be omitted, --release-notes is "
+            "required, and performance-advantage claims are forbidden"
+        ),
+    )
+    parser.add_argument(
         "--eval-identity", "--environment-lock", dest="eval_identity", type=Path,
         help="explicit prepared environment.lock.json used by the final evaluation",
     )
@@ -4777,12 +4806,17 @@ def main(argv: list[str] | None = None) -> int:
                 issues.append(
                     "release wheel and sdist installable package payloads differ"
                 )
-    evaluation_inputs = (
+    evaluation_evidence_inputs = (
         args.eval_identity, args.static_report, args.bootstrap_report,
-        args.scores, args.run_set, args.release_notes,
+        args.scores, args.run_set,
+    )
+    final_claim_inputs = (
+        *evaluation_evidence_inputs, args.release_notes,
     )
     if args.preflight_only:
-        if any(value is not None for value in evaluation_inputs) or any(
+        if args.technical_preview_without_agent_eval or any(
+            value is not None for value in final_claim_inputs
+        ) or any(
             value is not None for value in (
                 args.semantic_review, args.adversarial_review,
                 args.semantic_review_raw, args.adversarial_review_raw,
@@ -4815,7 +4849,21 @@ def main(argv: list[str] | None = None) -> int:
                 adversarial_review=adversarial_review,
                 suite_evidence=args.knowledge_review_suite_evidence,
             ))
-        if not all(value is not None for value in evaluation_inputs):
+        if args.technical_preview_without_agent_eval:
+            if any(value is not None for value in evaluation_evidence_inputs):
+                issues.append(
+                    "--technical-preview-without-agent-eval requires every Agent "
+                    "A/B evaluation evidence input to be omitted"
+                )
+            if args.release_notes is None:
+                issues.append(
+                    "--technical-preview-without-agent-eval requires --release-notes"
+                )
+            else:
+                issues.extend(
+                    _audit_technical_preview_release_notes(args.release_notes)
+                )
+        elif not all(value is not None for value in final_claim_inputs):
             issues.append(
                 "formal release audit requires --eval-identity, --static-report, "
                 "--bootstrap-report, --scores, --run-set, and --release-notes; "
@@ -4839,6 +4887,12 @@ def main(argv: list[str] | None = None) -> int:
             "PRE-FLIGHT ONLY: source and archives passed hygiene checks; "
             "knowledge review and evaluation were not approved, so this is not "
             "a release approval"
+        )
+    elif args.technical_preview_without_agent_eval:
+        print(
+            "Technical/Developer Preview release source and archives passed privacy, "
+            "RECORD, SPDX, final knowledge-review, and no-advantage-claim checks; "
+            "Agent A/B evaluation and performance-advantage approval were omitted"
         )
     else:
         print(

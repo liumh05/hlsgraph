@@ -521,9 +521,11 @@ _KNOWLEDGE_SOURCES = (
     "src/hlsgraph/extract/directives.py",
     "src/hlsgraph/extract/source.py",
     "src/hlsgraph/graph.py",
+    "src/hlsgraph/knowledge/activation.py",
     "src/hlsgraph/knowledge/core.py",
     "src/hlsgraph/knowledge/supported_targets.py",
     "src/hlsgraph/model.py",
+    "src/hlsgraph/retrieval.py",
     "tools/knowledge_review.schema.json",
     "tools/knowledge_review_evidence.schema.json",
 )

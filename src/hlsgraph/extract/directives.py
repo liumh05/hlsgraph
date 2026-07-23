@@ -4,8 +4,9 @@ from __future__ import annotations
 import re
 import shlex
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..graph import CanonicalGraph
 from ..manifest import project_path
@@ -25,13 +26,12 @@ from .base import ExtractionContext, ExtractionResult
 from .directive_identity import (
     bind_directive_identity,
     directive_identity_metadata,
-    resolve_directive_variable_operand,
 )
 
 
-_TCL_DIRECTIVE = re.compile(r"^\s*set_directive_([A-Za-z0-9_]+)\s+(.+?)\s*$", re.I)
-_TCL_DIRECTIVE_MARKER = re.compile(r"\bset_directive_[A-Za-z0-9_]*", re.I)
-_CONFIG_DIRECTIVE = re.compile(r"^\s*(?:syn\.)?directive\.([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$", re.I)
+_TCL_DIRECTIVE = re.compile(r"^\s*set_directive_([A-Za-z0-9_]+)\s+(.+?)\s*$")
+_TCL_DIRECTIVE_MARKER = re.compile(r"\bset_directive_[A-Za-z0-9_]*")
+_CONFIG_DIRECTIVE = re.compile(r"^\s*(?:syn\.)?directive\.([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$", re.I)
 
 
 def _strip_comment(text: str) -> str:
@@ -63,24 +63,65 @@ def _strip_comment(text: str) -> str:
     return text.rstrip()
 
 
-def _value(value: str) -> Any:
-    value = value.strip().strip('{}"')
+def _config_literal_tokens(text: str) -> tuple[list[str] | None, str | None]:
+    """Tokenize one config directive without importing Tcl word semantics."""
+
+    # Config values use whitespace words and optional double quotes.  Braces,
+    # Tcl substitutions, escapes, semicolons, and single quotes are not
+    # normalized into a different spelling: unsupported syntax is withheld.
+    if any(char in text for char in "{}\\$[];'"):
+        return None, "unsupported_config_literal_syntax"
     try:
-        return int(value, 0)
+        return shlex.split(text, comments=False, posix=True), None
     except ValueError:
-        try:
-            return float(value)
-        except ValueError:
-            if value.lower() in {"true", "false"}:
-                return value.lower() == "true"
-            return value
+        return None, "malformed_literal_words"
 
 
-def _tcl_tokens(text: str) -> list[str]:
-    try:
-        return shlex.split(text.replace("{", '"').replace("}", '"'), posix=True)
-    except ValueError:
-        return text.split()
+def _tcl_literal_tokens(text: str) -> tuple[list[str] | None, str | None]:
+    """Parse a conservative subset of Tcl literal words without evaluation.
+
+    Only bare, double-quoted, or one-level braced words are accepted.  The
+    lexical top-level guard already rejects substitution and escapes; those
+    characters are rejected again here so this parser is safe when called in
+    isolation.  Crucially, braces are never globally rewritten or stripped.
+    """
+
+    if any(char in text for char in "\\$[];"):
+        return None, "dynamic_or_escaped_tcl_word"
+    tokens: list[str] = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        start = text[index]
+        if start == '"':
+            end = text.find('"', index + 1)
+            if end < 0:
+                return None, "malformed_literal_words"
+            token = text[index + 1:end]
+            index = end + 1
+            if index < len(text) and not text[index].isspace():
+                return None, "concatenated_tcl_word"
+        elif start == "{":
+            end = text.find("}", index + 1)
+            if end < 0 or "{" in text[index + 1:end]:
+                return None, "nested_or_malformed_tcl_brace_word"
+            token = text[index + 1:end]
+            index = end + 1
+            if index < len(text) and not text[index].isspace():
+                return None, "concatenated_tcl_word"
+        else:
+            end = index
+            while end < len(text) and not text[end].isspace():
+                end += 1
+            token = text[index:end]
+            index = end
+            if any(char in token for char in "{}\"'"):
+                return None, "unsupported_tcl_literal_word"
+        tokens.append(token)
+    return tokens, None
 
 
 def _advance_tcl_lexical_state(
@@ -232,49 +273,616 @@ def _tcl_continues(text: str) -> bool:
     return bool(trailing % 2)
 
 
-def _parse_options(tokens: list[str]) -> tuple[dict[str, Any], str | None]:
+@dataclass(frozen=True, slots=True)
+class _OptionGrammar:
+    """One AMD 2024.2 option with syntax specific to each external frontend."""
+
+    value_kind: str = "string"
+    tcl_arity: int = 1
+    config_arity: int = 1
+    choices: tuple[str, ...] = ()
+    minimum: int | None = None
+    maximum: int | None = None
+    true_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectiveGrammar:
+    positional_roles: tuple[str, ...]
+    options: Mapping[str, _OptionGrammar]
+    scope_kinds: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedDirective:
+    kind: str
+    options: dict[str, Any]
+    positionals: tuple[str, ...]
+    parse_policy: str
+
+    @property
+    def location(self) -> str:
+        return self.positionals[0]
+
+    @property
+    def operand(self) -> str | None:
+        return self.positionals[1] if len(self.positionals) > 1 else None
+
+    @property
+    def scope_text(self) -> str:
+        return " ".join(self.positionals)
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectiveParseFailure:
+    reason: str
+    option: str | None = None
+    expected: int | None = None
+    actual: int | None = None
+
+
+def _flag(*, config_value: bool = False) -> _OptionGrammar:
+    return _OptionGrammar(
+        value_kind="bool" if config_value else "flag",
+        tcl_arity=0,
+        config_arity=1 if config_value else 0,
+        true_only=config_value,
+    )
+
+
+def _integer(
+    *, minimum: int | None = None, maximum: int | None = None,
+) -> _OptionGrammar:
+    return _OptionGrammar(
+        value_kind="int", minimum=minimum, maximum=maximum,
+    )
+
+
+def _enum(*values: str) -> _OptionGrammar:
+    return _OptionGrammar(value_kind="enum", choices=tuple(values))
+
+
+_INTERFACE_MODES = (
+    "ap_none", "ap_stable", "ap_vld", "ap_ack", "ap_hs", "ap_ovld",
+    "ap_memory", "bram", "ap_fifo", "s_axilite", "m_axi", "axis",
+    "ap_ctrl_chain", "ap_ctrl_hs", "ap_ctrl_none",
+)
+_INTERFACE_BLOCK_CONTROL_MODES = frozenset({
+    "ap_ctrl_chain", "ap_ctrl_hs", "ap_ctrl_none",
+})
+
+
+# This is intentionally the complete set that the public v0.3 extractor claims
+# for AMD Vitis HLS 2024.2.  A similarly named command outside this table is a
+# diagnostic, never a best-effort directive declaration.
+_DIRECTIVE_GRAMMARS: dict[str, _DirectiveGrammar] = {
+    "DATAFLOW": _DirectiveGrammar(
+        ("location",),
+        {"disable_start_propagation": _flag()},
+        frozenset({"hls.kernel", "hls.function", "hls.loop"}),
+    ),
+    "PIPELINE": _DirectiveGrammar(
+        ("location",),
+        {
+            "ii": _integer(minimum=1),
+            "off": _flag(),
+            "rewind": _flag(),
+            "style": _enum("stp", "flp", "frp"),
+        },
+        frozenset({"hls.kernel", "hls.function", "hls.loop"}),
+    ),
+    "UNROLL": _DirectiveGrammar(
+        ("location",),
+        {
+            "factor": _integer(minimum=1),
+            "off": _flag(config_value=True),
+            "skip_exit_check": _flag(),
+        },
+        frozenset({"hls.loop"}),
+    ),
+    "ARRAY_PARTITION": _DirectiveGrammar(
+        ("location", "array"),
+        {
+            "dim": _integer(minimum=0),
+            "factor": _integer(minimum=1),
+            "off": _flag(config_value=True),
+            "type": _enum("block", "cyclic", "complete"),
+        },
+        frozenset({"hls.kernel", "hls.function", "hls.loop"}),
+    ),
+    "INTERFACE": _DirectiveGrammar(
+        ("location", "port"),
+        {
+            "bundle": _OptionGrammar(),
+            "channel": _OptionGrammar(),
+            "clock": _OptionGrammar(),
+            "depth": _integer(minimum=1),
+            "interrupt": _integer(minimum=16, maximum=31),
+            "latency": _integer(minimum=0),
+            "max_read_burst_length": _integer(minimum=1),
+            "max_widen_bitwidth": _integer(minimum=0),
+            "max_write_burst_length": _integer(minimum=1),
+            "mode": _enum(*_INTERFACE_MODES),
+            "name": _OptionGrammar(),
+            "num_read_outstanding": _integer(minimum=1),
+            "num_write_outstanding": _integer(minimum=1),
+            "offset": _OptionGrammar(),
+            "register": _flag(),
+            "register_mode": _enum("both", "forward", "reverse", "off"),
+            "storage_impl": _enum("auto", "bram", "uram"),
+            "storage_type": _enum(
+                "ram_1p", "ram_1wnr", "ram_2p", "ram_s2p", "ram_t2p",
+                "rom_1p", "rom_2p", "rom_np",
+            ),
+        },
+        frozenset({"hls.kernel"}),
+    ),
+    "STREAM": _DirectiveGrammar(
+        ("location", "variable"),
+        {
+            "depth": _integer(minimum=1),
+            "type": _enum("fifo", "pipo", "shared", "unsync"),
+        },
+        frozenset({"hls.kernel", "hls.function", "hls.loop"}),
+    ),
+    "DEPENDENCE": _DirectiveGrammar(
+        ("location",),
+        {
+            "class": _enum("array", "pointer"),
+            "dependent": _OptionGrammar(value_kind="bool"),
+            "direction": _enum("raw", "war", "waw"),
+            "distance": _integer(minimum=1),
+            "type": _enum("intra", "inter"),
+            "variable": _OptionGrammar(),
+        },
+        frozenset({"hls.kernel", "hls.function", "hls.loop"}),
+    ),
+    "LOOP_TRIPCOUNT": _DirectiveGrammar(
+        ("location",),
+        {
+            "avg": _integer(minimum=0),
+            "max": _integer(minimum=0),
+            "min": _integer(minimum=0),
+        },
+        frozenset({"hls.loop"}),
+    ),
+    "INLINE": _DirectiveGrammar(
+        ("location",),
+        {"off": _flag(), "recursive": _flag()},
+        frozenset({"hls.kernel", "hls.function"}),
+    ),
+}
+
+
+def _coerce_option_value(
+    raw_value: str, grammar: _OptionGrammar,
+) -> tuple[Any | None, str | None]:
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return None, "empty_option_value"
+    if grammar.value_kind == "int":
+        # The supported AMD directive options use non-negative decimal
+        # integers.  Python-only spellings such as ``1_024`` and implicit
+        # base prefixes must not be accepted as vendor syntax.
+        if re.fullmatch(r"[0-9]+", raw_value) is None:
+            return None, "invalid_integer"
+        value = int(raw_value, 10)
+        if grammar.minimum is not None and value < grammar.minimum:
+            return None, "integer_out_of_range"
+        if grammar.maximum is not None and value > grammar.maximum:
+            return None, "integer_out_of_range"
+        return value, None
+    if grammar.value_kind == "bool":
+        lowered = raw_value.casefold()
+        if lowered not in {"true", "false"}:
+            return None, "invalid_boolean"
+        value = lowered == "true"
+        if grammar.true_only and not value:
+            return None, "unsupported_false_disable"
+        return value, None
+    if grammar.value_kind == "enum":
+        lowered = raw_value.casefold()
+        if lowered not in grammar.choices:
+            return None, "invalid_enum"
+        return lowered, None
+    return raw_value, None
+
+
+def _parse_tcl_directive(
+    kind: str, tokens: list[str], grammar: _DirectiveGrammar,
+) -> tuple[dict[str, Any] | None, list[str] | None, _DirectiveParseFailure | None]:
     options: dict[str, Any] = {}
-    scope: str | None = None
+    positional: list[str] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token.startswith("-"):
-            key = token.lstrip("-").lower()
-            if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-                options[key] = _value(tokens[index + 1])
-                index += 2
-            else:
-                options[key] = True
-                index += 1
-        else:
-            scope = token.strip('{}"')
+        if not token.startswith("-"):
+            # The literal Tcl tokenizer has already removed exactly one outer
+            # grouping layer.  Rewriting the remaining spelling would turn a
+            # genuinely different location such as ``"{dut}"`` into ``dut``.
+            positional.append(token)
             index += 1
-    return options, scope
+            continue
+        key = token[1:].casefold()
+        option_grammar = grammar.options.get(key)
+        if not key or option_grammar is None:
+            return None, None, _DirectiveParseFailure("unknown_option", key or None)
+        if key in options:
+            return None, None, _DirectiveParseFailure("duplicate_option", key)
+        if option_grammar.tcl_arity == 0:
+            options[key] = True
+            index += 1
+            continue
+        if index + 1 >= len(tokens):
+            return None, None, _DirectiveParseFailure("missing_option_value", key)
+        raw_value = tokens[index + 1]
+        # Tcl options are separate words.  A following option token is never
+        # a string value for the current option: accepting ``-bundle
+        # -register`` as bundle="-register" would promote an invalid command
+        # into a requested directive.
+        if raw_value.startswith("-"):
+            return None, None, _DirectiveParseFailure(
+                "missing_option_value", key,
+            )
+        value, error = _coerce_option_value(raw_value, option_grammar)
+        if error:
+            return None, None, _DirectiveParseFailure(error, key)
+        options[key] = value
+        index += 2
+    return options, positional, None
+
+
+def _parse_config_directive(
+    kind: str, text: str, tokens: list[str], grammar: _DirectiveGrammar,
+) -> tuple[dict[str, Any] | None, list[str] | None, _DirectiveParseFailure | None]:
+    if "," in text:
+        return None, None, _DirectiveParseFailure("legacy_comma_syntax")
+    options: dict[str, Any] = {}
+    positional: list[str] = []
+    for token in tokens:
+        if token.startswith("-"):
+            return None, None, _DirectiveParseFailure("tcl_option_in_config")
+        if "=" in token:
+            key, raw_value = token.split("=", 1)
+            key = key.casefold()
+            option_grammar = grammar.options.get(key)
+            if not key or option_grammar is None:
+                return None, None, _DirectiveParseFailure("unknown_option", key or None)
+            if key in options:
+                return None, None, _DirectiveParseFailure("duplicate_option", key)
+            if option_grammar.config_arity != 1:
+                return None, None, _DirectiveParseFailure("flag_has_value", key)
+            value, error = _coerce_option_value(raw_value, option_grammar)
+            if error:
+                return None, None, _DirectiveParseFailure(error, key)
+            options[key] = value
+            continue
+        key = token.casefold()
+        option_grammar = grammar.options.get(key)
+        if option_grammar is not None:
+            if key in options:
+                return None, None, _DirectiveParseFailure("duplicate_option", key)
+            if option_grammar.config_arity != 0:
+                return None, None, _DirectiveParseFailure("missing_option_value", key)
+            options[key] = True
+            continue
+        # Config tokenization owns quoting semantics.  Do not perform a second
+        # normalization pass that could change the declared scope spelling.
+        positional.append(token)
+    return options, positional, None
+
+
+def _validate_directive_shape(
+    kind: str, options: Mapping[str, Any], positional: list[str],
+    grammar: _DirectiveGrammar,
+) -> _DirectiveParseFailure | None:
+    expected = len(grammar.positional_roles)
+    mode = str(options.get("mode", "")).casefold()
+    block_control = kind == "INTERFACE" and mode in _INTERFACE_BLOCK_CONTROL_MODES
+    allowed_counts = {expected}
+    if block_control:
+        # AMD permits omitting the return/control port spelling.  The current
+        # graph has no deterministic return/control-port entity, so this shape
+        # is parsed but deliberately kept unsupported below.
+        allowed_counts.add(1)
+    if len(positional) not in allowed_counts or any(not item for item in positional):
+        return _DirectiveParseFailure(
+            "wrong_positional_arity", expected=expected, actual=len(positional),
+        )
+    if kind == "DEPENDENCE":
+        has_class = "class" in options
+        has_variable = "variable" in options
+        if has_class == has_variable:
+            return _DirectiveParseFailure("dependence_operand_not_exclusive")
+    if kind == "ARRAY_PARTITION" and options.get("off") is True:
+        if {"dim", "factor", "type"}.intersection(options):
+            return _DirectiveParseFailure("array_partition_off_conflict", "off")
+    if kind == "PIPELINE" and options.get("off") is True:
+        if {"ii", "rewind", "style"}.intersection(options):
+            return _DirectiveParseFailure("pipeline_off_conflict", "off")
+    if kind == "UNROLL" and options.get("off") is True:
+        if {"factor", "skip_exit_check"}.intersection(options):
+            return _DirectiveParseFailure("unroll_off_conflict", "off")
+    if kind == "INLINE" and options.get("off") is True:
+        if options.get("recursive") is True:
+            return _DirectiveParseFailure("inline_off_conflict", "off")
+    if kind == "LOOP_TRIPCOUNT" and not options:
+        return _DirectiveParseFailure("missing_required_option")
+    if kind == "LOOP_TRIPCOUNT":
+        minimum = options.get("min")
+        average = options.get("avg")
+        maximum = options.get("max")
+        if (minimum is not None and maximum is not None and minimum > maximum) or (
+            minimum is not None and average is not None and minimum > average
+        ) or (
+            average is not None and maximum is not None and average > maximum
+        ):
+            return _DirectiveParseFailure("tripcount_order_invalid")
+    if kind == "INTERFACE":
+        bundle = options.get("bundle")
+        if isinstance(bundle, str) and bundle != bundle.casefold():
+            return _DirectiveParseFailure("interface_bundle_not_lowercase", "bundle")
+    return None
+
+
+def _parse_directive(
+    *, kind: str, text: str, origin: str,
+) -> tuple[_ParsedDirective | None, _DirectiveParseFailure | None]:
+    grammar = _DIRECTIVE_GRAMMARS.get(kind)
+    if grammar is None:
+        return None, _DirectiveParseFailure("unsupported_directive_kind")
+    tokens, token_error = (
+        _tcl_literal_tokens(text)
+        if origin == "tcl" else _config_literal_tokens(text)
+    )
+    if token_error or tokens is None:
+        return None, _DirectiveParseFailure(token_error or "tokenization_failed")
+    if origin == "tcl":
+        options, positional, failure = _parse_tcl_directive(kind, tokens, grammar)
+        parse_policy = "hlsgraph.amd_2024_2_tcl_literal_strict_v1"
+    else:
+        options, positional, failure = _parse_config_directive(
+            kind, text, tokens, grammar,
+        )
+        parse_policy = "hlsgraph.amd_2024_2_config_whitespace_strict_v1"
+    if failure or options is None or positional is None:
+        return None, failure or _DirectiveParseFailure("parse_failed")
+    failure = _validate_directive_shape(kind, options, positional, grammar)
+    if failure:
+        return None, failure
+    return _ParsedDirective(
+        kind=kind,
+        options=options,
+        positionals=tuple(positional),
+        parse_policy=parse_policy,
+    ), None
 
 
 def _normalize_scope(value: str) -> str:
-    return value.strip().strip('{}"').replace("\\", "/").strip("/")
+    """Return an exact external scope spelling or a fail-closed sentinel.
+
+    Separators and surrounding characters are part of the AMD location.  In
+    particular, ``/dut/`` must not be silently rewritten to ``dut``.  Tcl and
+    config tokenizers reject escape syntax before this point, so no path-style
+    backslash normalization is appropriate here either.
+    """
+
+    if not value or value != value.strip() or value.startswith("/") or value.endswith("/"):
+        return ""
+    return value
 
 
-def _resolve_scope(graph: CanonicalGraph, scope: str | None) -> Entity | None:
-    if not scope:
-        kernels = [item for item in graph.entities.values() if item.kind == "hls.kernel"]
-        return kernels[0] if len(kernels) == 1 else None
-    scope = _normalize_scope(scope)
-    leaf = scope.split("/")[-1]
-    exact = [item for item in graph.entities.values()
-             if item.id == scope or item.qualified_name == scope or scope in item.aliases]
-    if len(exact) == 1:
-        return exact[0]
-    matches = [item for item in graph.entities.values()
-               if item.name == leaf and (len(scope.split("/")) == 1 or
-                                         (item.qualified_name or "").replace("::", "/").endswith(scope))]
+def _static_ast_entity(entity: Entity, snapshot_id: str) -> bool:
+    return bool(
+        entity.snapshot_id == snapshot_id
+        and entity.stage == Stage.AST.value
+        and str(entity.authority) == "static_fact"
+        and str(entity.completeness) == "complete"
+    )
+
+
+def _static_ast_containment(relation: Relation, snapshot_id: str) -> bool:
+    return bool(
+        relation.snapshot_id == snapshot_id
+        and relation.stage == Stage.AST.value
+        and str(relation.authority) == "static_fact"
+        and str(relation.completeness) == "complete"
+    )
+
+
+def _ownership_lineage(
+    graph: CanonicalGraph, entity: Entity,
+) -> tuple[Entity, tuple[str, ...]] | None:
+    """Return one proven lexical lineage ending at its nearest function owner."""
+    if not _static_ast_entity(entity, graph.snapshot_id):
+        return None
+    current = entity
+    lineage = [current.id]
+    visited = {current.id}
+    while current.kind not in {"hls.kernel", "hls.function"}:
+        incoming = [
+            relation for relation in graph.relations.values()
+            if relation.kind == "hls.contains"
+            and relation.dst == current.id
+        ]
+        # Ownership is identity evidence.  Missing, multiple, partial, stale,
+        # or non-AST containment must therefore fail closed.
+        if len(incoming) != 1:
+            return None
+        relation = incoming[0]
+        parent = graph.entities.get(relation.src)
+        if (
+            parent is None
+            or not _static_ast_containment(relation, graph.snapshot_id)
+            or not _static_ast_entity(parent, graph.snapshot_id)
+            or parent.id in visited
+        ):
+            return None
+        current = parent
+        visited.add(current.id)
+        lineage.append(current.id)
+    return current, tuple(lineage)
+
+
+def _function_like_owners(
+    graph: CanonicalGraph, entity: Entity,
+) -> list[Entity]:
+    resolved = _ownership_lineage(graph, entity)
+    return [resolved[0]] if resolved is not None else []
+
+
+def _scope_spellings(graph: CanonicalGraph, entity: Entity) -> set[str]:
+    if entity.kind == "hls.loop":
+        owners = _function_like_owners(graph, entity)
+        if len(owners) != 1:
+            return set()
+        # AMD external locations use function[/label].  A bare label or a
+        # libclang qualified-name suffix is not an external scope identity.
+        values = {f"{owners[0].name}/{entity.name}"}
+    else:
+        values = {entity.name, entity.qualified_name or "", *entity.aliases}
+    return {
+        _normalize_scope(value.replace("::", "/"))
+        for value in values if value
+    }
+
+
+def _resolve_location(
+    graph: CanonicalGraph, location: str, *, allowed_kinds: frozenset[str],
+) -> Entity | None:
+    normalized = _normalize_scope(location)
+    if not normalized:
+        return None
+    matches = [
+        entity for entity in graph.entities.values()
+        if entity.kind in allowed_kinds
+        and _static_ast_entity(entity, graph.snapshot_id)
+        and (
+            entity.kind != "hls.loop"
+            or _ownership_lineage(graph, entity) is not None
+        )
+        and normalized in _scope_spellings(graph, entity)
+    ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_external_variable_operand(
+    graph: CanonicalGraph,
+    scope: Entity | None,
+    variable_name: Any,
+) -> Entity | None:
+    """Resolve an exact operand using one complete static ownership chain."""
+    if scope is None or not isinstance(variable_name, str) or not variable_name:
+        return None
+    scope_lineage = _ownership_lineage(graph, scope)
+    if scope_lineage is None:
+        return None
+    scope_owner, scope_ids = scope_lineage
+    allowed_kinds = {"hls.memory", "hls.stream", "hls.port", "source.variable"}
+    matches: list[Entity] = []
+    for candidate in graph.entities.values():
+        if (
+            candidate.kind not in allowed_kinds
+            or candidate.name != variable_name
+            or not _static_ast_entity(candidate, graph.snapshot_id)
+        ):
+            continue
+        candidate_lineage = _ownership_lineage(graph, candidate)
+        if candidate_lineage is None:
+            continue
+        candidate_owner, candidate_ids = candidate_lineage
+        if candidate_owner.id != scope_owner.id:
+            continue
+        if scope.kind in {"hls.kernel", "hls.function"}:
+            matches.append(candidate)
+            continue
+        candidate_parent = candidate_ids[1] if len(candidate_ids) > 1 else None
+        visible_from_scope = bool(
+            candidate_parent == scope_owner.id
+            or candidate_parent in set(scope_ids[:-1])
+            or scope.id in candidate_ids[1:]
+        )
+        if visible_from_scope:
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_interface_scope(
+    graph: CanonicalGraph, location: str, port_name: str, *,
+    component_name: str,
+) -> Entity | None:
+    normalized_location = _normalize_scope(location)
+    kernels = [
+        item for item in graph.entities.values()
+        if item.kind == "hls.kernel"
+        and _static_ast_entity(item, graph.snapshot_id)
+        and item.name == component_name
+    ]
+    if len(kernels) != 1:
+        return None
+    kernel = kernels[0]
+    # The external grammar names the configured top function.  A canonical
+    # entity ID is an internal storage identity, not an AMD location spelling,
+    # and accepting it would let a caller bypass the source-level scope proof.
+    if normalized_location != _normalize_scope(component_name):
+        return None
+    candidates: list[Entity] = []
+    for port in graph.entities.values():
+        if (port.kind != "hls.port" or port.name != port_name
+                or not _static_ast_entity(port, graph.snapshot_id)):
+            continue
+        owners = [
+            relation for relation in graph.relations.values()
+            if relation.kind == "hls.contains"
+            and relation.dst == port.id
+        ]
+        if (
+            len(owners) == 1
+            and owners[0].src == kernel.id
+            and owners[0].snapshot_id == graph.snapshot_id
+            and owners[0].stage == Stage.AST.value
+            and str(owners[0].authority) == "static_fact"
+            and str(owners[0].completeness) == "complete"
+        ):
+            candidates.append(port)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _resolve_parsed_scope(
+    graph: CanonicalGraph, parsed: _ParsedDirective, *, component_name: str,
+) -> tuple[Entity | None, Entity | None]:
+    grammar = _DIRECTIVE_GRAMMARS[parsed.kind]
+    if parsed.kind == "INTERFACE":
+        if str(parsed.options.get("mode", "")).casefold() in (
+            _INTERFACE_BLOCK_CONTROL_MODES
+        ):
+            return None, None
+        assert parsed.operand is not None
+        port = _resolve_interface_scope(
+            graph, parsed.location, parsed.operand,
+            component_name=component_name,
+        )
+        return port, port
+    location = _resolve_location(
+        graph, parsed.location, allowed_kinds=grammar.scope_kinds,
+    )
+    if parsed.kind in {"ARRAY_PARTITION", "STREAM"}:
+        assert parsed.operand is not None
+        operand = _resolve_external_variable_operand(
+            graph, location, parsed.operand,
+        )
+        return operand, operand
+    if parsed.kind == "DEPENDENCE":
+        operand = _resolve_external_variable_operand(
+            graph, location, parsed.options.get("variable"),
+        )
+        return location, operand
+    return location, None
 
 
 class ExternalDirectiveExtractor:
     name = "directive.external"
-    version = "1"
+    version = "3"
 
     def supports(self, context: ExtractionContext) -> bool:
         return bool(context.manifest.build.tcl_files or context.manifest.build.config_files)
@@ -287,6 +895,7 @@ class ExternalDirectiveExtractor:
         sources += [(path, "config", 20) for path in context.manifest.build.config_files]
         count = 0
         ambiguous_tcl = 0
+        rejected_syntax = 0
         for relative, origin, precedence in sources:
             artifact = context.artifact_for_uri(relative)
             path = project_path(context.project_root, relative)
@@ -303,7 +912,17 @@ class ExternalDirectiveExtractor:
             tcl_structure_uncertain = False
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             for line_number, raw_line in enumerate(lines, 1):
-                line = _strip_comment(raw_line)
+                if origin == "tcl":
+                    # Tcl comments are commands beginning with ``#``.  An
+                    # inline ``#`` or C++ ``//`` is data unless a Tcl parser
+                    # proves otherwise, so this conservative importer does not
+                    # erase it into a different valid directive.
+                    line = raw_line.rstrip()
+                    if (not tcl_lexical_state and not tcl_continued
+                            and line.lstrip().startswith("#")):
+                        line = ""
+                else:
+                    line = _strip_comment(raw_line)
                 if origin == "tcl":
                     lexical_state_before = tcl_lexical_state
                     continued_from_previous = tcl_continued
@@ -335,7 +954,7 @@ class ExternalDirectiveExtractor:
                                 code="directive.tcl_nonliteral_context",
                                 severity=DiagnosticSeverity.WARNING,
                                 message=("a possible Tcl directive was not imported because "
-                                         "v0.1 only accepts complete, top-level literal commands"),
+                                         "only complete, top-level literal commands are accepted"),
                                 stage=Stage.SOURCE.value, artifact_id=artifact.id,
                                 anchor=anchor,
                                 id=("diagnostic_" + stable_hash({
@@ -352,44 +971,85 @@ class ExternalDirectiveExtractor:
                                 },
                             ))
                             continue
+                tcl_match = _TCL_DIRECTIVE.match(line) if origin == "tcl" else None
+                config_match = (
+                    _CONFIG_DIRECTIVE.match(line) if origin == "config" else None
+                )
                 directive_kind: str | None = None
-                options: dict[str, Any] = {}
-                scope: str | None = None
-                tcl_match = _TCL_DIRECTIVE.match(line)
-                config_match = _CONFIG_DIRECTIVE.match(line)
+                directive_text: str | None = None
                 if tcl_match:
                     directive_kind = tcl_match.group(1).upper()
-                    options, scope = _parse_options(_tcl_tokens(tcl_match.group(2)))
+                    directive_text = tcl_match.group(2)
                 elif config_match:
                     directive_kind = config_match.group(1).upper()
-                    fields = [item.strip() for item in config_match.group(2).split(",") if item.strip()]
-                    if fields and "=" not in fields[0]:
-                        scope = fields.pop(0)
-                    for field in fields:
-                        if "=" in field:
-                            key, raw = field.split("=", 1)
-                            options[key.strip().lower()] = _value(raw)
-                if not directive_kind:
+                    directive_text = config_match.group(2)
+                if not directive_kind or directive_text is None:
                     continue
-                count += 1
                 anchor = SourceAnchor(artifact_id=artifact.id, start_line=line_number,
                                       start_column=1, end_line=line_number,
                                       end_column=len(line) + 1)
-                target = _resolve_scope(existing, scope)
-                if (directive_kind == "DEPENDENCE" and target is not None
-                        and target.kind not in {
-                            "hls.kernel", "hls.function", "hls.loop",
-                        }):
-                    target = None
-                operand_target = (
-                    resolve_directive_variable_operand(
-                        existing, target, options.get("variable"),
-                    )
-                    if directive_kind == "DEPENDENCE" else None
+                parsed, failure = _parse_directive(
+                    kind=directive_kind, text=directive_text, origin=origin,
+                )
+                if failure is not None or parsed is None:
+                    rejected_syntax += 1
+                    metadata: dict[str, Any] = {
+                        "reason": (
+                            failure.reason if failure is not None else "parse_failed"
+                        ),
+                        "directive_kind": directive_kind,
+                        "origin": origin,
+                        "completeness": Completeness.AMBIGUOUS.value,
+                        "grammar": "amd.vitis_hls.2024_2.external_directives.v1",
+                    }
+                    if failure is not None:
+                        if failure.option:
+                            metadata["option"] = failure.option
+                        if failure.expected is not None:
+                            metadata["expected_positionals"] = failure.expected
+                        if failure.actual is not None:
+                            metadata["actual_positionals"] = failure.actual
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id,
+                        code="directive.invalid_external_syntax",
+                        severity=DiagnosticSeverity.WARNING,
+                        message=(
+                            f"{directive_kind} was not imported because it does not "
+                            "match the strict AMD Vitis HLS 2024.2 external grammar"
+                        ),
+                        stage=Stage.SOURCE.value,
+                        artifact_id=artifact.id,
+                        anchor=anchor,
+                        id=("diagnostic_" + stable_hash({
+                            "snapshot": context.snapshot.id,
+                            "code": "directive.invalid_external_syntax",
+                            "artifact": artifact.id,
+                            "line": line_number,
+                            "kind": directive_kind,
+                            "reason": metadata["reason"],
+                        })[:24]),
+                        metadata=metadata,
+                    ))
+                    continue
+                count += 1
+                options = parsed.options
+                scope = parsed.scope_text
+                block_control_unsupported = bool(
+                    directive_kind == "INTERFACE"
+                    and str(options.get("mode", "")).casefold()
+                    in _INTERFACE_BLOCK_CONTROL_MODES
+                )
+                target, operand_target = _resolve_parsed_scope(
+                    existing, parsed,
+                    component_name=context.manifest.build.top,
                 )
                 identity_complete = bool(
                     target is not None
-                    and (directive_kind != "DEPENDENCE" or operand_target is not None)
+                    and (
+                        directive_kind != "DEPENDENCE"
+                        or "class" in options
+                        or operand_target is not None
+                    )
                 )
                 directive = Entity(
                     kind="hls.directive", name=directive_kind,
@@ -400,10 +1060,7 @@ class ExternalDirectiveExtractor:
                     attrs={"directive_kind": directive_kind, "options": options,
                            "scope_text": scope, "origin": origin,
                            "precedence": precedence, "state": "requested",
-                           "parse_policy": (
-                               "hlsgraph.tcl_literal_top_level_v1"
-                               if origin == "tcl" else "hlsgraph.config_literal_v1"
-                           )},
+                           "parse_policy": parsed.parse_policy},
                     anchors=[anchor],
                     completeness=(Completeness.COMPLETE if identity_complete
                                   else Completeness.AMBIGUOUS),
@@ -422,6 +1079,7 @@ class ExternalDirectiveExtractor:
                         attrs={"scope_node_id": target.id, "scope_text": scope,
                                "scope_resolution": "external_exact"}, anchors=[anchor],
                     ), allow_dangling=True)
+                if identity_complete:
                     result.observations.append(Observation(
                         snapshot_id=context.snapshot.id, subject_id=directive.id,
                         predicate="directive.requested", value=options or True,
@@ -434,30 +1092,70 @@ class ExternalDirectiveExtractor:
                                   "origin": origin, "precedence": precedence,
                                   "parse_policy": directive.attrs["parse_policy"]},
                     ))
-                else:
-                    result.diagnostics.append(Diagnostic(
-                        snapshot_id=context.snapshot.id, code="directive.unresolved_scope",
-                        severity=DiagnosticSeverity.WARNING,
-                        message=f"could not deterministically resolve external scope {scope!r}",
-                        stage=Stage.SOURCE.value, subject_id=directive.id,
-                        artifact_id=artifact.id, anchor=anchor,
-                    ))
-                if (target is not None and directive_kind == "DEPENDENCE"
-                        and operand_target is None):
+                elif block_control_unsupported:
+                    directive.attrs["state"] = "unsupported_requested"
                     result.diagnostics.append(Diagnostic(
                         snapshot_id=context.snapshot.id,
-                        code="directive.unresolved_operand",
+                        code="directive.unsupported_scope_form",
                         severity=DiagnosticSeverity.WARNING,
-                        message=("could not deterministically resolve DEPENDENCE operand "
-                                 f"{options.get('variable')!r} inside scope {scope!r}"),
+                        message=(
+                            "block-control INTERFACE declarations are preserved as "
+                            "unsupported because the current graph has no deterministic "
+                            "return/control-port entity"
+                        ),
+                        stage=Stage.SOURCE.value, subject_id=directive.id,
+                        artifact_id=artifact.id, anchor=anchor,
+                        metadata={
+                            "reason": "block_control_port_not_modeled",
+                            "directive_kind": directive_kind,
+                            "parse_policy": parsed.parse_policy,
+                            "completeness": Completeness.AMBIGUOUS.value,
+                        },
+                    ))
+                else:
+                    unresolved_code = "directive.unresolved_scope"
+                    unresolved_message = (
+                        f"could not deterministically resolve external scope {scope!r}"
+                    )
+                    if (directive_kind == "DEPENDENCE"
+                            and target is not None and "variable" in options):
+                        unresolved_code = "directive.unresolved_operand"
+                        unresolved_message = (
+                            "could not deterministically resolve DEPENDENCE operand "
+                            f"{options.get('variable')!r} inside scope {scope!r}"
+                        )
+                    elif directive_kind in {"ARRAY_PARTITION", "STREAM"}:
+                        location = _resolve_location(
+                            existing, parsed.location,
+                            allowed_kinds=_DIRECTIVE_GRAMMARS[
+                                directive_kind
+                            ].scope_kinds,
+                        )
+                        if location is not None:
+                            unresolved_code = "directive.unresolved_operand"
+                            unresolved_message = (
+                                f"could not deterministically resolve {directive_kind} "
+                                f"operand {parsed.operand!r} inside "
+                                f"{parsed.location!r}"
+                            )
+                    result.diagnostics.append(Diagnostic(
+                        snapshot_id=context.snapshot.id, code=unresolved_code,
+                        severity=DiagnosticSeverity.WARNING,
+                        message=unresolved_message,
                         stage=Stage.SOURCE.value, subject_id=directive.id,
                         artifact_id=artifact.id, anchor=anchor,
                     ))
         result.coverage = {
             "external_directives": count,
             "ambiguous_tcl_directives": ambiguous_tcl,
+            "rejected_external_syntax": rejected_syntax,
             "policy": "declared_precedence_v1",
-            "tcl_parse_policy": "hlsgraph.tcl_literal_top_level_v1",
+            "tcl_context_policy": "hlsgraph.tcl_literal_top_level_v1",
+            "tcl_parse_policy": "hlsgraph.amd_2024_2_tcl_literal_strict_v1",
+            "config_parse_policy": (
+                "hlsgraph.amd_2024_2_config_whitespace_strict_v1"
+            ),
+            "directive_grammar": "amd.vitis_hls.2024.2.external_directives.v1",
         }
         return result
 

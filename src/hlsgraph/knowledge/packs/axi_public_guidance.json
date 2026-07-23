@@ -47,10 +47,10 @@
       "rule_id": "axi.interface_mode_is_scoped_request",
       "title": "Keep Vitis AXI interface mode attached to its port scope",
       "applicability": {"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source"},
-      "condition": {"directive_kind":"INTERFACE","interface_mode":{"one_of":["m_axi","s_axilite","axis"]}},
-      "effect": {"requires_port_scope":true,"tool_confirmation_required":true,"system_connectivity_not_implied":true},
+      "condition": {"directive_kind":"INTERFACE","interface_mode":{"one_of":["m_axi","s_axilite","axis"]},"port_ownership_qualified":"derived_from_unique_current_component_port_v1"},
+      "effect": {"requires_port_scope":true,"requires_configured_component_owner":true,"tool_confirmation_required":true,"system_connectivity_not_implied":true},
       "citation_url": "https://docs.amd.com/r/2024.2-English/ug1399-vitis-hls/pragma-HLS-interface",
-      "summary": "Vitis INTERFACE mode m_axi, s_axilite, or axis is a request on a named port; it does not by itself prove the generated adapter or any external system connection.",
+      "summary": "Vitis INTERFACE mode m_axi, s_axilite, or axis is a request on a named port of the configured top component; it does not by itself prove the generated adapter or any external system connection.",
       "license_note": "Short project-authored paraphrase; no specification text is redistributed."
     }
   ],
@@ -59,7 +59,7 @@
       "knowledge_rule_id":"amd.ug1399:2024.2:axi.interface_mode_is_scoped_request",
       "target_kind":"directive_kind",
       "target":"INTERFACE",
-      "required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","interface_mode":{"one_of":["m_axi","s_axilite","axis"]},"directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.port","port_id":{"required":true},"directive_operand_linked":"derived_from_current_directive_operand_link_v1","directive_operand_identity":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},
+      "required_context":{"vendor":"amd","tool":"vitis_hls","tool_version":"2024.2","stage":"source","interface_mode":{"one_of":["m_axi","s_axilite","axis"]},"directive_instance_id":{"required":true},"scope_id":{"required":true},"scope_resolution":{"one_of":["source_ast","external_exact"]},"scope_kind":"hls.port","port_id":{"required":true},"port_owner_id":{"required":true},"configured_component_id":{"required":true},"port_ownership_qualified":"derived_from_unique_current_component_port_v1","port_ownership_identity":{"required":true},"directive_operand_linked":"derived_from_current_directive_operand_link_v1","directive_operand_identity":{"required":true},"directive_source_declaration_qualified":"derived_from_current_directive_source_declaration_v1","directive_source_identity":{"required":true}},
       "producer":"hlsgraph.knowledge.binding",
       "producer_version":"1",
       "metadata":{"dynamic_scope":"static"}
@@ -73,12 +73,12 @@
     "reviewers": [],
     "source_hashes": {},
     "entries": [
-      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS interface","status":"rule","rule_ids":["amd.ug1399:2024.2:axi.interface_mode_is_scoped_request"],"binding_ids":["knowledge_binding_f8cb6799765ccba80514a4c2"]},
+      {"document_id":"amd.ug1399","document_version":"2024.2","section":"pragma HLS interface","status":"rule","rule_ids":["amd.ug1399:2024.2:axi.interface_mode_is_scoped_request"],"binding_ids":["knowledge_binding_ae4fcc9d69cb6ad42d4dd62d"]},
       {"document_id":"arm.ihi0022","document_version":"H.c","section":"Channel Architecture and Handshake","status":"citation_only","rationale":"The current extractors do not emit exact AXI4 or AXI4-Lite protocol revision, endpoint role, channel direction, and interface-instance evidence as one closed contract; retain this versioned section as a citation only."},
       {"document_id":"arm.ihi0051","document_version":"B","section":"2.2 Handshake Signaling","status":"citation_only","rationale":"The current extractors do not emit exact AXI4-Stream specification revision, transmitter or receiver role, signal direction, and interface-instance evidence as one closed contract; retain this versioned section as a citation only."}
     ],
     "target_inventory": [
-      {"target_kind":"directive_kind","target":"INTERFACE","status":"bound","binding_ids":["knowledge_binding_f8cb6799765ccba80514a4c2"]},
+      {"target_kind":"directive_kind","target":"INTERFACE","status":"bound","binding_ids":["knowledge_binding_ae4fcc9d69cb6ad42d4dd62d"]},
       {"target_kind":"entity_kind","target":"hls.port","status":"no_normative","rationale":"A generic HLSGraph port has no proven AXI specification revision, endpoint role, channel direction, or interface-instance contract; the current source extractor records its direction as unknown.","binding_ids":[]},
       {"target_kind":"entity_kind","target":"hls.stream","status":"no_normative","rationale":"A generic HLSGraph stream has no proven AXI4-Stream specification revision, transmitter or receiver role, signal direction, or interface-instance contract.","binding_ids":[]},
       {"target_kind":"relation_kind","target":"hls.streams_to","status":"no_normative","rationale":"HLSGraph STREAMS_TO is directional internal design evidence; it carries neither an AXI4-Stream specification revision nor proven transmitter, receiver, and external interface-instance identities.","binding_ids":[]}

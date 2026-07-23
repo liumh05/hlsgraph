@@ -406,7 +406,7 @@ def test_amd_observation_binding_requires_current_declared_report_closure(
         assert bindings == []
         return
     assert bindings
-    assert all(HybridRetriever._binding_applicable(
+    assert all(HybridRetriever._binding_constraints_match_values(
         binding, context, {"predicate": {predicate}},
     ) for binding in bindings)
     assert not any(
@@ -706,7 +706,7 @@ def test_dynamic_observation_binding_closes_exact_workload_and_testcase(
         if item.target_kind == "predicate" and item.target == predicate
         and item.required_context.get("tool") == tool
     )
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, {"predicate": {predicate}},
     )
 
@@ -885,7 +885,7 @@ def test_requested_directive_marker_cannot_be_injected_without_source_record(
         if item.target_kind == "predicate"
         and item.target == "directive.tool_status"
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, context, {"predicate": {"directive.tool_status"}},
     )
 
@@ -1003,7 +1003,7 @@ def test_directive_kind_requires_unique_live_source_declaration(
         if item.target_kind == "directive_kind" and item.target == "PIPELINE"
         and item.required_context.get("function_id") == {"required": True}
     )
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, {"directive_kind": {"PIPELINE"}},
     )
 
@@ -1022,7 +1022,7 @@ def test_directive_kind_requires_unique_live_source_declaration(
     )[("directive_kind", "PIPELINE")][0]
     assert "directive_source_declaration_qualified" not in changed
     assert "directive_source_identity" not in changed
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, changed, {"directive_kind": {"PIPELINE"}},
     )
 
@@ -1061,7 +1061,7 @@ def test_schedule_directive_status_requires_real_declared_report_closure(
         item for item in bundle.store.knowledge_bindings()
         if item.target_kind == "predicate" and item.target == "directive.tool_status"
     )
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, {"predicate": {"directive.tool_status"}},
     )
 
@@ -1075,7 +1075,7 @@ def test_schedule_directive_status_requires_real_declared_report_closure(
         if item.get("directive_instance_id") == {directive.id.casefold()}
     )
     assert "observation_evidence_qualified" not in changed_context
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, changed_context, {"predicate": {"directive.tool_status"}},
     )
 
@@ -1136,7 +1136,7 @@ def test_tool_artifact_binding_requires_declared_live_run_output(
         )
         return
     binding = next(iter(bindings))
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, {"artifact_kind": {artifact_kind}},
     )
 
@@ -1145,6 +1145,6 @@ def test_tool_artifact_binding_requires_declared_live_run_output(
         graph, set(graph.entities),
     )[("artifact_kind", artifact.kind)]
     assert all("tool_artifact_evidence_qualified" not in item for item in changed)
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         binding, item, {"artifact_kind": {artifact_kind}},
     ) for item in changed)

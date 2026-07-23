@@ -15,9 +15,13 @@ the exact tool/version used in addition to HLSGraph's `CITATION.cff`.
 The public AXI pack has one machine-applicable rule: the AMD Vitis HLS 2024.2
 `INTERFACE` directive is a requested mode attached to one exactly resolved port
 scope. The binding requires the current directive instance, its explicit
-operand link, the resolved port identity, source scope resolution, and the
-matching AMD tool context. It does not prove that an adapter was generated or
-that an external peer, address map, or platform connection exists.
+operand link, the resolved port identity, source scope resolution, and a replayed
+unique `configured top component -> direct port` ownership relation. The owner
+entity and relation are content-bound to the current snapshot, and any second,
+partial, ambiguous, or differently staged function-like owner fails closed. The
+binding also requires one matching AMD tool/version context. It does not prove
+that an adapter was generated or that an external peer, address map, or platform
+connection exists.
 
 Arm IHI0022 H.c and IHI0051 B remain versioned document-and-section references
 only. The current extractors do not produce a closed interface contract with an

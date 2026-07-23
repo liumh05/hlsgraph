@@ -70,7 +70,7 @@ def _unsafe_preprocessor_tokens(text: str) -> set[str]:
     # Translation phases replace trigraphs and splice physical lines before
     # comments, literals, and preprocessing tokens are recognized.  Mirror
     # those two transformations so a split reserved builtin cannot bypass the
-    # conservative v0.1 gate.
+    # conservative deterministic gate.
     for source, replacement in (
         ("??=", "#"), ("??/", "\\"), ("??'", "^"), ("??(", "["),
         ("??)", "]"), ("??!", "|"), ("??<", "{"), ("??>", "}"),
@@ -565,7 +565,7 @@ def _constant_for_loop_facts(cursor: Any) -> dict[str, Any]:
 
 class LibClangExtractor:
     name = "source.libclang"
-    version = "2"
+    version = "3"
 
     def supports(self, context: ExtractionContext) -> bool:
         # Being unsupported would silently omit the source plane.  The standard
@@ -694,7 +694,7 @@ class LibClangExtractor:
                 code="source.unsupported_preprocessor_input",
                 severity=DiagnosticSeverity.ERROR,
                 message=("source uses preprocessing features whose implicit file/time/path "
-                         "inputs are not represented by the v0.1 snapshot"),
+                         "inputs are not represented by this snapshot contract"),
                 stage=Stage.SOURCE.value,
                 metadata={"features": sorted(unsafe_tokens)},
             ))
@@ -730,7 +730,7 @@ class LibClangExtractor:
                     code="source.unsupported_preprocessor_input",
                     severity=DiagnosticSeverity.ERROR,
                     message=("compiler arguments use preprocessing features whose implicit "
-                             "inputs are not represented by the v0.1 snapshot"),
+                             "inputs are not represented by this snapshot contract"),
                     stage=Stage.AST.value,
                     metadata={"features": sorted(unsafe_arguments)},
                 ))
@@ -823,7 +823,7 @@ class LibClangExtractor:
                             severity=DiagnosticSeverity.ERROR,
                             message=("compiler-processed source uses preprocessing features "
                                      "whose implicit file/time/path inputs are not represented "
-                                     "by the v0.1 snapshot"),
+                                     "by this snapshot contract"),
                             stage=Stage.SOURCE.value,
                             artifact_id=artifact.id,
                             metadata={"features": sorted(actual_unsafe_tokens)},
@@ -1107,7 +1107,7 @@ class LibClangExtractor:
                         code="directive.translation_unit_dependent_activity",
                         severity=DiagnosticSeverity.ERROR,
                         message=("source pragma is active in only part of the compilation "
-                                 "context; v0.1 cannot represent it as one unconditional fact"),
+                                 "context; it cannot be represented as one unconditional fact"),
                         stage=Stage.SOURCE.value,
                         artifact_id=artifact.id,
                         anchor=anchor,
@@ -1215,10 +1215,61 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
         owners = [entity for entity in containing
                   if entity.kind in {"hls.kernel", "hls.function"}]
         if owners:
-            owner = min(owners, key=lambda entity: min(
-                (anchor.end_line or line) - (anchor.start_line or line)
-                for anchor in entity.anchors
-            ))
+            spans = {
+                entity.id: min(
+                    (anchor.end_line or line) - (anchor.start_line or line)
+                    for anchor in entity.anchors
+                    if anchor.artifact_id == artifact_id
+                    and anchor.start_line is not None
+                    and anchor.end_line is not None
+                    and anchor.start_line <= line <= anchor.end_line
+                )
+                for entity in owners
+            }
+            smallest = min(spans.values())
+            owner_candidates = [
+                entity for entity in owners if spans[entity.id] == smallest
+            ]
+            if len(owner_candidates) != 1:
+                return None
+            owner = owner_candidates[0]
+            if kind == "INTERFACE":
+                # Vitis INTERFACE is a component-port request.  A lexical
+                # helper parameter or an equally named port elsewhere in the
+                # graph must never be promoted to the configured top port.
+                kernels = [
+                    entity for entity in graph.entities.values()
+                    if entity.kind == "hls.kernel"
+                    and entity.snapshot_id == graph.snapshot_id
+                    and entity.stage == Stage.AST.value
+                    and str(entity.authority) == "static_fact"
+                    and str(entity.completeness) == "complete"
+                ]
+                if len(kernels) != 1 or owner.id != kernels[0].id:
+                    return None
+                direct_ports = []
+                for candidate in matches:
+                    if (candidate.kind != "hls.port"
+                            or candidate.snapshot_id != graph.snapshot_id
+                            or candidate.stage != Stage.AST.value
+                            or str(candidate.authority) != "static_fact"
+                            or str(candidate.completeness) != "complete"):
+                        continue
+                    ownership = [
+                        relation for relation in graph.relations.values()
+                        if relation.kind == "hls.contains"
+                        and relation.dst == candidate.id
+                    ]
+                    if (
+                        len(ownership) == 1
+                        and ownership[0].src == owner.id
+                        and ownership[0].snapshot_id == graph.snapshot_id
+                        and ownership[0].stage == Stage.AST.value
+                        and str(ownership[0].authority) == "static_fact"
+                        and str(ownership[0].completeness) == "complete"
+                    ):
+                        direct_ports.append(candidate)
+                return direct_ports[0] if len(direct_ports) == 1 else None
             owner_name = owner.qualified_name or owner.name
             scoped = [entity for entity in matches
                       if (entity.qualified_name or "").startswith(owner_name + "::")]
@@ -1228,10 +1279,13 @@ def _scope_for_pragma(graph: CanonicalGraph, artifact_id: str, line: int,
                 return preferred[0]
             if len(scoped) == 1:
                 return scoped[0]
-        if len(matches) == 1:
-            return matches[0]
-        # A directive that explicitly names storage/port scope must never fall
-        # back to a loop or function merely because that name is ambiguous.
+            # Once a lexical owner is known, failure to prove a unique child
+            # is ambiguity.  Do not donate an identically named entity from a
+            # sibling function through the former graph-wide fallback.
+            return None
+        # Named storage and port directives require a unique lexical function
+        # owner.  A file-scope pragma must not borrow a graph-wide unique name:
+        # that proves spelling only, not the directive's HLS scope.
         return None
     if kind == "DEPENDENCE":
         # DEPENDENCE names an operand but applies to the loop/function that

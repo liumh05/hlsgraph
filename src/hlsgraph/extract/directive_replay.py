@@ -34,7 +34,7 @@ from .directives import ExternalDirectiveExtractor
 from .source import LibClangExtractor
 
 
-DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v1"
+DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,9 +55,17 @@ class DirectiveReplayProof:
     source_spelling_hash: str
     directive_record_hash: str
     scope_record_hash: str
+    scope_owner_id: str
+    scope_ownership_hash: str
     operand_record_hash: str | None
+    operand_owner_id: str | None
+    operand_ownership_hash: str | None
     annotates_relation_hash: str
     requested_observation_hash: str
+    port_owner_id: str | None
+    port_owner_kind: str | None
+    port_owner_record_hash: str | None
+    port_owner_relation_hash: str | None
     parser_identity: str
     replay_identity: str
     contract: str = DIRECTIVE_REPLAY_CONTRACT
@@ -80,6 +88,63 @@ class DirectiveReplayIndex:
 
 def _record_hash(value: Any) -> str:
     return stable_hash(json_ready(value))
+
+
+def _ownership_closure(
+    graph: CanonicalGraph, entity: Entity,
+) -> tuple[str, Entity, tuple[Any, ...]] | None:
+    """Close one AST entity to one exact nearest function-like owner.
+
+    Every incoming ``hls.contains`` relation participates in the ambiguity
+    check.  A second partial, stale, non-AST, or non-function path is therefore
+    a rejection, not evidence that can be ignored by filtering first.
+    """
+
+    def entity_valid(item: Entity) -> bool:
+        return bool(
+            item.snapshot_id == graph.snapshot_id
+            and item.stage == "ast"
+            and str(item.authority) == "static_fact"
+            and str(item.completeness) == "complete"
+        )
+
+    if not entity_valid(entity):
+        return None
+    current = entity
+    entities = [current]
+    relations: list[Any] = []
+    visited = {current.id}
+    while current.kind not in {"hls.kernel", "hls.function"}:
+        incoming = [
+            relation for relation in graph.relations.values()
+            if relation.kind == "hls.contains" and relation.dst == current.id
+        ]
+        if len(incoming) != 1:
+            return None
+        relation = incoming[0]
+        parent = graph.entities.get(relation.src)
+        if (
+            parent is None
+            or relation.snapshot_id != graph.snapshot_id
+            or relation.stage != "ast"
+            or str(relation.authority) != "static_fact"
+            or str(relation.completeness) != "complete"
+            or not entity_valid(parent)
+            or parent.id in visited
+        ):
+            return None
+        relations.append(relation)
+        current = parent
+        entities.append(current)
+        visited.add(current.id)
+    closure_hash = stable_hash({
+        "entity_ids": [item.id for item in entities],
+        "entity_hashes": [_record_hash(item) for item in entities],
+        "relation_ids": [item.id for item in relations],
+        "relation_hashes": [_record_hash(item) for item in relations],
+        "owner_id": current.id,
+    })
+    return closure_hash, current, tuple(relations)
 
 
 def _snapshot_identity_valid(
@@ -170,6 +235,10 @@ def _proof_for_directive(
     scope = graph.entities.get(scope_id)
     if scope is None or scope.kind != scope_kind:
         return None
+    scope_closure = _ownership_closure(graph, scope)
+    if scope_closure is None:
+        return None
+    scope_ownership_hash, scope_owner, scope_owner_relations = scope_closure
     annotations = [
         relation
         for relation in graph.relations.values()
@@ -219,11 +288,42 @@ def _proof_for_directive(
         return None
     operand_id, operand_role = _directive_operand(directive)
     operand = graph.entities.get(operand_id) if operand_id else None
+    operand_closure = _ownership_closure(graph, operand) if operand is not None else None
     if kind in {"ARRAY_PARTITION", "STREAM", "INTERFACE"}:
-        if operand is None or operand_id != scope_id:
+        if operand is None or operand_id != scope_id or operand_closure is None:
             return None
     elif kind == "DEPENDENCE":
-        if operand is None or operand_id == scope_id:
+        options = directive.attrs.get("options")
+        class_selector = isinstance(options, Mapping) and "class" in options
+        if class_selector:
+            if operand is not None:
+                return None
+        elif (operand is None or operand_id == scope_id
+              or operand_closure is None):
+            return None
+    if (operand_closure is not None
+            and operand_closure[1].id != scope_owner.id):
+        return None
+    port_owner: Entity | None = None
+    port_owner_relation: Any | None = None
+    if kind == "INTERFACE":
+        if (scope.kind != "hls.port" or scope.stage != "ast"
+                or str(scope.authority) != "static_fact"
+                or str(scope.completeness) != "complete"):
+            return None
+        if (scope_owner.kind != "hls.kernel"
+                or len(scope_owner_relations) != 1):
+            return None
+        port_owner_relation = scope_owner_relations[0]
+        port_owner = scope_owner
+        if (port_owner_relation.snapshot_id != directive.snapshot_id
+                or port_owner_relation.stage != "ast"
+                or str(port_owner_relation.authority) != "static_fact"
+                or str(port_owner_relation.completeness) != "complete"
+                or port_owner.snapshot_id != directive.snapshot_id
+                or port_owner.stage != "ast"
+                or str(port_owner.authority) != "static_fact"
+                or str(port_owner.completeness) != "complete"):
             return None
     directive_hash = _record_hash(directive)
     scope_hash = _record_hash(scope)
@@ -235,9 +335,24 @@ def _proof_for_directive(
         "parser_identity": parser_identity,
         "directive_record_hash": directive_hash,
         "scope_record_hash": scope_hash,
+        "scope_owner_id": scope_owner.id,
+        "scope_ownership_hash": scope_ownership_hash,
         "operand_record_hash": operand_hash,
+        "operand_owner_id": (
+            operand_closure[1].id if operand_closure is not None else None
+        ),
+        "operand_ownership_hash": (
+            operand_closure[0] if operand_closure is not None else None
+        ),
         "annotates_relation_hash": relation_hash,
         "requested_observation_hash": observation_hash,
+        "port_owner_record_hash": (
+            _record_hash(port_owner) if port_owner is not None else None
+        ),
+        "port_owner_relation_hash": (
+            _record_hash(port_owner_relation)
+            if port_owner_relation is not None else None
+        ),
         "source_artifact_id": artifact.id,
         "source_artifact_sha256": artifact.sha256,
         "source_artifact_size": artifact.size,
@@ -258,9 +373,26 @@ def _proof_for_directive(
         source_spelling_hash=spelling_hash,
         directive_record_hash=directive_hash,
         scope_record_hash=scope_hash,
+        scope_owner_id=scope_owner.id,
+        scope_ownership_hash=scope_ownership_hash,
         operand_record_hash=operand_hash,
+        operand_owner_id=(
+            operand_closure[1].id if operand_closure is not None else None
+        ),
+        operand_ownership_hash=(
+            operand_closure[0] if operand_closure is not None else None
+        ),
         annotates_relation_hash=relation_hash,
         requested_observation_hash=observation_hash,
+        port_owner_id=port_owner.id if port_owner is not None else None,
+        port_owner_kind=port_owner.kind if port_owner is not None else None,
+        port_owner_record_hash=(
+            _record_hash(port_owner) if port_owner is not None else None
+        ),
+        port_owner_relation_hash=(
+            _record_hash(port_owner_relation)
+            if port_owner_relation is not None else None
+        ),
         parser_identity=parser_identity,
         replay_identity=replay_identity,
     )
@@ -306,10 +438,10 @@ def replay_directive_declarations(
     if (
         type(source) is not LibClangExtractor
         or source.name != "source.libclang"
-        or source.version != "2"
+        or source.version != "3"
         or type(external) is not ExternalDirectiveExtractor
         or external.name != "directive.external"
-        or external.version != "1"
+        or external.version != "3"
         or not source.available()
     ):
         return DirectiveReplayIndex.failed("fixed_parser_unavailable")
@@ -422,14 +554,39 @@ def match_directive_replay(
     directive = graph.entities.get(directive_id)
     scope = graph.entities.get(proof.scope_id)
     operand = graph.entities.get(proof.operand_id) if proof.operand_id else None
+    port_owner = (
+        graph.entities.get(proof.port_owner_id) if proof.port_owner_id else None
+    )
+    scope_closure = _ownership_closure(graph, scope) if scope is not None else None
+    operand_closure = (
+        _ownership_closure(graph, operand) if operand is not None else None
+    )
     if (
         directive is None
         or scope is None
         or _record_hash(directive) != proof.directive_record_hash
         or _record_hash(scope) != proof.scope_record_hash
+        or scope_closure is None
+        or scope_closure[0] != proof.scope_ownership_hash
+        or scope_closure[1].id != proof.scope_owner_id
         or (
             proof.operand_record_hash is not None
-            and (operand is None or _record_hash(operand) != proof.operand_record_hash)
+            and (
+                operand is None
+                or operand_closure is None
+                or _record_hash(operand) != proof.operand_record_hash
+                or operand_closure[0] != proof.operand_ownership_hash
+                or operand_closure[1].id != proof.operand_owner_id
+            )
+        )
+        or (proof.operand_record_hash is None and operand_closure is not None)
+        or (
+            proof.port_owner_record_hash is not None
+            and (
+                port_owner is None
+                or port_owner.kind != proof.port_owner_kind
+                or _record_hash(port_owner) != proof.port_owner_record_hash
+            )
         )
     ):
         return None
@@ -444,11 +601,33 @@ def match_directive_replay(
         if observation.subject_id == directive_id
         and observation.predicate == "directive.requested"
     ]
+    ownership = [
+        relation for relation in graph.relations.values()
+        if proof.port_owner_id is not None
+        and relation.kind == "hls.contains"
+        and relation.dst == proof.scope_id
+    ]
     if (
         len(annotations) != 1
         or len(requested) != 1
         or _record_hash(annotations[0]) != proof.annotates_relation_hash
         or _record_hash(requested[0]) != proof.requested_observation_hash
+        or (
+            proof.port_owner_relation_hash is not None
+            and (
+                len(ownership) != 1
+                or ownership[0].src != proof.port_owner_id
+                or ownership[0].snapshot_id != graph.snapshot_id
+                or ownership[0].stage != "ast"
+                or str(ownership[0].authority) != "static_fact"
+                or str(ownership[0].completeness) != "complete"
+                or _record_hash(ownership[0])
+                != proof.port_owner_relation_hash
+            )
+        )
+        or (
+            proof.port_owner_relation_hash is None and ownership
+        )
     ):
         return None
     return proof

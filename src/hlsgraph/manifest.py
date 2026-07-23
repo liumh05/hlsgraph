@@ -566,7 +566,7 @@ def _reject_unsupported_compiler_context(arguments: Iterable[str]) -> None:
         if label is not None:
             raise ManifestError(
                 f"compiler option {label} is unsupported in the deterministic "
-                "v0.1 source extractor"
+                "source extractor"
             )
 
 

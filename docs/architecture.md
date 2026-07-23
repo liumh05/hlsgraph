@@ -163,15 +163,24 @@ all enforce that boundary.
   hashed. If libclang nevertheless reads an untracked project-local file (for
   example through a macro include), indexing fails instead of accepting an
   unsound snapshot.
-- **Directives:** inline pragmas, Tcl, and config declarations are normalized,
-  scoped, and resolved by declared precedence. Declared effectiveness is not
-  the same as proof that a tool applied the directive. Inactive source regions,
-  Tcl control blocks, command substitutions, and other non-literal contexts are
+- **Directives:** inline pragmas, Tcl, and config declarations are parsed,
+  explicitly scoped, and resolved by declared precedence. Tcl and config keep
+  separate conservative literal grammars; their quoting, comments, escapes,
+  substitutions, and token rules are not interchangeable. Tcl command names
+  and directive target spellings are exact: case changes, arbitrary bracing, or
+  leading/trailing slash variants are not normalized into another valid scope.
+  Declared effectiveness is not the same as proof that a tool applied the
+  directive. Inactive source regions, Tcl control blocks, command substitutions,
+  unsupported spelling variants, and other non-literal contexts are
   diagnostic-only rather than guessed declarations. Retrieval treats graph
   records as caller-constructible: source/requested/scope/operand capabilities
   are emitted only after an ephemeral replay by the fixed libclang and literal
   external-directive parsers reproduces the full options, anchor, exact scope,
-  exact operand, annotation, and unique request from unchanged snapshot inputs.
+  exact operand, annotation, unique request, and complete scope/operand
+  ownership closure from unchanged snapshot inputs. INTERFACE additionally
+  requires a unique direct configured-kernel-to-port containment whose owner
+  and relation hashes survive replay; helper ports and graph-wide name fallback
+  remain incomplete.
   Regex-degraded extraction and missing parser environments fail closed.
 - **MLIR/HLS IR:** text adapters preserve dialect operation and location
   evidence. Hardware/dataflow projection occurs only for supported semantics,
@@ -199,7 +208,7 @@ all enforce that boundary.
   opening a bundle. Entity, relation, artifact, and predicate kinds are
   namespaced rather than frozen vendor enums.
 
-The canonical schema and query service are vendor-neutral. “Vitis-first” means
+The canonical schema and query service are vendor-neutral. `Vitis-first` means
 the initial adapters and fixtures target AMD report semantics; it does not make
 AMD concepts the universal schema.
 
@@ -213,7 +222,16 @@ separate planes. Facts/evidence have their own lexical corpus, BM25 statistics,
 graph seeds, RRF, and score normalization; knowledge, local unreviewed text,
 and predictions cannot change fact ordering. Executable knowledge bindings
 must prove every rule condition from the same target-instance context, with
-missing or ambiguous premises failing closed. REST and MCP are read-only; MCP exposes one `explore` tool by
+missing or ambiguous premises failing closed. The installed inventory commits
+the complete rule, binding, and coverage bytes through its activation hash.
+For each candidate, the runtime gate retains canonical full-rule, full-binding,
+and context bytes inside the current retriever/session, then validates and
+evaluates fresh decoded copies in one atomic operation. No caller-constructible
+or returned snapshot is accepted as an authorization envelope. Caller-owned
+rules, bindings, contexts, serialized
+`DesignSnapshot` objects, and public scalar match helpers grant no authority,
+even when their visible IDs and values match.
+REST and MCP are read-only; MCP exposes one `explore` tool by
 default and keeps the v0.2 narrow surface behind explicit compatibility opt-in.
 The human view is a separate self-contained HTML presentation of the canonical
 graph, with stage/authority filtering and evidence details. ML export emits

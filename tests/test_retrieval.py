@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import stat
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from urllib.parse import quote
 
 import pytest
@@ -15,8 +16,9 @@ from hlsgraph.bundle import GraphBundle
 from hlsgraph.cli import main as cli_main
 from hlsgraph.graph import CanonicalGraph
 from hlsgraph.knowledge import (
-    KnowledgeCatalog, LocalKnowledgeSidecar, index_local_document, matches_binding,
+    KnowledgeCatalog, LocalKnowledgeSidecar, index_local_document, matches_binding_constraints,
 )
+from hlsgraph.knowledge.activation import BindingActivationSession
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.mcp import ReadOnlyMcpService
 from hlsgraph.model import (
@@ -147,7 +149,7 @@ def test_json_boolean_binding_discriminators_match_identically(
         required_context={"hardware_topology": constraint},
         producer="hlsgraph.knowledge.binding", producer_version="1",
     )
-    assert matches_binding(
+    assert matches_binding_constraints(
         binding, target_kind="relation_kind", target="cross.maps_to",
         context={"hardware_topology": generic_actual},
     ) is expected
@@ -225,7 +227,7 @@ def test_rule_conditions_are_evaluated_on_one_instance_context() -> None:
         "observation_run_identity": {"run.fixture"},
     }
     targets = {"predicate": {"csim.exit_code"}}
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, targets, condition=rule.condition,
     )
 
@@ -239,9 +241,267 @@ def test_rule_conditions_are_evaluated_on_one_instance_context() -> None:
             "observation.fixture", "observation.sibling",
         }},
     ):
-        assert not HybridRetriever._binding_applicable(
+        assert not HybridRetriever._binding_constraints_match_values(
             binding, changed, targets, condition=rule.condition,
         )
+
+
+def test_executable_binding_requires_current_retriever_session(
+    retrieval_project: dict[str, object],
+) -> None:
+    pack = next(item for item in KnowledgeCatalog.builtin().packs
+                if item.pack_id == "hlsgraph.amd.public_guidance.2024_2")
+    rule = next(item for item in pack.rules
+                if item.rule_id == "verification.csim_is_workload_scoped")
+    binding = next(item for item in pack.bindings
+                   if item.knowledge_rule_id == rule.id
+                   and item.target == "csim.exit_code")
+    raw_context = {
+        "vendor": {"amd"}, "tool": {"vitis_hls"},
+        "tool_version": {"2024.2"}, "stage": {"csim"},
+        "workload_id": {"workload.fixture"},
+        "snapshot_association": {"verified"},
+        "observation_evidence_qualified": {
+            "derived_from_typed_observation_evidence_v1",
+        },
+        "observation_instance_id": {"observation.fixture"},
+        "observation_artifact_kind": {"amd.vitis.csim_result"},
+        "observation_artifact_identity": {"artifact.fixture"},
+        "observation_run_identity": {"run.fixture"},
+    }
+    bundle = retrieval_project["bundle"]
+    snapshot_id = str(retrieval_project["snapshot"])
+    graph = bundle.store.load_graph(snapshot_id)
+    retriever = HybridRetriever(bundle, snapshot_id)
+    session = BindingActivationSession(
+        snapshot_id=snapshot_id, graph_hash=graph.graph_hash,
+        allowed_ids=sorted(graph.entities), bindings=[binding], rules=[rule],
+        raw_contexts={("predicate", "csim.exit_code"): [raw_context]},
+    )
+    attested = session.issue(binding, raw_context)
+    assert attested is not None
+    spec = RetrievalSpec(query="csim", applicability={"stage": "csim"})
+
+    def binding_applies(candidate, candidate_context) -> bool:
+        evaluation = retriever._binding_evaluation(
+            session, candidate, candidate_context, spec,
+        )
+        return bool(
+            evaluation is not None
+            and evaluation.request_matches
+            and evaluation.binding_matches
+            and evaluation.rule_applicable
+        )
+
+    try:
+        assert binding_applies(binding, attested)
+        assert not binding_applies(binding, raw_context)
+        assert not binding_applies(binding, dict(raw_context))
+        assert not binding_applies(binding, replace(attested))
+        detached_binding = session.binding_snapshot_for(binding, attested)
+        detached_binding_again = session.binding_snapshot_for(binding, attested)
+        assert detached_binding is not None and detached_binding is not binding
+        assert detached_binding_again is not None
+        assert detached_binding_again is not detached_binding
+        original_target = detached_binding.target
+        original_stage = detached_binding.required_context["stage"]
+        object.__setattr__(detached_binding, "target", "forged.target")
+        object.__setattr__(detached_binding, "required_context", {"stage": "ast"})
+        assert detached_binding_again.target == original_target
+        assert detached_binding_again.required_context["stage"] == original_stage
+        assert not binding_applies(detached_binding, attested)
+        assert binding_applies(binding, attested)
+
+        detached_rule = session.rule_snapshot_for(rule)
+        detached_rule_again = session.rule_snapshot_for(rule)
+        assert detached_rule is not None and detached_rule_again is not None
+        assert detached_rule is not detached_rule_again
+        original_title = detached_rule.title
+        original_effect = dict(detached_rule.effect)
+        object.__setattr__(detached_rule, "title", "forged title")
+        object.__setattr__(detached_rule, "effect", {"forged": True})
+        assert detached_rule_again.title == original_title
+        assert detached_rule_again.effect == original_effect
+        assert not hasattr(session, "authorize_and_snapshot")
+        assert not hasattr(retriever, "_authorized_binding_applicable")
+        original_values = attested.values
+        forged_values = dict(original_values)
+        forged_values["tool_version"] = frozenset({"2023.2"})
+        object.__setattr__(
+            attested, "values", MappingProxyType(forged_values),
+        )
+        assert not session.validate(binding, attested)
+        assert not binding_applies(binding, attested)
+        object.__setattr__(attested, "values", original_values)
+        assert session.validate(binding, attested)
+        original_stage = binding.required_context["stage"]
+        binding.required_context["stage"] = "cosim"
+        assert detached_binding_again.required_context["stage"] == original_stage
+        assert not binding_applies(binding, attested)
+        binding.required_context["stage"] = original_stage
+        original_title = rule.title
+        rule.title = "mutated after issuance"
+        assert not session.validate(binding, attested)
+        rule.title = original_title
+
+        object.__setattr__(rule, "title", "\ud800")
+        assert not session.validate(binding, attested)
+        assert session.evaluate_atomically(
+            binding, attested, lambda _binding, _rule, _values: True,
+        ) is None
+        object.__setattr__(rule, "title", original_title)
+        object.__delattr__(rule, "title")
+        assert not session.validate(binding, attested)
+        object.__setattr__(rule, "title", original_title)
+        assert session.validate(binding, attested)
+
+        original_raw_stage = raw_context["stage"]
+        raw_context["stage"] = {"ast"}
+        assert not session.validate(binding, attested)
+        assert not binding_applies(binding, attested)
+        raw_context["stage"] = original_raw_stage
+        assert session.validate(binding, attested)
+
+        def mutate_live_rule_midflight(_binding, _rule, _values):
+            rule.title = "mutated inside evaluator"
+            return "must be discarded"
+
+        assert session.evaluate_atomically(
+            binding, attested, mutate_live_rule_midflight,
+        ) is None
+        rule.title = original_title
+        assert binding_applies(binding, attested)
+    finally:
+        session.close()
+    assert not binding_applies(binding, attested)
+
+
+def test_binding_activation_duplicate_id_fails_without_partial_session_dos(
+    retrieval_project: dict[str, object],
+) -> None:
+    pack = next(item for item in KnowledgeCatalog.builtin().packs
+                if item.pack_id == "hlsgraph.amd.public_guidance.2024_2")
+    binding = pack.bindings[0]
+    rule = next(
+        item for item in pack.rules if item.id == binding.knowledge_rule_id
+    )
+    duplicate = KnowledgeBinding.from_dict({
+        "knowledge_rule_id": binding.knowledge_rule_id,
+        "target_kind": binding.target_kind,
+        "target": binding.target,
+        "required_context": dict(binding.required_context),
+        "producer": binding.producer,
+        "producer_version": binding.producer_version,
+        "id": binding.id,
+        "metadata": dict(binding.metadata),
+    })
+    bundle = retrieval_project["bundle"]
+    snapshot_id = str(retrieval_project["snapshot"])
+    graph = bundle.store.load_graph(snapshot_id)
+    with pytest.raises(ValueError, match="duplicate IDs"):
+        BindingActivationSession(
+            snapshot_id=snapshot_id, graph_hash=graph.graph_hash,
+            allowed_ids=sorted(graph.entities),
+            bindings=[binding, duplicate], rules=[rule], raw_contexts={},
+        )
+
+
+def test_issued_binding_claims_cannot_be_retargeted_or_rescoped(
+    retrieval_project: dict[str, object],
+) -> None:
+    pack = next(item for item in KnowledgeCatalog.builtin().packs
+                if item.pack_id == "hlsgraph.amd.public_guidance.2024_2")
+    rule_a = next(item for item in pack.rules
+                  if item.rule_id == "verification.csim_is_workload_scoped")
+    binding_a = next(item for item in pack.bindings
+                     if item.knowledge_rule_id == rule_a.id
+                     and item.target == "csim.exit_code")
+    rule_b = KnowledgeRule(
+        document_id="test.activation", document_version="1",
+        section="Retarget", rule_id="test.retarget_b",
+        title="Retarget B", applicability=dict(rule_a.applicability),
+        condition=dict(rule_a.condition), effect={"forged": True},
+        citation_url="https://example.com/retarget-b",
+    )
+    binding_b = KnowledgeBinding(
+        knowledge_rule_id=rule_b.id,
+        target_kind=binding_a.target_kind,
+        target=binding_a.target,
+        required_context=dict(binding_a.required_context),
+        producer="hlsgraph.test.binding", producer_version="1",
+    )
+    binding_c = KnowledgeBinding(
+        knowledge_rule_id=rule_a.id,
+        target_kind=binding_a.target_kind,
+        target="csim.return_code",
+        required_context=dict(binding_a.required_context),
+        producer="hlsgraph.test.binding", producer_version="1",
+    )
+    raw_context = {
+        "vendor": {"amd"}, "tool": {"vitis_hls"},
+        "tool_version": {"2024.2"}, "stage": {"csim"},
+        "workload_id": {"workload.fixture"},
+        "snapshot_association": {"verified"},
+        "observation_evidence_qualified": {
+            "derived_from_typed_observation_evidence_v1",
+        },
+        "observation_instance_id": {"observation.fixture"},
+        "observation_artifact_kind": {"amd.vitis.csim_result"},
+        "observation_artifact_identity": {"artifact.fixture"},
+        "observation_run_identity": {"run.fixture"},
+    }
+    bundle = retrieval_project["bundle"]
+    snapshot_id = str(retrieval_project["snapshot"])
+    graph = bundle.store.load_graph(snapshot_id)
+    session = BindingActivationSession(
+        snapshot_id=snapshot_id, graph_hash=graph.graph_hash,
+        allowed_ids=sorted(graph.entities),
+        bindings=[binding_a, binding_b, binding_c], rules=[rule_a, rule_b],
+        raw_contexts={
+            (binding_a.target_kind, binding_a.target): [raw_context],
+            (binding_c.target_kind, binding_c.target): [raw_context],
+        },
+    )
+    handle = session.issue(binding_a, raw_context)
+    assert handle is not None and session.validate(binding_a, handle)
+
+    original_claims = {
+        name: getattr(handle, name) for name in (
+            "binding_id", "binding_fingerprint", "rule_id",
+            "rule_fingerprint", "snapshot_id", "graph_hash", "scope_hash",
+        )
+    }
+    object.__setattr__(handle, "binding_id", binding_b.id)
+    object.__setattr__(handle, "binding_fingerprint", stable_hash(binding_b))
+    object.__setattr__(handle, "rule_id", rule_b.id)
+    object.__setattr__(handle, "rule_fingerprint", stable_hash(rule_b))
+    assert not session.validate(binding_a, handle)
+    assert not session.validate(binding_b, handle)
+    assert session.evaluate_atomically(
+        binding_b, handle, lambda _binding, rule, _values: rule.effect,
+    ) is None
+    for name, value in original_claims.items():
+        object.__setattr__(handle, name, value)
+    assert session.validate(binding_a, handle)
+
+    object.__setattr__(handle, "binding_id", binding_c.id)
+    object.__setattr__(handle, "binding_fingerprint", stable_hash(binding_c))
+    object.__setattr__(handle, "target", binding_c.target)
+    assert not session.validate(binding_a, handle)
+    assert not session.validate(binding_c, handle)
+    for name, value in original_claims.items():
+        object.__setattr__(handle, name, value)
+    object.__setattr__(handle, "target", binding_a.target)
+    assert session.validate(binding_a, handle)
+
+    original_session_snapshot = session.snapshot_id
+    object.__setattr__(session, "_snapshot_id", "snapshot.forged")
+    object.__setattr__(handle, "snapshot_id", "snapshot.forged")
+    assert not session.validate(binding_a, handle)
+    object.__setattr__(session, "_snapshot_id", original_session_snapshot)
+    object.__setattr__(handle, "snapshot_id", original_claims["snapshot_id"])
+    assert session.validate(binding_a, handle)
+    session.close()
 
 
 def test_knowledge_and_untrusted_adapters_cannot_perturb_fact_ranking(
@@ -304,6 +564,41 @@ def test_knowledge_and_untrusted_adapters_cannot_perturb_fact_ranking(
     assert any("public_knowledge_rejected" in item for item in attacked.warnings)
 
 
+@pytest.mark.parametrize(
+    "malformed_kind", ("rule_surrogate", "rule_delattr", "binding_delattr"),
+)
+def test_malformed_live_knowledge_fails_closed_without_losing_facts(
+    retrieval_project: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    malformed_kind: str,
+) -> None:
+    bundle = retrieval_project["bundle"]
+    install_reviewed_builtin_packs(bundle)
+    rules = list(bundle.store.knowledge_rules())
+    bindings = list(bundle.store.knowledge_bindings())
+    reviewed_rule = next(
+        item for item in rules if item.document_id == "amd.ug1399"
+    )
+    if malformed_kind == "rule_surrogate":
+        object.__setattr__(reviewed_rule, "title", "\ud800")
+    elif malformed_kind == "rule_delattr":
+        object.__delattr__(reviewed_rule, "document_id")
+    else:
+        object.__delattr__(bindings[0], "id")
+    monkeypatch.setattr(
+        type(bundle.store), "knowledge_rules", lambda _store: rules,
+    )
+    monkeypatch.setattr(
+        type(bundle.store), "knowledge_bindings", lambda _store: bindings,
+    )
+
+    result = CoreService(bundle, retrieval_project["snapshot"]).retrieve(
+        RetrievalSpec(query="compute pipeline knowledge", top_k=8),
+    )
+    assert result.facts
+    assert result.guidance == []
+    assert "knowledge_activation_session_rejected" in result.warnings
+
+
 def test_typed_directed_graph_ranking_excludes_software_calls_and_llvm_cfg(
     retrieval_project: dict[str, object],
 ) -> None:
@@ -352,7 +647,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
         metadata={"dynamic_scope": "static"},
     )
-    assert not HybridRetriever._binding_applicable(missing_version, context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(missing_version, context, targets)
 
     static = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
@@ -364,7 +659,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
         metadata={"dynamic_scope": "static"},
     )
-    assert HybridRetriever._binding_applicable(static, context, targets)
+    assert HybridRetriever._binding_constraints_match_values(static, context, targets)
 
     dynamic_missing_workload = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
@@ -375,7 +670,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         },
         producer="hlsgraph.builtin", producer_version="0.3",
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         dynamic_missing_workload, context, targets,
     )
 
@@ -405,7 +700,7 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         "observation_artifact_identity": {"artifact.current"},
         "observation_run_identity": {"run.current"},
     }
-    assert HybridRetriever._binding_applicable(dynamic, closed_context, targets)
+    assert HybridRetriever._binding_constraints_match_values(dynamic, closed_context, targets)
 
     unknown_operator = KnowledgeBinding(
         knowledge_rule_id=rule_id, target_kind="predicate",
@@ -417,12 +712,51 @@ def test_knowledge_binding_semantic_conditions_fail_closed(
         producer="hlsgraph.builtin", producer_version="0.3",
         metadata={"dynamic_scope": "static"},
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         unknown_operator, context, targets,
     )
 
 
-def test_xdc_binding_uses_ledger_hash_and_snapshot_stage_association(tmp_path: Path) -> None:
+def test_source_tool_context_never_cross_pairs_tool_and_version(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    manifest = minimal_manifest(
+        "test.tool_pairing", "tool pairing", "dut", "kernel.cpp",
+    )
+    manifest.toolchains = [
+        ToolchainContext(
+            "amd.vitis_hls.2023_2", "amd", "vitis_hls", "2023.2",
+        ),
+        ToolchainContext(
+            "amd.vivado.2024_2", "amd", "vivado", "2024.2",
+        ),
+    ]
+    bundle = GraphBundle.create(tmp_path, manifest)
+    snapshot = bundle.snapshot()
+    retriever = HybridRetriever(bundle, snapshot.id)
+    base, toolchains = retriever._manifest_context()
+    assert "tool" not in base and "tool_version" not in base
+    source = retriever._source_tool_context(base, toolchains)
+    assert source["tool"] == {
+        "vitis_hls", "amd.vitis_hls.2023_2",
+    }
+    assert source["tool_version"] == {"2023.2"}
+    assert "2024.2" not in source["tool_version"]
+
+    manifest.toolchains.append(ToolchainContext(
+        "amd.vitis_hls.2024_2", "amd", "vitis_hls", "2024.2",
+    ))
+    ambiguous = retriever._source_tool_context(
+        {"vendor": {"amd"}}, {item.id: item for item in manifest.toolchains},
+    )
+    assert "tool" not in ambiguous
+    assert "tool_version" not in ambiguous
+
+
+def test_xdc_binding_uses_ledger_hash_and_snapshot_stage_association(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
     (tmp_path / "timing.xdc").write_text(
         "create_clock -period 5 [get_ports ap_clk]\n", encoding="utf-8",
@@ -460,12 +794,26 @@ def test_xdc_binding_uses_ledger_hash_and_snapshot_stage_association(tmp_path: P
         item for item in bundle.store.knowledge_bindings()
         if item.target_kind == "artifact_kind" and item.target == "constraint.xdc"
     )
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         binding, context, {"artifact_kind": {"constraint.xdc"}},
     )
+    xdc_artifact = next(
+        item for item in bundle.store.artifacts(snapshot.id)
+        if item.kind == "constraint.xdc"
+    )
+    base, toolchains = retriever._manifest_context()
+    altered_manifest = bundle.store.snapshot_manifest(snapshot.id)
+    altered_manifest.toolchains[0].version = "2023.2"
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            bundle.store, "snapshot_manifest", lambda _snapshot_id: altered_manifest,
+        )
+        altered = retriever._artifact_context(xdc_artifact, base, toolchains)
+    assert "constraint_input_evidence_qualified" not in altered
+    assert "constraint_artifact_identity" not in altered
     incomplete = {key: set(value) for key, value in context.items()}
     incomplete.pop("artifact_sha256")
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, incomplete, {"artifact_kind": {"constraint.xdc"}},
     )
     (tmp_path / "timing.xdc").write_text(
@@ -475,7 +823,7 @@ def test_xdc_binding_uses_ledger_hash_and_snapshot_stage_association(tmp_path: P
         ("artifact_kind", "constraint.xdc")
     ][0]
     assert "constraint_input_evidence_qualified" not in changed
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, changed, {"artifact_kind": {"constraint.xdc"}},
     )
 
@@ -509,9 +857,79 @@ def test_xdc_binding_rejects_duplicate_manifest_declaration(tmp_path: Path) -> N
         item for item in bundle.store.knowledge_bindings()
         if item.target_kind == "artifact_kind" and item.target == "constraint.xdc"
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         binding, context, {"artifact_kind": {"constraint.xdc"}},
     )
+
+
+def test_xdc_context_never_cross_pairs_stage_and_self_described_tool(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (tmp_path / "timing.xdc").write_text(
+        "create_clock -period 5 [get_ports ap_clk]\n", encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.xdc.tool_pair", "xdc tool pair", "dut", "kernel.cpp",
+    )
+    manifest.constraints.xdc_files = ["timing.xdc"]
+    manifest.stage_commands = {"post_route": ["vivado", "-mode", "batch"]}
+    vivado_2023 = ToolchainContext(
+        "amd.vivado.2023_2", "amd", "vivado", "2023.2",
+    )
+    vivado_2024 = ToolchainContext(
+        "amd.vivado.2024_2", "amd", "vivado", "2024.2",
+    )
+    manifest.toolchains = [vivado_2023, vivado_2024]
+    manifest.stage_toolchains = {"post_route": vivado_2023.id}
+    bundle = GraphBundle.create(tmp_path, manifest)
+    install_reviewed_builtin_packs(bundle)
+    snapshot = bundle.snapshot()
+    retriever = HybridRetriever(bundle, snapshot.id)
+    base, toolchains = retriever._manifest_context()
+    artifact = next(
+        item for item in bundle.store.artifacts(snapshot.id)
+        if item.kind == "constraint.xdc"
+    )
+    artifact.metadata.update({
+        "vendor": "amd", "tool": "vivado",
+        "tool_version": "2024.2", "version": "2024.2",
+        "stage": "post_place",
+    })
+    context = retriever._artifact_context(artifact, base, toolchains)
+    assert context["stage"] == {"post_route"}
+    assert context["tool_version"] == {"2023.2"}
+    assert "2024.2" not in context["tool_version"]
+    binding = next(
+        item for item in bundle.store.knowledge_bindings()
+        if item.target_kind == "artifact_kind" and item.target == "constraint.xdc"
+    )
+    assert not HybridRetriever._binding_constraints_match_values(
+        binding, context, {"artifact_kind": {"constraint.xdc"}},
+    )
+
+    manifest.stage_commands["post_place"] = ["vivado", "-mode", "batch"]
+    manifest.stage_toolchains["post_place"] = vivado_2024.id
+    split_root = tmp_path / "split"
+    split_root.mkdir()
+    (split_root / "kernel.cpp").write_text("void dut() {}\n", encoding="utf-8")
+    (split_root / "timing.xdc").write_text(
+        "create_clock -period 5 [get_ports ap_clk]\n", encoding="utf-8",
+    )
+    split_bundle = GraphBundle.create(split_root, manifest)
+    split_snapshot = split_bundle.snapshot()
+    split_retriever = HybridRetriever(split_bundle, split_snapshot.id)
+    split_base, split_toolchains = split_retriever._manifest_context()
+    split_artifact = next(
+        item for item in split_bundle.store.artifacts(split_snapshot.id)
+        if item.kind == "constraint.xdc"
+    )
+    split_context = split_retriever._artifact_context(
+        split_artifact, split_base, split_toolchains,
+    )
+    assert "tool" not in split_context
+    assert "tool_version" not in split_context
+    assert "stage" not in split_context
 
 
 def test_amd_gate_binding_cannot_be_qualified_by_stage_only() -> None:
@@ -529,7 +947,7 @@ def test_amd_gate_binding_cannot_be_qualified_by_stage_only() -> None:
         "vendor": {"amd"}, "tool": {"vivado"},
         "tool_version": {"2024.2"}, "stage": {"post_route"},
     }
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         loose, context, {"gate_kind": {"post_route_timing"}},
     )
 
@@ -633,10 +1051,10 @@ def test_directive_binding_uses_only_one_explicit_instance_scope(
     # Exact scope identity is necessary but no longer sufficient: this manual
     # fixture has no uniquely anchored, live directive.requested record.
     assert "directive_source_declaration_qualified" not in good_context
-    assert not HybridRetriever._binding_applicable(binding, good_context, targets)
-    assert not HybridRetriever._binding_applicable(binding, copied_context, targets)
-    assert not HybridRetriever._binding_applicable(binding, degraded_context, targets)
-    assert not HybridRetriever._binding_applicable(binding, inconsistent_context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(binding, good_context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(binding, copied_context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(binding, degraded_context, targets)
+    assert not HybridRetriever._binding_constraints_match_values(binding, inconsistent_context, targets)
 
 
 def test_binding_context_does_not_mix_unrelated_stage_or_workload(
@@ -677,7 +1095,7 @@ def test_binding_context_does_not_mix_unrelated_stage_or_workload(
     )
     targets = {"predicate": {"profile.fifo_max_occupancy"}}
     assert not any(
-        HybridRetriever._binding_applicable(binding, context, targets)
+        HybridRetriever._binding_constraints_match_values(binding, context, targets)
         for context in contexts
     )
 
@@ -1506,16 +1924,16 @@ def test_handshake_ir_evidence_is_structural_and_hls_projection_is_not_normative
     assert "language_spec_revision" not in wrong_revision
 
 
-def test_knowledge_and_predictions_are_opt_in_or_separate(
+def test_unreviewed_knowledge_is_inert_and_predictions_remain_separate(
     retrieval_project: dict[str, object],
 ) -> None:
     core = CoreService(retrieval_project["bundle"], retrieval_project["snapshot"])
     knowledge = core.retrieve(RetrievalSpec(
         query="FIFO stall workload", applicability={"stage": "cosim"},
     ))
-    assert knowledge.guidance
-    assert all(item.plane == "knowledge" for item in knowledge.guidance)
-    assert all(item.authority_class == "knowledge_rule" for item in knowledge.guidance)
+    # Directly injected rows have no reviewed coverage/inventory activation
+    # surface and therefore cannot become executable or displayed guidance.
+    assert knowledge.guidance == []
     assert not knowledge.predictions
 
     without_predictions = core.retrieve(RetrievalSpec(

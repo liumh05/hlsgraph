@@ -193,6 +193,7 @@ MODEL_INSPECTION_EXACT_PATHS = frozenset({
     "src/hlsgraph/bundle.py",
     "src/hlsgraph/graph.py",
     "src/hlsgraph/manifest.py",
+    "src/hlsgraph/knowledge/activation.py",
     "src/hlsgraph/knowledge/core.py",
     "src/hlsgraph/knowledge/supported_targets.py",
     "src/hlsgraph/retrieval.py",

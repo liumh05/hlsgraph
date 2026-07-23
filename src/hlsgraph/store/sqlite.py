@@ -51,6 +51,7 @@ from ..model import (
     utc_now,
 )
 from ..knowledge.supported_targets import canonical_supported_targets
+from ..knowledge.core import knowledge_activation_hash
 from ..runner.core import _consume_execution_authorization, RunnerProtocolError
 from ..runner.staging import StagingError, read_verified_file
 from ..version import SCHEMA_VERSION, SUPPORTED_GRAPH_SCHEMA_VERSIONS
@@ -3086,6 +3087,12 @@ class LedgerStore:
             raise StoreError("knowledge binding references a rule outside its pack")
         if inventory.get("pack_id") != pack_id:
             raise StoreError("knowledge inventory belongs to another pack")
+        if inventory.get("activation_hash") != knowledge_activation_hash(
+            rules, bindings, coverage,
+        ):
+            raise StoreError(
+                "knowledge inventory activation hash does not match supplied content"
+            )
         if set(inventory.get("rule_ids", [])) != supplied_rule_ids:
             raise StoreError("knowledge inventory rule IDs do not match supplied rules")
         if set(inventory.get("binding_ids", [])) != supplied_binding_ids:

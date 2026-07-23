@@ -32,7 +32,7 @@ from hlsgraph.knowledge import (
     LocalKnowledgeSidecar,
     index_local_document,
     load_pack,
-    matches_binding,
+    matches_binding_constraints,
     migrate_pack,
     pack_migration_plan,
 )
@@ -147,11 +147,11 @@ def test_binding_and_coverage_contracts_fail_closed() -> None:
         producer="hlsgraph.knowledge.binding",
         producer_version="1",
     )
-    assert not matches_binding(
+    assert not matches_binding_constraints(
         binding, target_kind="predicate", target="profile.fifo_max_occupancy",
         context={"vendor": "amd", "stage": "cosim"},
     )
-    assert matches_binding(
+    assert matches_binding_constraints(
         binding, target_kind="predicate", target="profile.fifo_max_occupancy",
         context={"vendor": "amd", "stage": "cosim", "workload_id": "tb.sha256"},
     )
@@ -387,6 +387,9 @@ def test_retrieval_regates_injected_unreviewed_bindings(
     monkeypatch.setattr(
         bundle.store, "knowledge_bindings", lambda: list(pack.bindings),
     )
+    monkeypatch.setattr(
+        bundle.store, "knowledge_rules", lambda: list(pack.rules),
+    )
     assert retriever._review_ready_binding_ids() == set()
 
     reviewed = _reviewed_pack(pack)
@@ -396,9 +399,24 @@ def test_retrieval_regates_injected_unreviewed_bindings(
     monkeypatch.setattr(
         bundle.store, "knowledge_coverage", lambda: [reviewed.coverage],
     )
+    monkeypatch.setattr(
+        bundle.store, "knowledge_bindings", lambda: list(reviewed.bindings),
+    )
+    monkeypatch.setattr(
+        bundle.store, "knowledge_rules", lambda: list(reviewed.rules),
+    )
     assert retriever._review_ready_binding_ids() == {
         item.id for item in reviewed.bindings
     }
+
+    altered_rules = list(reviewed.rules)
+    altered = type(altered_rules[0])(**json_ready(altered_rules[0]))
+    altered.title = altered.title + " (tampered)"
+    altered_rules[0] = altered
+    monkeypatch.setattr(
+        bundle.store, "knowledge_rules", lambda: list(altered_rules),
+    )
+    assert retriever._review_ready_binding_ids() == set()
 
 
 def test_builtin_binding_boolean_discriminators_use_json_booleans() -> None:
@@ -437,11 +455,11 @@ def test_binding_alternatives_require_explicit_one_of_in_both_matchers() -> None
     scalar_context = {"stage": "post_route"}
     retrieval_context = {"stage": {"post_route"}}
     targets = {"test.target": {"test.value"}}
-    assert matches_binding(
+    assert matches_binding_constraints(
         explicit, target_kind="test.target", target="test.value",
         context=scalar_context,
     )
-    assert HybridRetriever._binding_applicable(
+    assert HybridRetriever._binding_constraints_match_values(
         explicit, retrieval_context, targets,
     )
 
@@ -449,11 +467,11 @@ def test_binding_alternatives_require_explicit_one_of_in_both_matchers() -> None
         **common,
         required_context={"stage": ["post_place", "post_route"]},
     )
-    assert not matches_binding(
+    assert not matches_binding_constraints(
         naked, target_kind="test.target", target="test.value",
         context=scalar_context,
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         naked, retrieval_context, targets,
     )
 
@@ -647,6 +665,19 @@ def test_builtin_coverage_inventory_matches_the_supported_public_surface() -> No
             assert binding.required_context["directive_operand_identity"] == {
                 "required": True,
             }
+            if binding.target == "INTERFACE":
+                assert binding.required_context["port_owner_id"] == {
+                    "required": True,
+                }
+                assert binding.required_context["configured_component_id"] == {
+                    "required": True,
+                }
+                assert binding.required_context["port_ownership_qualified"] == (
+                    "derived_from_unique_current_component_port_v1"
+                )
+                assert binding.required_context["port_ownership_identity"] == {
+                    "required": True,
+                }
         else:
             assert "directive_operand_linked" not in binding.required_context
     dependence_bindings = [
@@ -722,6 +753,16 @@ def test_builtin_coverage_inventory_matches_the_supported_public_surface() -> No
     assert axi_interface.required_context["directive_operand_identity"] == {
         "required": True,
     }
+    assert axi_interface.required_context["port_owner_id"] == {"required": True}
+    assert axi_interface.required_context["configured_component_id"] == {
+        "required": True,
+    }
+    assert axi_interface.required_context["port_ownership_qualified"] == (
+        "derived_from_unique_current_component_port_v1"
+    )
+    assert axi_interface.required_context["port_ownership_identity"] == {
+        "required": True,
+    }
     axi_rule = next(
         item for item in axi.rules
         if item.id.endswith(":axi.interface_mode_is_scoped_request")
@@ -729,6 +770,9 @@ def test_builtin_coverage_inventory_matches_the_supported_public_surface() -> No
     assert axi_rule.condition == {
         "directive_kind": "INTERFACE",
         "interface_mode": {"one_of": ["m_axi", "s_axilite", "axis"]},
+        "port_ownership_qualified": (
+            "derived_from_unique_current_component_port_v1"
+        ),
     }
     axi_no_normative = {
         item.target: item for item in axi.coverage.target_inventory

@@ -2156,6 +2156,7 @@ def test_model_inspection_scope_covers_activation_tcb() -> None:
         "src/hlsgraph/bundle.py",
         "src/hlsgraph/graph.py",
         "src/hlsgraph/manifest.py",
+        "src/hlsgraph/knowledge/activation.py",
         "src/hlsgraph/knowledge/core.py",
         "src/hlsgraph/retrieval.py",
         "src/hlsgraph/runner/core.py",

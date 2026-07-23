@@ -269,7 +269,7 @@ def test_pragma_and_tcl_directives_bind_scope_and_keep_declared_tool_and_achieve
             item for item in project.bundle.store.knowledge_bindings()
             if item.target_kind == "predicate" and item.target == predicate
         )
-        applicable = HybridRetriever._binding_applicable(
+        applicable = HybridRetriever._binding_constraints_match_values(
             binding, context, {"predicate": {predicate}},
         )
         if predicate in declaration_predicates:
@@ -308,6 +308,7 @@ def test_interface_binding_uses_the_extracted_concrete_port_instance(
     if not LibClangExtractor.available():
         pytest.skip("the scoped INTERFACE test requires the standard libclang extractor")
     (tmp_path / "kernel.cpp").write_text(
+        "void helper(int *input) { input[0] = 0; }\n"
         "void dut(int *input) {\n"
         f"#pragma HLS INTERFACE mode={interface_mode} port=input\n"
         "  input[0] += 1;\n"
@@ -328,8 +329,13 @@ def test_interface_binding_uses_the_extracted_concrete_port_instance(
     graph = project.service(indexed.snapshot_id).graph()
     directive = next(item for item in graph.entities.values()
                      if item.kind == "hls.directive" and item.name == "INTERFACE")
-    port = next(item for item in graph.entities.values()
-                if item.kind == "hls.port" and item.name == "input")
+    port = graph.entities[directive.attrs["scope_id"]]
+    assert port.kind == "hls.port" and port.name == "input"
+    initial_owner = next(
+        item for item in graph.relations.values()
+        if item.kind == "hls.contains" and item.dst == port.id
+    )
+    assert graph.entities[initial_owner.src].kind == "hls.kernel"
     assert directive.attrs["directive_instance_id"] == directive.id
     assert directive.attrs["scope_id"] == port.id
     assert directive.attrs["scope_kind"] == "hls.port"
@@ -344,6 +350,12 @@ def test_interface_binding_uses_the_extracted_concrete_port_instance(
     context = next(item for item in contexts
                    if item.get("directive_instance_id") == {directive.id.casefold()})
     assert context["interface_mode"] == {interface_mode}
+    assert context["port_owner_id"]
+    assert context["configured_component_id"] == context["port_owner_id"]
+    assert context["port_ownership_qualified"] == {
+        "derived_from_unique_current_component_port_v1",
+    }
+    assert context["port_ownership_identity"]
     assert not {
         "direction", "protocol", "spec_version", "endpoint_role", "channel_role",
         "interface_instance_id", "transmitter_id", "receiver_id",
@@ -357,8 +369,68 @@ def test_interface_binding_uses_the_extracted_concrete_port_instance(
         if item.knowledge_rule_id.endswith(":axi.interface_mode_is_scoped_request")
     )
     target = {"directive_kind": {"INTERFACE"}}
-    assert HybridRetriever._binding_applicable(amd_binding, context, target)
-    assert HybridRetriever._binding_applicable(axi_binding, context, target)
+    assert HybridRetriever._binding_constraints_match_values(amd_binding, context, target)
+    assert HybridRetriever._binding_constraints_match_values(axi_binding, context, target)
+
+    owner_relation = next(
+        item for item in graph.relations.values()
+        if item.kind == "hls.contains" and item.dst == port.id
+    )
+    del graph.relations[owner_relation.id]
+    without_owner = retriever._binding_target_contexts(
+        graph, set(graph.entities),
+    )[("directive_kind", "INTERFACE")]
+    without_owner_context = next(
+        item for item in without_owner
+        if item.get("directive_instance_id") == {directive.id.casefold()}
+    )
+    assert "port_ownership_qualified" not in without_owner_context
+    assert not HybridRetriever._binding_constraints_match_values(
+        amd_binding, without_owner_context, target,
+    )
+    assert not HybridRetriever._binding_constraints_match_values(
+        axi_binding, without_owner_context, target,
+    )
+    graph.add_relation(owner_relation)
+    helper = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.function" and item.name == "helper"
+    )
+    forged_owner = Relation(
+        helper.id, port.id, "hls.contains", graph.snapshot_id,
+        authority=AuthorityClass.STATIC_FACT, stage="ast",
+    )
+    graph.add_relation(forged_owner)
+    duplicate_owner_context = next(
+        item for item in retriever._binding_target_contexts(
+            graph, set(graph.entities),
+        )[("directive_kind", "INTERFACE")]
+        if item.get("directive_instance_id") == {directive.id.casefold()}
+    )
+    assert "port_ownership_qualified" not in duplicate_owner_context
+    assert not HybridRetriever._binding_constraints_match_values(
+        amd_binding, duplicate_owner_context, target,
+    )
+    del graph.relations[forged_owner.id]
+
+    for completeness in ("ambiguous", "partial"):
+        uncertain_owner = Relation(
+            helper.id, port.id, "hls.contains", graph.snapshot_id,
+            authority=AuthorityClass.STATIC_FACT, stage="ast",
+            completeness=completeness,
+        )
+        graph.add_relation(uncertain_owner)
+        uncertain_context = next(
+            item for item in retriever._binding_target_contexts(
+                graph, set(graph.entities),
+            )[("directive_kind", "INTERFACE")]
+            if item.get("directive_instance_id") == {directive.id.casefold()}
+        )
+        assert "port_ownership_qualified" not in uncertain_context
+        assert not HybridRetriever._binding_constraints_match_values(
+            amd_binding, uncertain_context, target,
+        )
+        del graph.relations[uncertain_owner.id]
 
     annotation = next(
         item for item in graph.relations.values()
@@ -380,12 +452,103 @@ def test_interface_binding_uses_the_extracted_concrete_port_instance(
     )
     assert "directive_operand_linked" not in unlinked_context
     assert "directive_operand_identity" not in unlinked_context
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         amd_binding, unlinked_context, target,
     )
-    assert not HybridRetriever._binding_applicable(
+    assert not HybridRetriever._binding_constraints_match_values(
         axi_binding, unlinked_context, target,
     )
+
+
+def test_interface_in_helper_cannot_become_a_top_port_contract(
+    tmp_path: Path,
+) -> None:
+    if not LibClangExtractor.available():
+        pytest.skip("the scoped INTERFACE test requires the standard libclang extractor")
+    (tmp_path / "kernel.cpp").write_text(
+        "void helper(int *input) {\n"
+        "#pragma HLS INTERFACE mode=m_axi port=input\n"
+        "  input[0] += 1;\n"
+        "}\n"
+        "void dut(int *output) { helper(output); }\n",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.helper_interface_scope", "helper interface", "dut", "kernel.cpp",
+    )
+    manifest.toolchains = [ToolchainContext(
+        id="amd.vitis_hls.2024_2", vendor="amd", name="vitis_hls",
+        version="2024.2",
+    )]
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    indexed = project.index()
+    assert indexed.success
+    graph = project.service(indexed.snapshot_id).graph()
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive" and item.name == "INTERFACE"
+    )
+    assert str(directive.completeness) == "ambiguous"
+    assert "scope_id" not in directive.attrs
+    assert not any(
+        item.subject_id == directive.id
+        and item.predicate == "directive.requested"
+        for item in project.bundle.store.observations(indexed.snapshot_id)
+    )
+    context = next(
+        item for item in HybridRetriever(
+            project.bundle, indexed.snapshot_id,
+        )._binding_target_contexts(graph, set(graph.entities))[
+            ("directive_kind", "INTERFACE")
+        ]
+        if item.get("entity_instance_id") == {directive.id.casefold()}
+    )
+    assert "directive_source_declaration_qualified" not in context
+    assert "port_ownership_qualified" not in context
+
+
+def test_file_scope_interface_cannot_borrow_the_unique_top_port(
+    tmp_path: Path,
+) -> None:
+    if not LibClangExtractor.available():
+        pytest.skip("the scoped INTERFACE test requires the standard libclang extractor")
+    (tmp_path / "kernel.cpp").write_text(
+        "#pragma HLS INTERFACE mode=m_axi port=input\n"
+        "void dut(int *input) { input[0] += 1; }\n",
+        encoding="utf-8",
+    )
+    manifest = minimal_manifest(
+        "test.file_interface_scope", "file interface", "dut", "kernel.cpp",
+    )
+    manifest.toolchains = [ToolchainContext(
+        id="amd.vitis_hls.2024_2", vendor="amd", name="vitis_hls",
+        version="2024.2",
+    )]
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    indexed = project.index()
+    assert indexed.success
+    graph = project.service(indexed.snapshot_id).graph()
+    directive = next(
+        item for item in graph.entities.values()
+        if item.kind == "hls.directive" and item.name == "INTERFACE"
+    )
+    assert str(directive.completeness) == "ambiguous"
+    assert "scope_id" not in directive.attrs
+    assert not any(
+        item.subject_id == directive.id
+        and item.predicate == "directive.requested"
+        for item in project.bundle.store.observations(indexed.snapshot_id)
+    )
+    context = next(
+        item for item in HybridRetriever(
+            project.bundle, indexed.snapshot_id,
+        )._binding_target_contexts(graph, set(graph.entities))[
+            ("directive_kind", "INTERFACE")
+        ]
+        if item.get("entity_instance_id") == {directive.id.casefold()}
+    )
+    assert "directive_source_declaration_qualified" not in context
+    assert "port_ownership_qualified" not in context
 
 
 @pytest.mark.parametrize(
@@ -466,7 +629,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
     # alternative without over-constraining valid declarations, so the public
     # pack deliberately publishes no executable DEPENDENCE binding.
     assert bindings == []
-    assert sum(HybridRetriever._binding_applicable(item, context, target)
+    assert sum(HybridRetriever._binding_constraints_match_values(item, context, target)
                for item in bindings) == 0
 
     missing_scope = {
@@ -474,7 +637,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
         if key not in {"scope_id", "scope_kind", "scope_resolution",
                        "loop_id", "function_id"}
     }
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         item, missing_scope, target,
     ) for item in bindings)
     legacy_variable_as_scope = {
@@ -484,7 +647,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
     }
     legacy_variable_as_scope.pop("loop_id", None)
     legacy_variable_as_scope.pop("function_id", None)
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         item, legacy_variable_as_scope, target,
     ) for item in bindings)
 
@@ -503,7 +666,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
     )
     assert "dependence_operand_resolved" not in unlinked_context
     assert "directive_operand_identity" not in unlinked_context
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         item, unlinked_context, target,
     ) for item in bindings)
 
@@ -525,7 +688,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
     )
     assert "dependence_operand_resolved" not in ambiguous_owner_context
     assert "directive_operand_identity" not in ambiguous_owner_context
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         item, ambiguous_owner_context, target,
     ) for item in bindings)
     del graph.relations[ambiguous_owner_relation.id]
@@ -542,7 +705,7 @@ def test_dependence_separates_enclosing_scope_from_variable_operand(
     )
     assert "dependence_operand_resolved" not in tampered_context
     assert "directive_operand_identity" not in tampered_context
-    assert not any(HybridRetriever._binding_applicable(
+    assert not any(HybridRetriever._binding_constraints_match_values(
         item, tampered_context, target,
     ) for item in bindings)
 
@@ -620,7 +783,7 @@ def test_dependence_precedence_is_partitioned_by_exact_variable_operand(
         }
         assert context["directive_operand_identity"]
         assert bindings == []
-        assert sum(HybridRetriever._binding_applicable(
+        assert sum(HybridRetriever._binding_constraints_match_values(
             item, context, {"directive_kind": {"DEPENDENCE"}},
         ) for item in bindings) == 0
 
@@ -675,7 +838,7 @@ def test_dependence_missing_exact_operand_is_incomplete_and_has_no_rule_binding(
     ]
     target = {"directive_kind": {"DEPENDENCE"}}
     assert not any(
-        HybridRetriever._binding_applicable(binding, context, target)
+        HybridRetriever._binding_constraints_match_values(binding, context, target)
         for binding in bindings for context in contexts
     )
 
@@ -725,7 +888,7 @@ def test_dependence_without_enclosing_scope_does_not_bind_nearby_function(
     ]
     target = {"directive_kind": {"DEPENDENCE"}}
     assert not any(
-        HybridRetriever._binding_applicable(binding, context, target)
+        HybridRetriever._binding_constraints_match_values(binding, context, target)
         for binding in bindings for context in contexts
     )
 
@@ -961,7 +1124,8 @@ def test_config_scope_and_cosim_mismatch_trace_through_independent_gates(tmp_pat
     )
     manifest = load_manifest(root / "hlsgraph.toml")
     (root / "hlsgraph.cfg").write_text(
-        "syn.directive.unroll = compute_loop,factor=2\n", encoding="utf-8",
+        "syn.directive.unroll = compute/compute_loop factor=2\n",
+        encoding="utf-8",
     )
     manifest.build.config_files = ["hlsgraph.cfg"]
     manifest.artifact_paths = [

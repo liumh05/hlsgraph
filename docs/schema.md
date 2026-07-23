@@ -113,7 +113,22 @@ and cannot activate scoped guidance. The explicit regex-degraded scanner records
 `scope_resolution=regex_degraded`; only standard AST or exact external scope
 resolution can activate the built-in AMD/AXI directive rules.
 
-Two scoped-option cases are deliberately explicit. `INTERFACE` stores the
+Tcl and Vitis config declarations retain separate literal grammars. They do not
+share quoting, comment, substitution, escape, or token semantics, and exact
+command/target spelling is part of the directive evidence. Parser-specific
+grouping may identify a literal word, but arbitrary braces, quotes,
+leading/trailing slashes, or case changes are not normalized into a different
+valid scope; unsupported spellings remain diagnostic-only.
+
+For `INTERFACE`, a resolved `port_id` is necessary but not sufficient. The port
+must be the unique direct AST child of the manifest-configured top kernel, with
+exactly one complete static `hls.contains` owner relation in the current
+snapshot. Directive replay binds both the owner entity and relation hashes.
+Missing or additional owner candidates (including partial or ambiguous ones)
+make the port contract incomplete; a same-named helper parameter cannot qualify
+it.
+
+Two scoped-option cases are deliberately explicit. A port-scoped `INTERFACE` stores the
 source option under `options.mode`; retrieval projects that same value to the
 canonical applicability field `interface_mode` (`m_axi`, `s_axilite`, or
 `axis`). `DEPENDENCE` uses an enclosing `hls.loop`, `hls.function`, or

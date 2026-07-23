@@ -15,6 +15,9 @@ questions, four repetitions, and four arms: 192 cells. The runner randomizes
 cell order with the checked-in seed. Its default behavior is a dry run; a model
 is not contacted unless `--execute` is supplied.
 
+This matrix is an optional later performance evaluation. It is not a v0.3
+Technical Preview release prerequisite.
+
 ## Truth and corpus policy
 
 `corpus.lock.json` permits only Apache-2.0 inputs:

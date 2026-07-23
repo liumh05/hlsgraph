@@ -281,6 +281,25 @@ six-way pair seal, and compares the pack attestation byte-for-byte with the
 reconstructed material.  A missing private evidence file or stale hash is a
 release NO-GO.
 
+An explicitly labelled Technical Preview or Developer Preview may omit the
+Agent A/B evaluation while retaining every archive, privacy, SPDX, knowledge,
+and formal knowledge-review gate:
+
+```bash
+python3 tools/audit_release.py dist \
+  --knowledge-review-suite-evidence "$SUITE_WORK" \
+  --technical-preview-without-agent-eval \
+  --release-notes /path/to/release-notes.md
+```
+
+This opt-in accepts none of `--eval-identity`, `--static-report`,
+`--bootstrap-report`, `--scores`, or `--run-set`, including partial evidence.
+The release notes must say `Technical Preview` or `Developer Preview` and must
+not claim a comparative performance advantage.  This path establishes
+functional and knowledge-review readiness only; it provides no Agent A/B
+performance approval.  The normal release path above remains unchanged and is
+required before publishing any advantage claim.
+
 The older two-call v4 workflow remains accepted only for historical artifact
 verification.  It is not the v0.3 formal procedure because the monolithic
 input exceeds the fixed review context budget.  `--preflight-only` checks

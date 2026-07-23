@@ -34,7 +34,12 @@ from .extract.directive_replay import (
 from .graph import CanonicalGraph
 from .knowledge.core import (
     canonical_context_scalar,
+    knowledge_activation_hash,
     target_derived_condition_source,
+)
+from .knowledge.activation import (
+    AttestedBindingContext,
+    BindingActivationSession,
 )
 from .knowledge.supported_targets import canonical_supported_targets
 from .model import (
@@ -67,6 +72,10 @@ _DIRECTIVE_SOURCE_CONTEXT_KEY = "directive_source_declaration_qualified"
 _DIRECTIVE_SOURCE_CONTEXT_VALUE = (
     "derived_from_current_directive_source_declaration_v1"
 )
+_PORT_OWNERSHIP_CONTEXT_KEY = "port_ownership_qualified"
+_PORT_OWNERSHIP_CONTEXT_VALUE = (
+    "derived_from_unique_current_component_port_v1"
+)
 _REQUESTED_DIRECTIVE_CONTEXT_KEY = "requested_directive_present"
 _OBSERVATION_ARTIFACT_KIND_CONTEXT_KEY = "observation_artifact_kind"
 _TOOL_ARTIFACT_CONTEXT_KEY = "tool_artifact_evidence_qualified"
@@ -98,6 +107,10 @@ _RESERVED_DERIVED_CONTEXT_KEYS = frozenset({
     "directive_operand_identity",
     _DIRECTIVE_SOURCE_CONTEXT_KEY,
     "directive_source_identity",
+    _PORT_OWNERSHIP_CONTEXT_KEY,
+    "port_owner_id",
+    "configured_component_id",
+    "port_ownership_identity",
     _REQUESTED_DIRECTIVE_CONTEXT_KEY,
     _OBSERVATION_ARTIFACT_KIND_CONTEXT_KEY,
     _TOOL_ARTIFACT_CONTEXT_KEY,
@@ -1143,6 +1156,42 @@ class _Document:
     entity_id: str | None = None
 
 
+@dataclass(slots=True)
+class _BindingEvaluation:
+    """Detached result of one session-local atomic binding evaluation.
+
+    This is ordinary retrieval output, never an authorization token.  No API
+    accepts it as authority for another match.
+    """
+
+    binding: Any
+    rule: Any
+    values: Mapping[str, set[str]]
+    request_matches: bool
+    binding_matches: bool
+    revision_unbound: bool
+    rule_applicable: bool
+    rule_reason: str
+
+
+@dataclass(slots=True)
+class _ReviewedKnowledgeSurface:
+    """Exact live records closed to a revalidated review-ready inventory."""
+
+    rule_ids: set[str] = field(default_factory=set)
+    binding_ids: set[str] = field(default_factory=set)
+    rule_fingerprints: dict[str, str] = field(default_factory=dict)
+    binding_fingerprints: dict[str, str] = field(default_factory=dict)
+    rejected: bool = False
+
+
+@dataclass(slots=True)
+class _RuleEvaluation:
+    rule: Any
+    applicable: bool
+    reason: str
+
+
 def _text(value: Any, limit: int = 1200) -> str:
     try:
         rendered = json.dumps(json_ready(value), ensure_ascii=False, sort_keys=True,
@@ -2130,97 +2179,184 @@ class HybridRetriever:
         if "knowledge" in spec.planes:
             context = self._applicability_context(spec)
             bindings_by_rule: dict[str, list[Any]] = defaultdict(list)
-            binding_reader = getattr(self.bundle.store, "knowledge_bindings", None)
-            reviewed_binding_ids = self._review_ready_binding_ids()
-            if callable(binding_reader):
-                for binding in binding_reader():
-                    if binding.id not in reviewed_binding_ids:
-                        continue
-                    bindings_by_rule[binding.knowledge_rule_id].append(binding)
+            try:
+                binding_reader = getattr(
+                    self.bundle.store, "knowledge_bindings", None,
+                )
+                rules = list(self.bundle.store.knowledge_rules())
+                stored_bindings = (
+                    list(binding_reader()) if callable(binding_reader) else []
+                )
+                reviewed_surface = self._review_ready_surface(
+                    bindings=stored_bindings, rules=rules,
+                )
+            except Exception:
+                rules = []
+                stored_bindings = []
+                reviewed_surface = _ReviewedKnowledgeSurface(rejected=True)
+            if reviewed_surface.rejected:
+                warnings.append("knowledge_activation_session_rejected")
+                # Never touch malformed rows again after the review gate has
+                # rejected their identity/content.  Facts and evidence remain
+                # independently retrievable.
+                rules = []
+                stored_bindings = []
+                reviewed_surface = _ReviewedKnowledgeSurface()
+            reviewed_bindings: list[Any] = []
+            for binding in stored_bindings:
+                if binding.id not in reviewed_surface.binding_ids:
+                    continue
+                bindings_by_rule[binding.knowledge_rule_id].append(binding)
+                reviewed_bindings.append(binding)
+            reviewed_rules = [
+                rule for rule in rules
+                if rule.id in reviewed_surface.rule_ids
+            ]
             target_contexts = self._binding_target_contexts(graph, allowed_ids)
-            for rule in self.bundle.store.knowledge_rules():
-                bindings = bindings_by_rule.get(rule.id, [])
-                matching_bindings: list[Any] = []
-                revision_unbound_bindings: list[Any] = []
-                if bindings:
-                    for binding in bindings:
-                        target_key = (str(binding.target_kind), str(binding.target))
-                        target = {target_key[0]: {target_key[1]}}
-                        for instance_context in target_contexts.get(target_key, ()):
-                            if not self._context_matches_request(instance_context, spec):
-                                continue
-                            binding_matches = self._binding_applicable(
-                                binding, instance_context, target,
-                                condition=rule.condition,
-                            )
-                            revision_unbound = (
-                                not binding_matches
-                                and self._binding_missing_only_artifact_revision(
-                                    binding, instance_context, target,
-                                    condition=rule.condition,
-                                )
-                            )
-                            if not binding_matches and not revision_unbound:
-                                continue
-                            applicable, _reason = self._rule_applicable(
-                                rule.applicability, instance_context,
-                            )
-                            if applicable:
-                                if binding_matches:
-                                    matching_bindings.append(binding)
-                                else:
-                                    revision_unbound_bindings.append(binding)
-                                break
-                    if not matching_bindings and not revision_unbound_bindings:
-                        continue
-                    reason = "applicable"
-                else:
-                    applicable, reason = self._rule_applicable(rule.applicability, context)
-                    if not applicable:
-                        continue
-                revision_unbound = bool(
-                    revision_unbound_bindings and not matching_bindings
-                )
-                selected_bindings = (
-                    matching_bindings if matching_bindings
-                    else revision_unbound_bindings
-                )
-                binding_status = (
-                    "applicable_revision_unbound" if revision_unbound
-                    else "applicable" if matching_bindings else "lexical_only"
-                )
-                fields = (rule.id, rule.rule_id, rule.title, rule.section,
-                          rule.document_id, rule.document_version)
-                documents.append(_Document(
-                    key=f"knowledge:{rule.id}",
-                    text=" ".join((*fields, rule.summary or "", _text(rule.condition),
-                                   _text(rule.effect), _text(rule.applicability))),
-                    fields=fields,
-                    item=RetrievalItem(
-                        record_id=rule.id, plane="knowledge", record_kind="knowledge_rule",
-                        title=rule.title, summary=rule.summary or rule.title,
-                        authority_class="knowledge_rule", stage=rule.applicability.get("stage"),
-                        completeness=(
-                            "complete" if reason == "applicable" and matching_bindings
-                            and not revision_unbound else "incomplete"
-                        ),
-                        citation={
-                            "document_id": rule.document_id,
-                            "document_version": rule.document_version,
-                            "section": rule.section,
-                            "url": rule.citation_url,
-                        },
-                        data={
-                            "rule_id": rule.rule_id,
-                            "applicability": json_ready(rule.applicability),
-                            "condition": json_ready(rule.condition),
-                            "effect": json_ready(rule.effect),
-                            "binding_status": binding_status,
-                            "binding_ids": sorted(item.id for item in selected_bindings),
-                            "applicability_status": reason,
-                        },
+            activation: BindingActivationSession | None = None
+            pending_knowledge_documents: list[_Document] = []
+            try:
+                activation = BindingActivationSession(
+                    snapshot_id=self.snapshot_id,
+                    graph_hash=graph.graph_hash,
+                    allowed_ids=sorted(allowed_ids),
+                    bindings=reviewed_bindings,
+                    rules=reviewed_rules,
+                    expected_binding_fingerprints=(
+                        reviewed_surface.binding_fingerprints
                     ),
-                ))
+                    expected_rule_fingerprints=reviewed_surface.rule_fingerprints,
+                    raw_contexts=target_contexts,
+                )
+                for rule in reviewed_rules:
+                    def evaluate_rule(detached_rule: Any) -> _RuleEvaluation:
+                        applicable, applicability_reason = self._rule_applicable(
+                            detached_rule.applicability, context,
+                        )
+                        return _RuleEvaluation(
+                            rule=detached_rule,
+                            applicable=applicable,
+                            reason=applicability_reason,
+                        )
+
+                    rule_evaluation = activation.evaluate_rule_atomically(
+                        rule, evaluate_rule,
+                    )
+                    if rule_evaluation is None:
+                        continue
+                    rule_snapshot = rule_evaluation.rule
+                    bindings = bindings_by_rule.get(rule.id, [])
+                    matching_bindings: list[Any] = []
+                    revision_unbound_bindings: list[Any] = []
+                    if bindings:
+                        for binding in bindings:
+                            target_key = (
+                                str(binding.target_kind), str(binding.target),
+                            )
+                            for instance_context in target_contexts.get(target_key, ()):
+                                if not self._context_matches_request(
+                                    instance_context, spec,
+                                ):
+                                    continue
+                                attested_context = activation.issue(
+                                    binding, instance_context,
+                                )
+                                if attested_context is None:
+                                    continue
+                                evaluation = self._binding_evaluation(
+                                    activation, binding, attested_context, spec,
+                                )
+                                if evaluation is None or not evaluation.request_matches:
+                                    continue
+                                binding_matches = evaluation.binding_matches
+                                revision_unbound = (
+                                    not binding_matches
+                                    and evaluation.revision_unbound
+                                )
+                                if not binding_matches and not revision_unbound:
+                                    continue
+                                if evaluation.rule_applicable:
+                                    if binding_matches:
+                                        matching_bindings.append(evaluation.binding)
+                                    else:
+                                        revision_unbound_bindings.append(
+                                            evaluation.binding
+                                        )
+                                    rule_snapshot = evaluation.rule
+                                    break
+                        if not matching_bindings and not revision_unbound_bindings:
+                            continue
+                        reason = "applicable"
+                    else:
+                        reason = rule_evaluation.reason
+                        if not rule_evaluation.applicable:
+                            continue
+                    revision_unbound = bool(
+                        revision_unbound_bindings and not matching_bindings
+                    )
+                    selected_bindings = (
+                        matching_bindings if matching_bindings
+                        else revision_unbound_bindings
+                    )
+                    binding_status = (
+                        "applicable_revision_unbound" if revision_unbound
+                        else "applicable" if matching_bindings else "lexical_only"
+                    )
+                    fields = (
+                        rule_snapshot.id, rule_snapshot.rule_id,
+                        rule_snapshot.title, rule_snapshot.section,
+                        rule_snapshot.document_id, rule_snapshot.document_version,
+                    )
+                    pending_knowledge_documents.append(_Document(
+                        key=f"knowledge:{rule_snapshot.id}",
+                        text=" ".join((
+                            *fields, rule_snapshot.summary or "",
+                            _text(rule_snapshot.condition),
+                            _text(rule_snapshot.effect),
+                            _text(rule_snapshot.applicability),
+                        )),
+                        fields=fields,
+                        item=RetrievalItem(
+                            record_id=rule_snapshot.id, plane="knowledge",
+                            record_kind="knowledge_rule",
+                            title=rule_snapshot.title,
+                            summary=rule_snapshot.summary or rule_snapshot.title,
+                            authority_class="knowledge_rule",
+                            stage=rule_snapshot.applicability.get("stage"),
+                            completeness=(
+                                "complete" if reason == "applicable"
+                                and matching_bindings and not revision_unbound
+                                else "incomplete"
+                            ),
+                            citation={
+                                "document_id": rule_snapshot.document_id,
+                                "document_version": rule_snapshot.document_version,
+                                "section": rule_snapshot.section,
+                                "url": rule_snapshot.citation_url,
+                            },
+                            data={
+                                "rule_id": rule_snapshot.rule_id,
+                                "applicability": json_ready(
+                                    rule_snapshot.applicability
+                                ),
+                                "condition": json_ready(rule_snapshot.condition),
+                                "effect": json_ready(rule_snapshot.effect),
+                                "binding_status": binding_status,
+                                "binding_ids": sorted(
+                                    item.id for item in selected_bindings
+                                ),
+                                "applicability_status": reason,
+                            },
+                        ),
+                    ))
+                documents.extend(pending_knowledge_documents)
+            except (TypeError, ValueError):
+                # Corrupt, duplicated, or mutable activation input removes all
+                # executable guidance; it never falls back to raw dictionaries.
+                warnings.append("knowledge_activation_session_rejected")
+            finally:
+                if activation is not None:
+                    activation.close()
         if "predictions" in spec.planes:
             for prediction in self.bundle.store.predictions(self.snapshot_id):
                 subject_id = str(prediction.get("subject_id", ""))
@@ -2243,8 +2379,24 @@ class HybridRetriever:
                 ))
         return documents
 
-    def _review_ready_binding_ids(self) -> set[str]:
-        """Return bindings closed to one installed, review-ready pack.
+    def _review_ready_surface(
+        self, *, bindings: Sequence[Any] | None = None,
+        rules: Sequence[Any] | None = None,
+    ) -> _ReviewedKnowledgeSurface:
+        """Fail closed when mutable or malformed stored knowledge cannot hash."""
+
+        try:
+            return self._review_ready_surface_unchecked(
+                bindings=bindings, rules=rules,
+            )
+        except Exception:
+            return _ReviewedKnowledgeSurface(rejected=True)
+
+    def _review_ready_surface_unchecked(
+        self, *, bindings: Sequence[Any] | None = None,
+        rules: Sequence[Any] | None = None,
+    ) -> _ReviewedKnowledgeSurface:
+        """Return exact records closed to installed review-ready packs.
 
         This is a read-side security gate, not merely an install-time
         convenience.  Old ledgers or directly injected binding rows remain
@@ -2255,20 +2407,24 @@ class HybridRetriever:
         pack_reader = getattr(self.bundle.store, "installed_knowledge_packs", None)
         coverage_reader = getattr(self.bundle.store, "knowledge_coverage", None)
         binding_reader = getattr(self.bundle.store, "knowledge_bindings", None)
+        rule_reader = getattr(self.bundle.store, "knowledge_rules", None)
         if not all(callable(item) for item in (
-            pack_reader, coverage_reader, binding_reader,
+            pack_reader, coverage_reader, binding_reader, rule_reader,
         )):
-            return set()
+            return _ReviewedKnowledgeSurface()
         installed = {
             str(item.get("pack_id")): item
             for item in pack_reader()
             if isinstance(item, Mapping) and item.get("pack_id")
         }
-        stored_bindings = list(binding_reader())
+        stored_bindings = list(bindings) if bindings is not None else list(binding_reader())
         bindings_by_id = {item.id: item for item in stored_bindings}
-        if len(bindings_by_id) != len(stored_bindings):
-            return set()
-        eligible: set[str] = set()
+        stored_rules = list(rules) if rules is not None else list(rule_reader())
+        rules_by_id = {item.id: item for item in stored_rules}
+        if (len(bindings_by_id) != len(stored_bindings)
+                or len(rules_by_id) != len(stored_rules)):
+            return _ReviewedKnowledgeSurface()
+        surface = _ReviewedKnowledgeSurface()
         for coverage in coverage_reader():
             inventory = installed.get(str(coverage.pack_id))
             if (inventory is None
@@ -2291,6 +2447,15 @@ class HybridRetriever:
                 continue
             declared_rules = set(rule_values)
             declared_bindings = set(binding_values)
+            if (not declared_rules.issubset(rules_by_id)
+                    or not declared_bindings.issubset(bindings_by_id)
+                    or inventory.get("activation_hash")
+                    != knowledge_activation_hash(
+                        (rules_by_id[item] for item in declared_rules),
+                        (bindings_by_id[item] for item in declared_bindings),
+                        coverage,
+                    )):
+                continue
             rule_counts: Counter[str] = Counter()
             binding_counts: Counter[str] = Counter()
             binding_entries: dict[str, Any] = {}
@@ -2341,8 +2506,49 @@ class HybridRetriever:
             if (target_mismatch or target_counts
                     != Counter({item: 1 for item in declared_bindings})):
                 continue
-            eligible.update(declared_bindings)
-        return eligible
+            # Close the IDs to the exact live bytes checked above.  The second
+            # activation-hash computation detects a mutation while the rest of
+            # the coverage contract was being verified; the session then
+            # rechecks these per-record fingerprints at capture and use.
+            rule_fingerprints = {
+                item: stable_hash(json_ready(rules_by_id[item]))
+                for item in declared_rules
+            }
+            binding_fingerprints = {
+                item: stable_hash(json_ready(bindings_by_id[item]))
+                for item in declared_bindings
+            }
+            if inventory.get("activation_hash") != knowledge_activation_hash(
+                (rules_by_id[item] for item in declared_rules),
+                (bindings_by_id[item] for item in declared_bindings),
+                coverage,
+            ):
+                continue
+            if any(
+                item in surface.rule_fingerprints
+                and surface.rule_fingerprints[item] != fingerprint
+                for item, fingerprint in rule_fingerprints.items()
+            ) or any(
+                item in surface.binding_fingerprints
+                and surface.binding_fingerprints[item] != fingerprint
+                for item, fingerprint in binding_fingerprints.items()
+            ):
+                return _ReviewedKnowledgeSurface()
+            surface.rule_ids.update(declared_rules)
+            surface.binding_ids.update(declared_bindings)
+            surface.rule_fingerprints.update(rule_fingerprints)
+            surface.binding_fingerprints.update(binding_fingerprints)
+        return surface
+
+    def _review_ready_binding_ids(
+        self, *, bindings: Sequence[Any] | None = None,
+        rules: Sequence[Any] | None = None,
+    ) -> set[str]:
+        """Compatibility inspection returning only eligible binding IDs."""
+
+        return set(self._review_ready_surface(
+            bindings=bindings, rules=rules,
+        ).binding_ids)
 
     @staticmethod
     def _context_copy(value: Mapping[str, set[str]]) -> dict[str, set[str]]:
@@ -3242,12 +3448,39 @@ class HybridRetriever:
         manifest = self.bundle.store.snapshot_manifest(self.snapshot_id)
         context: dict[str, set[str]] = {}
         self._context_add(context, "vendor", manifest.target.vendor)
-        for toolchain in manifest.toolchains:
+        # Tool and version are one inseparable identity.  A manifest containing
+        # Vitis HLS 2023.2 plus Vivado 2024.2 must not synthesize the nonexistent
+        # pair "Vitis HLS 2024.2" by independently pooling both columns.
+        if len(manifest.toolchains) == 1:
+            toolchain = manifest.toolchains[0]
             self._context_add(context, "tool", toolchain.name)
             self._context_add(context, "tool", toolchain.id)
             self._context_add(context, "tool_version", toolchain.version)
             self._context_add(context, "version", toolchain.version)
         return context, {item.id: item for item in manifest.toolchains}
+
+    def _source_tool_context(
+        self, base: Mapping[str, set[str]], toolchains: Mapping[str, Any],
+    ) -> dict[str, set[str]]:
+        """Resolve exactly one Vitis HLS identity for source semantics."""
+        context = {
+            key: set(values) for key, values in base.items()
+            if key not in {"tool", "tool_version", "version"}
+        }
+        candidates = [
+            item for item in toolchains.values()
+            if str(item.name).casefold() == "vitis_hls"
+            and str(item.vendor).casefold()
+            in context.get("vendor", {str(item.vendor).casefold()})
+        ]
+        if len(candidates) != 1:
+            return context
+        toolchain = candidates[0]
+        self._context_add(context, "tool", toolchain.name)
+        self._context_add(context, "tool", toolchain.id)
+        self._context_add(context, "tool_version", toolchain.version)
+        self._context_add(context, "version", toolchain.version)
+        return context
 
     def _run_context(
         self, run: Any, base: Mapping[str, set[str]], toolchains: Mapping[str, Any],
@@ -3361,7 +3594,7 @@ class HybridRetriever:
             else "vivado" if artifact.kind == "constraint.xdc"
             else None
         )
-        if expected_tool is not None:
+        if expected_tool is not None and artifact.kind != "constraint.xdc":
             matches = [item for item in toolchains.values()
                        if item.name.casefold() == expected_tool]
             if len(matches) == 1:
@@ -3370,8 +3603,17 @@ class HybridRetriever:
                 self._context_add(context, "tool", toolchain.id)
                 self._context_add(context, "tool_version", toolchain.version)
                 self._context_add(context, "version", toolchain.version)
+        artifact_metadata = artifact.metadata
+        if artifact.kind == "constraint.xdc":
+            # A source constraint cannot self-assert the tool identity under
+            # which it applies.  That identity is selected atomically below
+            # from the manifest's stage/toolchain mapping.
+            artifact_metadata = {
+                key: value for key, value in artifact.metadata.items()
+                if key not in {"vendor", "tool", "tool_version", "version", "stage"}
+            }
         self._context_metadata(
-            context, artifact.metadata,
+            context, artifact_metadata,
             preserve_existing=("vendor", "tool", "tool_version", "version"),
         )
         self._context_projection_metadata(context, artifact.metadata)
@@ -3389,7 +3631,8 @@ class HybridRetriever:
                 item for item in self.bundle.store.artifacts(self.snapshot_id)
                 if item.uri == artifact.uri
             ]
-            if (artifact.producer_run_id is None
+            if (self._snapshot_manifest_identity_valid(manifest, snapshot)
+                    and artifact.producer_run_id is None
                     and manifest.constraints.xdc_files.count(artifact.uri) == 1
                     and len(same_path) == 1 and same_path[0].id == artifact.id
                     and snapshot.artifact_hashes.get(artifact.uri) == artifact.sha256
@@ -3408,9 +3651,12 @@ class HybridRetriever:
                         "constraint_hash": snapshot.constraint_hash,
                     }),
                 )
-                # A constraint input is stage-qualified only by an explicit
-                # manifest stage/toolchain mapping, not by the existence of an
-                # unrelated Vivado run elsewhere in the snapshot.
+                # A constraint input is stage-qualified only by a single exact
+                # manifest stage/toolchain identity, not by independently
+                # pooled stage and tool/version values.  If stages select
+                # different Vivado builds, this one-context projection is
+                # deliberately incomplete instead of cross-pairing them.
+                stage_pairs: list[tuple[str, Any]] = []
                 for stage in ("post_synth", "post_place", "post_route"):
                     if stage not in manifest.stage_commands:
                         continue
@@ -3419,8 +3665,54 @@ class HybridRetriever:
                     except (KeyError, TypeError, ValueError):
                         continue
                     if toolchain.name.casefold() == "vivado":
-                        self._context_add(context, "stage", stage)
+                        stage_pairs.append((stage, toolchain))
+                selected_toolchains = {
+                    item.id: item for _stage, item in stage_pairs
+                }
+                if len(selected_toolchains) == 1 and stage_pairs:
+                    selected = next(iter(selected_toolchains.values()))
+                    context["vendor"] = {
+                        canonical_context_scalar(selected.vendor)
+                    }
+                    context["tool"] = {
+                        canonical_context_scalar(selected.name),
+                        canonical_context_scalar(selected.id),
+                    }
+                    context["tool_version"] = {
+                        canonical_context_scalar(selected.version)
+                    }
+                    context["version"] = {
+                        canonical_context_scalar(selected.version)
+                    }
+                    context["stage"] = {
+                        canonical_context_scalar(stage)
+                        for stage, _toolchain in stage_pairs
+                    }
         return context
+
+    def _snapshot_manifest_identity_valid(
+        self, manifest: Any, snapshot: Any,
+    ) -> bool:
+        """Close a live manifest row to every persisted snapshot identity hash."""
+
+        try:
+            return bool(
+                snapshot.id == self.snapshot_id
+                and snapshot.id == stable_id(
+                    "snapshot", snapshot.identity_payload(), 32,
+                )
+                and stable_hash(manifest.identity_payload())
+                == snapshot.manifest_hash
+                and stable_hash(manifest.build) == snapshot.build_hash
+                and stable_hash(manifest.target) == snapshot.target_hash
+                and stable_hash(manifest.constraints) == snapshot.constraint_hash
+                and stable_hash({
+                    "toolchains": manifest.toolchains,
+                    "stage_toolchains": manifest.stage_toolchains,
+                }) == snapshot.toolchain_hash
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
 
     @staticmethod
     def _target_device_identity(manifest: Any) -> str | None:
@@ -3590,17 +3882,7 @@ class HybridRetriever:
         if (run is None
                 or run.snapshot_id != self.snapshot_id
                 or run.id != expected_run_id
-                or snapshot.id != stable_id(
-                    "snapshot", snapshot.identity_payload(), 32,
-                )
-                or stable_hash(manifest.identity_payload()) != snapshot.manifest_hash
-                or stable_hash(manifest.build) != snapshot.build_hash
-                or stable_hash(manifest.target) != snapshot.target_hash
-                or stable_hash(manifest.constraints) != snapshot.constraint_hash
-                or stable_hash({
-                    "toolchains": manifest.toolchains,
-                    "stage_toolchains": manifest.stage_toolchains,
-                }) != snapshot.toolchain_hash
+                or not self._snapshot_manifest_identity_valid(manifest, snapshot)
                 or successful_fresh_tool_run_error(run) is not None
                 or tool_run_manifest_identity_error(run, manifest) is not None
                 or not self.bundle.store.has_valid_execution_commit(
@@ -3721,6 +4003,72 @@ class HybridRetriever:
             return None
         return qualified[0]
 
+    def _context_interface_port_ownership(
+        self, context: dict[str, set[str]], *, graph: CanonicalGraph,
+        directive: Any, replay_proof: Any,
+    ) -> bool:
+        """Bind an INTERFACE declaration to the unique configured top port."""
+        manifest = self.bundle.store.snapshot_manifest(self.snapshot_id)
+        scope_values = context.get("scope_id", set())
+        port_values = context.get("port_id", set())
+        if (scope_values != port_values or len(scope_values) != 1
+                or context.get("scope_kind", set()) != {"hls.port"}):
+            return False
+        port_id = next(iter(scope_values))
+        port = graph.entities.get(port_id)
+        kernels = [
+            entity for entity in graph.entities.values()
+            if entity.kind == "hls.kernel"
+            and entity.name == manifest.build.top
+            and entity.snapshot_id == self.snapshot_id
+            and entity.stage == "ast"
+            and str(entity.authority) == "static_fact"
+            and str(entity.completeness) == "complete"
+        ]
+        if (port is None or port.kind != "hls.port"
+                or port.stage != "ast"
+                or str(port.authority) != "static_fact"
+                or str(port.completeness) != "complete"
+                or len(kernels) != 1):
+            return False
+        owner = kernels[0]
+        ownership = [
+            relation for relation in graph.relations.values()
+            if relation.kind == "hls.contains"
+            and relation.dst == port.id
+        ]
+        if (len(ownership) != 1 or ownership[0].src != owner.id
+                or ownership[0].snapshot_id != self.snapshot_id
+                or ownership[0].stage != "ast"
+                or str(ownership[0].authority) != "static_fact"
+                or str(ownership[0].completeness) != "complete"
+                or replay_proof.port_owner_id != owner.id
+                or replay_proof.port_owner_kind != "hls.kernel"
+                or replay_proof.port_owner_record_hash
+                != stable_hash(json_ready(owner))
+                or replay_proof.port_owner_relation_hash
+                != stable_hash(json_ready(ownership[0]))):
+            return False
+        self._context_add(context, "port_owner_id", owner.id)
+        self._context_add(context, "configured_component_id", owner.id)
+        self._context_add(
+            context, _PORT_OWNERSHIP_CONTEXT_KEY,
+            _PORT_OWNERSHIP_CONTEXT_VALUE,
+        )
+        self._context_add(context, "port_ownership_identity", stable_hash({
+            "contract": _PORT_OWNERSHIP_CONTEXT_VALUE,
+            "snapshot_id": self.snapshot_id,
+            "configured_top": manifest.build.top,
+            "directive_id": directive.id,
+            "port_id": port.id,
+            "owner_id": owner.id,
+            "owner_record_hash": replay_proof.port_owner_record_hash,
+            "contains_relation_id": ownership[0].id,
+            "contains_relation_hash": replay_proof.port_owner_relation_hash,
+            "directive_replay_identity": replay_proof.replay_identity,
+        }))
+        return True
+
     def _context_directive_source_evidence(
         self, context: dict[str, set[str]], *, directive_id: str,
         observations: Sequence[Any], graph: CanonicalGraph,
@@ -3815,6 +4163,11 @@ class HybridRetriever:
                     "annotates_relation_id": annotations[0].id,
                 }),
             )
+        if directive_kind == "INTERFACE" and not self._context_interface_port_ownership(
+            context, graph=graph, directive=directive,
+            replay_proof=replay_proof,
+        ):
+            return
         self._context_add(
             context, _DIRECTIVE_SOURCE_CONTEXT_KEY,
             _DIRECTIVE_SOURCE_CONTEXT_VALUE,
@@ -4532,6 +4885,9 @@ class HybridRetriever:
         an unrelated synthesis predicate look workload-qualified.
         """
         manifest_context, toolchains = self._manifest_context()
+        source_tool_context = self._source_tool_context(
+            manifest_context, toolchains,
+        )
         manifest = self.bundle.store.snapshot_manifest(self.snapshot_id)
         vendor_only = {
             key: set(values) for key, values in manifest_context.items()
@@ -4564,7 +4920,10 @@ class HybridRetriever:
 
         for entity_id in sorted(allowed_ids):
             entity = graph.entities[entity_id]
-            context = self._context_copy(manifest_context)
+            context = self._context_copy(
+                source_tool_context
+                if entity.kind == "hls.directive" else manifest_context
+            )
             context["stage"] = {entity.stage.casefold()}
             self._context_entity_evidence(context, entity, current=True)
             self._context_metadata(context, entity.attrs)
@@ -4600,7 +4959,10 @@ class HybridRetriever:
         for relation in sorted(graph.relations.values(), key=lambda item: item.id):
             if relation.src not in allowed_ids or relation.dst not in allowed_ids:
                 continue
-            context = self._context_copy(manifest_context)
+            context = self._context_copy(
+                source_tool_context
+                if relation.stage == "source" else manifest_context
+            )
             context["stage"] = {relation.stage.casefold()}
             self._context_relation_evidence(
                 context, relation, graph, current=True,
@@ -4643,12 +5005,14 @@ class HybridRetriever:
             elif artifact is not None:
                 context = self._artifact_context(
                     artifact,
-                    manifest_context if observation.stage == "source" else vendor_only,
+                    source_tool_context
+                    if observation.stage == "source" else vendor_only,
                     toolchains,
                 )
             else:
                 context = self._context_copy(
-                    manifest_context if observation.stage == "source" else vendor_only
+                    source_tool_context
+                    if observation.stage == "source" else vendor_only
                 )
             context["stage"] = {observation.stage.casefold()}
             self._context_ir_stage(context, observation.stage)
@@ -4682,8 +5046,10 @@ class HybridRetriever:
             predicate = derivation.get("predicate")
             if not isinstance(predicate, str):
                 continue
-            context = self._context_copy(vendor_only)
             stage = derivation.get("stage")
+            context = self._context_copy(
+                source_tool_context if stage == "source" else vendor_only
+            )
             if isinstance(stage, str) and stage:
                 context["stage"] = {stage.casefold()}
                 self._context_ir_stage(context, stage)
@@ -4761,15 +5127,24 @@ class HybridRetriever:
                 else self._artifact_context(artifact, vendor_only, toolchains)
             )
             stage = artifact.metadata.get("stage")
-            if qualified_artifact is None and isinstance(stage, str) and stage:
+            if (qualified_artifact is None and artifact.kind != "constraint.xdc"
+                    and isinstance(stage, str) and stage):
                 context["stage"] = {stage.casefold()}
                 self._context_ir_stage(context, stage)
             for key in ("workload_id", "testcase_id", "activity_source"):
                 value = artifact.metadata.get(key)
                 if isinstance(value, str) and value:
                     context[key] = {value.casefold()}
+            public_artifact_metadata = artifact.metadata
+            if artifact.kind == "constraint.xdc":
+                public_artifact_metadata = {
+                    key: value for key, value in artifact.metadata.items()
+                    if key not in {
+                        "vendor", "tool", "tool_version", "version", "stage",
+                    }
+                }
             self._context_metadata(
-                context, artifact.metadata,
+                context, public_artifact_metadata,
                 preserve_existing=(
                     "vendor", "tool", "tool_version", "version", "stage",
                     "workload_id", "testcase_id", "activity_source",
@@ -4791,12 +5166,72 @@ class HybridRetriever:
             result[("gate_kind", gate_kind)].append(context)
         return dict(result)
 
+    def _binding_evaluation(
+        self,
+        session: BindingActivationSession,
+        binding: Any,
+        context: AttestedBindingContext,
+        spec: RetrievalSpec,
+    ) -> _BindingEvaluation | None:
+        """Return one terminal decision from the local reviewed session.
+
+        Production passes the session created in the same ``_documents`` call;
+        no issuer field or mutable retriever registry can introduce a different
+        activation surface.
+        """
+
+        def evaluate(
+            detached_binding: Any,
+            detached_rule: Any,
+            detached_values: Mapping[str, set[str]],
+        ) -> _BindingEvaluation:
+            targets = {
+                str(detached_binding.target_kind): {
+                    str(detached_binding.target),
+                },
+            }
+            binding_matches = self._binding_constraints_match_values(
+                detached_binding, detached_values, targets,
+                condition=detached_rule.condition,
+            )
+            revision_unbound = bool(
+                not binding_matches
+                and self._binding_constraints_missing_only_artifact_revision(
+                    detached_binding, detached_values, targets,
+                    condition=detached_rule.condition,
+                )
+            )
+            rule_applicable, rule_reason = self._rule_applicable(
+                detached_rule.applicability, detached_values,
+            )
+            return _BindingEvaluation(
+                binding=detached_binding,
+                rule=detached_rule,
+                values=detached_values,
+                request_matches=self._context_matches_request(
+                    detached_values, spec,
+                ),
+                binding_matches=binding_matches,
+                revision_unbound=revision_unbound,
+                rule_applicable=rule_applicable,
+                rule_reason=rule_reason,
+            )
+
+        return session.evaluate_atomically(binding, context, evaluate)
+
     @staticmethod
-    def _binding_applicable(
+    def _binding_constraints_match_values(
         binding: Any, context: Mapping[str, set[str]],
         targets: Mapping[str, set[str]], *,
         condition: Mapping[str, Any] | None = None,
     ) -> bool:
+        """Inspect scalar constraints without granting activation authority.
+
+        Pack-authoring and unit tests use this pure matcher.  A ``True`` result
+        says only that supplied values are mutually compatible; production
+        retrieval must still run the local reviewed session's atomic evaluator
+        with an issued :class:`AttestedBindingContext`.
+        """
         if str(binding.target) not in targets.get(str(binding.target_kind), set()):
             return False
         required = getattr(binding, "required_context", {})
@@ -4816,18 +5251,12 @@ class HybridRetriever:
         )
 
     @staticmethod
-    def _binding_missing_only_artifact_revision(
+    def _binding_constraints_missing_only_artifact_revision(
         binding: Any, context: Mapping[str, set[str]],
         targets: Mapping[str, set[str]],
         *, condition: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Identify an otherwise applicable binding whose artifact is unpinned.
-
-        This keeps useful normative guidance visible as explicitly incomplete
-        without weakening the binding.  The missing revision is never filled
-        from the cited specification revision, a symbol name, or another
-        target instance.
-        """
+        """Pure non-authorizing inspection for the revision-unbound case."""
         if str(binding.target) not in targets.get(str(binding.target_kind), set()):
             return False
         required = getattr(binding, "required_context", {})
@@ -4971,13 +5400,13 @@ class HybridRetriever:
         folded = canonical_context_scalar(expected)
         if isinstance(constraint, (str, bool)):
             return canonical_context_scalar(constraint) == folded
-        if isinstance(constraint, list):
+        if isinstance(constraint, (list, tuple)):
             return False
         if isinstance(constraint, Mapping):
             values: list[Any] = []
             if "equals" in constraint:
                 values.append(constraint["equals"])
-            if isinstance(constraint.get("one_of"), list):
+            if isinstance(constraint.get("one_of"), (list, tuple)):
                 values.extend(constraint["one_of"])
             return folded in {
                 canonical_context_scalar(item) for item in values
@@ -4993,6 +5422,26 @@ class HybridRetriever:
         required: Mapping[str, Any], context: Mapping[str, set[str]],
     ) -> bool:
         """Recheck relationships that scalar binding constraints cannot express."""
+        if HybridRetriever._constraint_mentions(
+            required.get(_PORT_OWNERSHIP_CONTEXT_KEY),
+            _PORT_OWNERSHIP_CONTEXT_VALUE,
+        ):
+            singleton_keys = (
+                "scope_id", "port_id", "port_owner_id",
+                "configured_component_id", "port_ownership_identity",
+            )
+            if any(len(context.get(key, set())) != 1 for key in singleton_keys):
+                return False
+            if (context.get(_PORT_OWNERSHIP_CONTEXT_KEY, set())
+                    != {_PORT_OWNERSHIP_CONTEXT_VALUE}
+                    or context["scope_id"] != context["port_id"]
+                    or context["port_owner_id"]
+                    != context["configured_component_id"]
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        next(iter(context["port_ownership_identity"])),
+                    )):
+                return False
         if not HybridRetriever._constraint_mentions(
             required.get(_SEMANTIC_ARTIFACT_EVIDENCE_CONTEXT_KEY),
             _SEMANTIC_ARTIFACT_EVIDENCE_CONTEXT_VALUE,
@@ -5057,7 +5506,7 @@ class HybridRetriever:
         # Arrays are data values in other public contracts.  Binding
         # alternatives must use the explicit ``{"one_of": [...]}`` operator
         # so generic and set-valued retrieval matching cannot diverge.
-        if any(isinstance(value, list) for value in required.values()):
+        if any(isinstance(value, (list, tuple)) for value in required.values()):
             return False
 
         vendor = required.get("vendor")
@@ -5138,6 +5587,17 @@ class HybridRetriever:
                         ) or not HybridRetriever._requires_present_value(
                             required.get("directive_operand_identity")
                         )):
+                        return False
+                if target.upper() == "INTERFACE":
+                    if (not HybridRetriever._constraint_mentions(
+                            required.get(_PORT_OWNERSHIP_CONTEXT_KEY),
+                            _PORT_OWNERSHIP_CONTEXT_VALUE,
+                        ) or not all(HybridRetriever._requires_present_value(
+                            required.get(key)
+                        ) for key in (
+                            "port_owner_id", "configured_component_id",
+                            "port_ownership_identity",
+                        ))):
                         return False
 
             if (target_kind == "predicate"
@@ -5272,12 +5732,12 @@ class HybridRetriever:
                     target_constraint.get("one_of")
                     if isinstance(target_constraint, Mapping) else None
                 )
-                if (not isinstance(location_choices, list)
+                if (not isinstance(location_choices, (list, tuple))
                         or not location_choices
                         or not {str(item) for item in location_choices}.issubset(
                             _CONCRETE_MLIR_MAPPING_LOCATION_KINDS
                         )
-                        or not isinstance(target_choices, list)
+                        or not isinstance(target_choices, (list, tuple))
                         or not target_choices
                         or not {str(item) for item in target_choices}.issubset(
                             _SOURCE_MAPPING_TARGET_KINDS
@@ -5657,7 +6117,7 @@ class HybridRetriever:
         canonical_actual = {canonical_context_scalar(item) for item in actual}
         if not canonical_actual:
             return False
-        if isinstance(constraint, list):
+        if isinstance(constraint, (list, tuple)):
             return False
         if isinstance(constraint, Mapping):
             allowed = {
@@ -5676,7 +6136,10 @@ class HybridRetriever:
                 candidates &= {canonical_context_scalar(constraint["equals"])}
             if "one_of" in constraint:
                 choices = constraint["one_of"]
-                if not isinstance(choices, list):
+                # Active-session conditions are recursively frozen, so their
+                # reviewed ``one_of`` arrays arrive as tuples.  Caller-owned
+                # pack objects still require lists at load time.
+                if not isinstance(choices, (list, tuple)):
                     return False
                 candidates &= {
                     canonical_context_scalar(item) for item in choices

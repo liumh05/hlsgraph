@@ -13,7 +13,7 @@ from tools import run_knowledge_review as review
 ROOT = Path(__file__).parents[1]
 CITATION_AUDIT = ROOT / "docs" / "knowledge-citation-audit-v0.3.json"
 EXPECTED_PLAN_SHA256 = (
-    "ad92ce630372eab577b0f5df87cc4c376bfa889a2457a8ce12ffa73e99d59037"
+    "42c55db7ef94093e6f7e8894d7185f6ac76b01f5983e45285edfe4076def38bd"
 )
 
 
@@ -52,7 +52,7 @@ def test_fixed_three_shard_plan_matches_current_closed_audit() -> None:
     assert [row["shard_id"] for row in plan["shards"]] == list(
         shards.SHARD_ORDER
     )
-    assert [len(row["source_paths"]) for row in plan["shards"]] == [17, 11, 15]
+    assert [len(row["source_paths"]) for row in plan["shards"]] == [19, 11, 15]
     assert [len(row["rule_references"]) for row in plan["shards"]] == [10, 15, 13]
     assert sum(len(row["rule_references"]) for row in plan["shards"]) == 38
     assert plan["token_budget_contract"] == (
@@ -85,6 +85,25 @@ def test_shard_union_covers_the_complete_model_inspection_surface() -> None:
     expected = (original_expected - original_sensitive) | virtual
     assert assigned == expected
     assert assigned.isdisjoint(original_sensitive)
+
+
+def test_knowledge_shard_sees_the_complete_binding_activation_boundary() -> None:
+    knowledge = next(
+        item for item in shards.SHARD_DEFINITIONS
+        if item.shard_id == "knowledge_activation"
+    )
+    assert {
+        "src/hlsgraph/retrieval.py",
+        "src/hlsgraph/knowledge/activation.py",
+        "src/hlsgraph/knowledge/core.py",
+        "src/hlsgraph/extract/directive_replay.py",
+        "src/hlsgraph/extract/directive_identity.py",
+        "src/hlsgraph/extract/directives.py",
+        "src/hlsgraph/extract/source.py",
+        "src/hlsgraph/bundle.py",
+        "src/hlsgraph/graph.py",
+        "src/hlsgraph/model.py",
+    } <= set(knowledge.source_paths)
 
 
 def test_shard_local_json_projections_do_not_expose_other_rule_ids() -> None:
