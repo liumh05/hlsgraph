@@ -17,6 +17,11 @@ model-readable private evidence.
 - One clean, committed candidate checkout.  The suite executor must be the
   copy contained in that checkout.
 - `codex-cli 0.144.0`, model `gpt-5.6-sol`, reasoning effort `medium`.
+- The closed command contract selects a dedicated ChatGPT Responses provider
+  with `supports_websockets=false`.  This keeps the authenticated transport on
+  HTTP/SSE and avoids losing an otherwise valid six-invocation suite when a
+  long-lived WebSocket closes between shards; the provider URL and all
+  transport fields are part of the attested argv hash.
 - The official self-contained Linux musl Codex ELF, SHA-256
   `901923c1808a151f6926d41d703c17ad48815662cefb1c8d832a052c44271429`.
   The independently checked standalone release asset SHA-256 is

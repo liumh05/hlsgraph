@@ -62,8 +62,17 @@ PROTOCOL_ORDER = (
     shard_plan.ADVERSARIAL_PROTOCOL_ID,
 )
 
-EXECUTOR_CONTRACT_VERSION = "hlsgraph.knowledge-review.suite-executor.v1"
-COMMAND_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-command.v1"
+EXECUTOR_CONTRACT_VERSION = "hlsgraph.knowledge-review.suite-executor.v2"
+COMMAND_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-command.v2"
+MODEL_PROVIDER_ID = "hlsgraph_review_http"
+MODEL_PROVIDER_SELECTION = f'model_provider="{MODEL_PROVIDER_ID}"'
+MODEL_PROVIDER_DEFINITION = (
+    f"model_providers.{MODEL_PROVIDER_ID}="
+    '{name="ChatGPT HTTP",'
+    'base_url="https://chatgpt.com/backend-api/codex",'
+    'wire_api="responses",requires_openai_auth=true,'
+    "supports_websockets=false}"
+)
 REPLAY_CONTRACT_VERSION = "hlsgraph.knowledge-review.shard-replay-binding.v1"
 CHUNK_INVENTORY_VERSION = "hlsgraph.knowledge-review.shard-chunks.v1"
 SUITE_EVIDENCE_SCHEMA_VERSION = "hlsgraph.knowledge-review.suite-evidence.v1"
@@ -182,6 +191,8 @@ def canonical_shard_command_argv() -> list[str]:
             '"$CODEX_RUNTIME"="read"}'
         ),
         "-c", 'web_search="disabled"',
+        "-c", MODEL_PROVIDER_SELECTION,
+        "-c", MODEL_PROVIDER_DEFINITION,
         "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
         "--color", "never", "--skip-git-repo-check", "--model",
         suite_seal.MODEL,
@@ -284,6 +295,10 @@ def _actual_shard_command(
     command.append("exec")
     for value in profile_values:
         command.extend(["-c", value])
+    command.extend([
+        "-c", MODEL_PROVIDER_SELECTION,
+        "-c", MODEL_PROVIDER_DEFINITION,
+    ])
     command.extend([
         "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
         "--color", "never", "--skip-git-repo-check", "--model",

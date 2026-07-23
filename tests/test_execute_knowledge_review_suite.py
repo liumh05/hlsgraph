@@ -91,13 +91,21 @@ def test_canonical_command_is_path_neutral_and_pinned() -> None:
     assert "model_context_window=372000" in argv
     assert "model_auto_compact_token_limit=300000" in argv
     assert 'model_auto_compact_token_limit_scope="total"' in argv
+    assert 'model_provider="hlsgraph_review_http"' in argv
+    assert any(
+        value.startswith("model_providers.hlsgraph_review_http=")
+        and 'wire_api="responses"' in value
+        and "requires_openai_auth=true" in value
+        and "supports_websockets=false" in value
+        for value in argv
+    )
     assert all(
         feature in argv
         for feature in ("code_mode", "code_mode_host", "code_mode_only")
     )
     assert "D:\\" not in joined and "/root/" not in joined
     assert executor.canonical_shard_command_sha256() == (
-        executor.canonical_shard_command_sha256()
+        "2637881d66731c150ef54968f851785c9ed09421be1c88a81c58cbf4b9786a61"
     )
 
 
@@ -136,6 +144,14 @@ def test_actual_command_must_normalize_exactly_to_declared_argv(
     with pytest.raises(executor.SuiteExecutionError, match="actual Codex argv"):
         executor.validate_actual_shard_command(
             changed, root=ROOT, cache_root=cache, codex=codex,
+        )
+    changed_provider = [
+        value.replace("supports_websockets=false", "supports_websockets=true")
+        for value in actual
+    ]
+    with pytest.raises(executor.SuiteExecutionError, match="actual Codex argv"):
+        executor.validate_actual_shard_command(
+            changed_provider, root=ROOT, cache_root=cache, codex=codex,
         )
 
 
