@@ -552,7 +552,14 @@ def derive_static_features(result: ExtractionResult) -> None:
     )
 
     for scope in sorted(
-        (item for item in graph.entities.values() if item.kind in _SCOPE_KINDS),
+        (
+            item for item in graph.entities.values()
+            if item.kind in _SCOPE_KINDS
+            or (
+                item.kind == "ir.mlir.operation"
+                and any(key in item.attrs for key in ("trip_count", "loop_bounds"))
+            )
+        ),
         key=lambda item: item.id,
     ):
         closure_ids, parent = _closure(scope.id, graph.entities, children)
@@ -684,7 +691,13 @@ def derive_static_features(result: ExtractionResult) -> None:
                 unit="entity_ids",
             )
 
-        if scope.kind == "hls.loop":
+        if (
+            scope.kind == "hls.loop"
+            or (
+                scope.kind == "ir.mlir.operation"
+                and any(key in scope.attrs for key in ("trip_count", "loop_bounds"))
+            )
+        ):
             for predicate, key in zip(
                 _LOOP_PREDICATES, ("trip_count", "loop_bounds"), strict=True,
             ):

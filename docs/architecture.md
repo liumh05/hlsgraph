@@ -182,11 +182,12 @@ all enforce that boundary.
   and relation hashes survive replay; helper ports and graph-wide name fallback
   remain incomplete.
   Regex-degraded extraction and missing parser environments fail closed.
-- **MLIR/HLS IR:** text adapters preserve dialect operation and location
-  evidence. Hardware/dataflow projection occurs only for supported semantics,
-  such as explicit Handshake relations; generic SSA flow is not promoted to
-  hardware topology. The default text adapters do not assert compatibility
-  with an exact upstream language-spec revision.
+- **MLIR/HLS IR:** the default text adapters preserve dialect operation,
+  location, typed-feature, and SSA def-use evidence. They do not assert
+  compatibility with an exact upstream language-spec revision, so they never
+  project those records into canonical `hls.*` entities or hardware topology.
+  A future hardware/dataflow projection requires a separately authorized,
+  revision-bound dialect adapter.
 - **LLVM IR:** operations, blocks, CFG, memory access, calls, and debug locations
   are evidence. LLVM CFG edges remain LLVM relations, not HLS dataflow edges.
   In v0.3, caller-writable graph metadata is never accepted as a semantic

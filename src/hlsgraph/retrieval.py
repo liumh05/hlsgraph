@@ -423,11 +423,11 @@ _LLVM_MEMORY_ACCESS_KINDS = {
 # weight instead of being silently reinterpreted as architecture edges.
 _ZERO_WEIGHT_RELATIONS = frozenset({
     "software.calls", "llvm.calls", "llvm.cfg", "ir.contains",
+    "handshake.dataflow",
 })
 
 _RELATION_WEIGHTS: dict[str, float] = {
     "hls.streams_to": 1.0,
-    "handshake.dataflow": 1.0,
     "hls.annotates": 0.9,
     "hls.contains": 0.7,
     "cross.maps_to": 0.6,
@@ -6308,6 +6308,9 @@ class HybridRetriever:
             for relation in graph.relations.values():
                 if (relation.id not in selected_relation_ids or relation.src != current
                         or relation.dst in visited):
+                    continue
+                if (relation.attrs.get("hardware_topology") is False
+                        or relation.attrs.get("hardware_instance") is False):
                     continue
                 weight = self._relation_weight(relation.kind)
                 if weight > 0:

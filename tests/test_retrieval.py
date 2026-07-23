@@ -128,6 +128,39 @@ def retrieval_project(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def test_flow_spine_excludes_evidence_only_relations(retrieval_project) -> None:
+    bundle = retrieval_project["bundle"]
+    snapshot_id = retrieval_project["snapshot"]
+    assert isinstance(bundle, GraphBundle)
+    assert isinstance(snapshot_id, str)
+    graph = bundle.store.load_graph(snapshot_id)
+    evidence_only = Relation(
+        retrieval_project["region"], retrieval_project["sink"],
+        "handshake.dataflow", snapshot_id, stage="mlir",
+        authority=AuthorityClass.COMPILER_DECISION,
+        attrs={"hardware_topology": False, "native_ir_evidence": True},
+    )
+    graph.add_relation(evidence_only)
+    fact = RetrievalItem(
+        record_id=str(retrieval_project["region"]), plane="facts",
+        record_kind="entity", title="compute",
+        summary="dataflow region", entity_id=str(retrieval_project["region"]),
+    )
+
+    flow = HybridRetriever(bundle, snapshot_id)._flow_spine(
+        graph,
+        {
+            str(retrieval_project["region"]): 1.0,
+            str(retrieval_project["sink"]): 1.0,
+        },
+        {evidence_only.id},
+        [fact],
+        max_edges=8,
+    )
+
+    assert flow == []
+
+
 @pytest.mark.parametrize(
     ("constraint", "generic_actual", "runtime_actual", "expected"),
     [

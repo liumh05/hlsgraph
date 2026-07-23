@@ -59,23 +59,26 @@ def _by_name(graph, kind: str, name: str):
     return items[0]
 
 
-def test_golden_fixture_preserves_planes_and_only_projects_dialect_defined_topology(golden):
+def test_golden_fixture_preserves_planes_without_promoting_native_ssa_to_topology(golden):
     project, result = golden
     graph = project.service().graph()
 
-    assert {"hls.kernel", "hls.loop", "hls.directive", "hls.buffer", "hls.process",
+    assert {"hls.kernel", "hls.loop", "hls.directive",
             "ir.mlir.operation", "ir.llvm.operation", "hls.scheduled_operation"}.issubset(
         graph.stats()["entity_kinds"]
     )
     assert {"source.ast", "ir.mlir.evidence", "ir.llvm.cfg_evidence",
             "amd.vitis.schedule", "amd.vivado.timing"}.issubset(result.capabilities)
 
-    architecture_edges = [item for item in graph.relations.values()
-                          if item.kind == "hls.streams_to"]
-    assert len(architecture_edges) == 2
-    assert {item.attrs["fifo_depth"] for item in architecture_edges} == {8, 16}
-    assert all(item.attrs["projection"] == "handshake_semantics"
-               for item in architecture_edges)
+    assert not [
+        item for item in graph.relations.values()
+        if item.kind == "hls.streams_to"
+        and item.attrs.get("projection") == "handshake_semantics"
+    ]
+    assert not [
+        item for item in graph.relations.values()
+        if item.kind == "cross.projects_to"
+    ]
 
     software_calls = [item for item in graph.relations.values()
                       if item.kind == "software.calls"]
@@ -85,9 +88,6 @@ def test_golden_fixture_preserves_planes_and_only_projects_dialect_defined_topol
     assert all(item.attrs["ml_input_evidence"] is True
                for item in software_calls)
     assert llvm_cfg and all(item.attrs["hardware_topology"] is False for item in llvm_cfg)
-    assert not ({item.id for item in software_calls + llvm_cfg}
-                & {item.id for item in architecture_edges})
-
     native_handshake = [
         item for item in graph.relations.values()
         if item.kind == "handshake.dataflow"
@@ -125,11 +125,8 @@ def test_golden_fixture_preserves_planes_and_only_projects_dialect_defined_topol
 
     schedule_maps = [item for item in graph.relations.values()
                      if item.kind == "cross.maps_to"]
-    assert len(schedule_maps) == 1
-    assert schedule_maps[0].mapping_kind == "schedule.explicit_architecture_name"
-    assert schedule_maps[0].attrs["cardinality"] == "explicit"
-    mapped = graph.entities[schedule_maps[0].dst]
-    assert mapped.kind == "hls.process" and mapped.name == "handshake.mul@4"
+    assert schedule_maps == []
+    assert graph.by_kind("hls.scheduled_operation")
 
 
 def test_missing_and_ambiguous_cross_layer_mappings_are_diagnostic_not_guessed(golden):
@@ -1405,8 +1402,11 @@ def test_supported_untruncated_mlir_is_a_complete_static_feature_domain(tmp_path
         "operation_histogram_domain_complete"
     ] is True
 
-    loop = next(item for item in graph.entities.values()
-                if item.kind == "hls.loop" and item.stage == "mlir")
+    loop = next(
+        item for item in graph.entities.values()
+        if item.kind == "ir.mlir.operation"
+        and item.attrs.get("operation") == "scf.for"
+    )
     loop_rows = {
         item["predicate"]: item for item in project.feature_evidence(
             loop.id,
@@ -1443,7 +1443,7 @@ def test_supported_untruncated_mlir_is_a_complete_static_feature_domain(tmp_path
                and item["mask"] is True for item in exported)
 
 
-def test_mlir_mapping_rules_close_only_to_source_ast_and_nonhardware_projection(
+def test_mlir_mapping_rules_close_only_to_source_ast_without_semantic_projection(
     tmp_path: Path,
 ) -> None:
     if not LibClangExtractor.available():
@@ -1549,13 +1549,10 @@ def test_mlir_mapping_rules_close_only_to_source_ast_and_nonhardware_projection(
         for item in project.bundle.store.knowledge_bindings()
     )
 
-    hardware_projection = next(
-        item for item in graph.relations.values()
-        if item.kind == "cross.projects_to"
+    assert not any(
+        item.kind == "cross.projects_to"
+        for item in graph.relations.values()
     )
-    assert graph.entities[hardware_projection.dst].kind == "hls.loop"
-    assert hardware_projection.attrs["hardware_projection"] is True
-    assert hardware_projection.attrs["hardware_topology"] is False
     assert not any(
         item.target_kind == "relation_kind"
         and item.target == "cross.projects_to"

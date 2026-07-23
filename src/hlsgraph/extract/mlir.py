@@ -32,7 +32,6 @@ _FUNC = re.compile(r"(?:func\.func|handshake\.func|hls\.func)\s+(?:public\s+|pri
 _OP = re.compile(r"^\s*(?:(%[\w.$#-]+)(?:\s*:\s*\d+)?\s*=\s*)?([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)\b(.*)$")
 _SSA = re.compile(r"%[\w.$#-]+")
 _LOCATION = re.compile(r'loc\("([^"]+)":(\d+):(\d+)\)')
-_SLOTS = re.compile(r"(?:numSlots|num_slots|slots)\s*=\s*(\d+)", re.I)
 _INTEGER_WIDTH = re.compile(r"(?<![\w!])(?:[su]?i)([1-9]\d*)\b", re.I)
 _CONSTANT_LOOP = re.compile(
     r"(?<![\w.$-])(%?[A-Za-z_$][\w.$-]*)\s*=\s*(-?\d+)\s+to\s+(-?\d+)"
@@ -113,7 +112,7 @@ def _constant_loop_facts(op_name: str, tail: str) -> dict[str, Any]:
 
 class MlirTextExtractor:
     name = "ir.mlir_text"
-    version = "1"
+    version = "2"
 
     def supports(self, context: ExtractionContext) -> bool:
         return any(item.uri.lower().endswith(".mlir") for item in context.artifacts.values())
@@ -147,7 +146,6 @@ class MlirTextExtractor:
             current_parent = unit.id
             function_entities: dict[str, str] = {}
             definitions: dict[str, str] = {}
-            projections: dict[str, str] = {}
             pending_uses: list[tuple[str, str, str]] = []
             brace_depth = 0
             parent_stack: list[tuple[int, str]] = [(0, unit.id)]
@@ -239,26 +237,6 @@ class MlirTextExtractor:
                     for operand in ssa_operands:
                         pending_uses.append((operand, op.id, op_name))
 
-                    projected = self._project_hardware_entity(context, artifact, line_number,
-                                                               op_name, tail, location,
-                                                               op.attrs)
-                    if projected:
-                        graph.add_entity(projected)
-                        artifact_entity_ids.append(projected.id)
-                        projections[op.id] = projected.id
-                        graph.add_relation(Relation(
-                            src=op.id, dst=projected.id, kind="cross.projects_to",
-                            snapshot_id=context.snapshot.id,
-                            authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                            attrs={
-                                "projection": "dialect_semantics",
-                                "projection_mapping": "dialect_semantics",
-                                "hardware_projection": True,
-                                "hardware_topology": False,
-                                "parser": "experimental_text",
-                            },
-                        ))
-
                     if location:
                         self._cross_map_source(context, graph, op, location, result, artifact)
 
@@ -283,6 +261,9 @@ class MlirTextExtractor:
                         "native_ir_evidence_contract": "hlsgraph.mlir.ssa_def_use.v1",
                         "native_ir_relation_provenance": "mlir.ssa_def_use",
                     })
+                # Native SSA def-use is retained as IR evidence only.  It
+                # cannot mint an hls.streams_to architecture edge without a
+                # separately authorized, revision-bound dialect adapter.
                 graph.add_relation(Relation(
                     src=producer, dst=consumer, kind=relation_kind,
                     snapshot_id=context.snapshot.id,
@@ -291,18 +272,6 @@ class MlirTextExtractor:
                     anchors=([SourceAnchor(artifact_id=artifact.id)]
                              if relation_kind == "handshake.dataflow" else []),
                 ))
-                if relation_kind == "handshake.dataflow" and producer in projections and consumer in projections:
-                    source_projection = graph.entities[projections[producer]]
-                    target_projection = graph.entities[projections[consumer]]
-                    depth = source_projection.attrs.get("depth") or target_projection.attrs.get("depth")
-                    graph.add_relation(Relation(
-                        src=source_projection.id, dst=target_projection.id, kind="hls.streams_to",
-                        snapshot_id=context.snapshot.id,
-                        authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                        attrs={"fifo_depth": depth, "via_ssa": operand,
-                               "projection": "handshake_semantics"},
-                    ))
-
             feature_domain_complete = (
                 not artifact_truncated
                 and artifact_dialects.issubset(_KNOWN_DIALECTS)
@@ -377,40 +346,6 @@ class MlirTextExtractor:
                             ir_location=(f'loc("{relative}":{source_line}:{column})'),
                             mapping_kind="mlir.filelinecol",
                             ambiguity=None if artifact else "source artifact is not in snapshot")
-
-    @staticmethod
-    def _project_hardware_entity(context: ExtractionContext, artifact: Any, line: int,
-                                 op_name: str, tail: str,
-                                 source_location: SourceAnchor | None,
-                                 operation_attrs: dict[str, Any]) -> Entity | None:
-        kind: str | None = None
-        attrs: dict[str, Any] = {"source_operation": op_name, "projection_fidelity": "experimental"}
-        if op_name in {"scf.for", "affine.for", "hls.loop"}:
-            kind = "hls.loop"
-            for key in ("loop_bounds", "trip_count"):
-                if key in operation_attrs:
-                    attrs[key] = operation_attrs[key]
-        elif op_name == "handshake.buffer":
-            kind = "hls.buffer"
-            slots = _SLOTS.search(tail)
-            if slots:
-                attrs["depth"] = int(slots.group(1))
-        elif any(token in op_name for token in ("stream", "fifo", "channel")) and op_name.startswith(("hls.", "handshake.")):
-            kind = "hls.stream"
-        elif any(token in op_name for token in ("memref", "memory", "alloc")) and op_name.startswith(("hls.", "memref.")):
-            kind = "hls.memory"
-        elif op_name.startswith("handshake.") and op_name not in {"handshake.func", "handshake.return"}:
-            kind = "hls.process"
-        if not kind:
-            return None
-        anchors = [SourceAnchor(artifact_id=artifact.id, start_line=line, start_column=1)]
-        if source_location:
-            anchors.append(source_location)
-        return Entity(kind=kind, name=f"{op_name}@{line}",
-                      qualified_name=f"{artifact.id}:{line}:{op_name}",
-                      snapshot_id=context.snapshot.id,
-                      authority=context.authority_for(artifact, AuthorityClass.COMPILER_DECISION), stage=Stage.MLIR.value,
-                      attrs=attrs, anchors=anchors, completeness=Completeness.PARTIAL)
 
     @staticmethod
     def _cross_map_source(context: ExtractionContext, graph: CanonicalGraph, op: Entity,
