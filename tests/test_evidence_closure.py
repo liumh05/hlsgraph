@@ -524,6 +524,70 @@ def test_physical_gates_must_share_one_eligible_post_route_run(tmp_path):
     )
 
 
+def test_gate_leaf_replays_parser_before_borrowing_a_real_report(tmp_path):
+    bundle, snapshot, run, timing, _routed, observation = _valid_timing_case(
+        tmp_path,
+    )
+    assert sum(
+        item.get("gate_evidence_qualified") == {
+            "derived_from_typed_evidence_v1"
+        }
+        for item in _gate_contexts(bundle, snapshot, "post_route_timing")
+    ) == 1
+
+    forged_value = -1.0
+    forged = Observation(
+        snapshot.id, observation.subject_id, observation.predicate,
+        forged_value, observation.stage, observation.authority,
+        unit=observation.unit, run_id=run.id, artifact_id=timing.id,
+        anchor=observation.anchor,
+        source=_observation_source_commitment(
+            artifact=timing, parser_name="amd.vivado.reports",
+            parser_version="1", predicate=observation.predicate,
+            value=forged_value, unit=observation.unit,
+        ),
+    )
+    forged_gate = Derivation(
+        snapshot.id, observation.subject_id, "gate.post_route_timing", False,
+        "hlsgraph.gate.wns_nonnegative", "1", [forged.id],
+        stage="post_route",
+    )
+    with bundle.store.write() as connection:
+        connection.execute(
+            "INSERT INTO observations(id,snapshot_id,subject_id,predicate,stage,authority,"
+            "run_id,artifact_id,payload_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                forged.id, snapshot.id, forged.subject_id, forged.predicate,
+                forged.stage, str(forged.authority), forged.run_id,
+                forged.artifact_id,
+                json.dumps(
+                    json_ready(forged), sort_keys=True, separators=(",", ":"),
+                ),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO derivations(id,snapshot_id,subject_id,predicate,payload_json) "
+            "VALUES(?,?,?,?,?)",
+            (
+                forged_gate.id, snapshot.id, forged_gate.subject_id,
+                forged_gate.predicate,
+                json.dumps(
+                    json_ready(forged_gate), sort_keys=True, separators=(",", ":"),
+                ),
+            ),
+        )
+
+    qualified = [
+        item for item in _gate_contexts(
+            bundle, snapshot, "post_route_timing",
+        )
+        if item.get("gate_evidence_qualified") == {
+            "derived_from_typed_evidence_v1"
+        }
+    ]
+    assert len(qualified) == 1
+
+
 @pytest.mark.parametrize(
     ("algorithm", "wns", "derived"),
     [

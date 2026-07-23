@@ -161,7 +161,7 @@ reserved `directive_operand_linked` marker and a derived operand identity. A
 stable ID and a self-consistent `hls.annotates` relation are necessary but are
 not proof: before minting either value, retrieval independently replays the
 fixed `source.libclang` v4 and `directive.external` v3 parsers under
-`hlsgraph.directive_parser_replay.v5` over the exact live snapshot inputs. The
+`hlsgraph.directive_parser_replay.v6` over the exact live snapshot inputs. The
 current directive, complete option map, source
 spelling hash, anchor, resolved scope/operand entity, annotation, and unique
 `directive.requested` observation must match the replay byte-for-byte at the
@@ -177,6 +177,13 @@ request observation, the parser replay, and the live snapshot-input hashes all
 agree. Metadata and another directive cannot donate either value. Binding
 alternatives always use the explicit `{"one_of": [...]}` operator; a bare
 array is rejected at the binding boundary.
+
+For the UG1399 PIPELINE, UNROLL, ARRAY_PARTITION, and INLINE effect rules,
+replay v6 additionally runs a closed AMD 2024.2 option normalizer. Only a
+valid enabled form mints `directive_options_qualified`, a replay-bound options
+identity, and one explicit `directive_semantic_mode`; `off`, unknown options,
+invalid combinations, and non-array ARRAY_PARTITION operands remain lexical
+directive facts but cannot activate those effect rules.
 
 `INTERFACE` has an additional owner closure. Source and external-directive
 resolution accept only the unique complete AST `hls.contains` relation from the

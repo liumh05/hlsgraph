@@ -38,6 +38,7 @@ from .knowledge.core import (
     canonical_context_scalar,
     direct_condition_source,
     knowledge_activation_hash,
+    target_derived_condition_stage,
     target_derived_condition_source,
 )
 from .knowledge.activation import (
@@ -79,6 +80,8 @@ _DIRECTIVE_SOURCE_CONTEXT_KEY = "directive_source_declaration_qualified"
 _DIRECTIVE_SOURCE_CONTEXT_VALUE = (
     "derived_from_current_directive_source_declaration_v1"
 )
+_DIRECTIVE_OPTIONS_CONTEXT_KEY = "directive_options_qualified"
+_DIRECTIVE_OPTIONS_CONTEXT_VALUE = "derived_from_current_directive_options_v1"
 _PORT_OWNERSHIP_CONTEXT_KEY = "port_ownership_qualified"
 _PORT_OWNERSHIP_CONTEXT_VALUE = (
     "derived_from_unique_current_component_port_v1"
@@ -114,6 +117,9 @@ _RESERVED_DERIVED_CONTEXT_KEYS = frozenset({
     "directive_operand_identity",
     _DIRECTIVE_SOURCE_CONTEXT_KEY,
     "directive_source_identity",
+    _DIRECTIVE_OPTIONS_CONTEXT_KEY,
+    "directive_options_identity",
+    "directive_semantic_mode",
     _PORT_OWNERSHIP_CONTEXT_KEY,
     "port_owner_id",
     "configured_component_id",
@@ -4395,6 +4401,25 @@ class HybridRetriever:
             replay_proof=replay_proof,
         ):
             return
+        if replay_proof.directive_semantic_mode is not None:
+            self._context_add(
+                context,
+                "directive_semantic_mode",
+                replay_proof.directive_semantic_mode,
+            )
+            self._context_add(
+                context,
+                _DIRECTIVE_OPTIONS_CONTEXT_KEY,
+                _DIRECTIVE_OPTIONS_CONTEXT_VALUE,
+            )
+            self._context_add(context, "directive_options_identity", stable_hash({
+                "contract": _DIRECTIVE_OPTIONS_CONTEXT_VALUE,
+                "directive_id": directive.id,
+                "directive_kind": directive_kind,
+                "directive_options_hash": replay_proof.directive_options_hash,
+                "directive_semantic_mode": replay_proof.directive_semantic_mode,
+                "directive_replay_identity": replay_proof.replay_identity,
+            }))
         self._context_add(
             context, _DIRECTIVE_SOURCE_CONTEXT_KEY,
             _DIRECTIVE_SOURCE_CONTEXT_VALUE,
@@ -4759,6 +4784,10 @@ class HybridRetriever:
         runs: Mapping[str, Any], artifacts: Mapping[str, Any],
         observations: Sequence[Any], derivations: Sequence[Mapping[str, Any]],
         verifications: Sequence[Mapping[str, Any]],
+        graph: CanonicalGraph,
+        parser_replay_cache: dict[
+            tuple[str, str, str], tuple[Any, ...]
+        ],
     ) -> list[tuple[str, dict[str, set[str]]]]:
         """Build gate contexts only from one closed, snapshot-local evidence chain.
 
@@ -4791,6 +4820,14 @@ class HybridRetriever:
         def leaf_artifacts(
             observation: Any, run: Any, allowed_kinds: set[str],
         ) -> list[Any] | None:
+            qualified = self._qualified_observation_context(
+                observation=observation, run=run, artifacts=artifacts,
+                manifest=manifest, vendor_only=vendor_only,
+                toolchains=toolchains, graph=graph,
+                parser_replay_cache=parser_replay_cache,
+            )
+            if qualified is None:
+                return None
             artifact_ids = {
                 str(item) for item in (
                     observation.artifact_id,
@@ -5415,6 +5452,7 @@ class HybridRetriever:
             vendor_only=vendor_only, toolchains=toolchains, runs=runs,
             artifacts=artifacts, observations=observations,
             derivations=derivations, verifications=verifications,
+            graph=graph, parser_replay_cache=parser_replay_cache,
         ):
             result[("gate_kind", gate_kind)].append(context)
         return dict(result)
@@ -5634,6 +5672,23 @@ class HybridRetriever:
                     "directive_instance_id", "scope_id", "scope_kind",
                 ))
             )
+        if source == "hlsgraph.condition.directive_options.v1":
+            return (
+                key == "directive_semantic_mode"
+                and str(binding.target_kind) == "directive_kind"
+                and str(binding.target) in {
+                    "PIPELINE", "UNROLL", "ARRAY_PARTITION", "INLINE",
+                }
+                and context.get(_DIRECTIVE_SOURCE_CONTEXT_KEY, set())
+                == {_DIRECTIVE_SOURCE_CONTEXT_VALUE}
+                and context.get(_DIRECTIVE_OPTIONS_CONTEXT_KEY, set())
+                == {_DIRECTIVE_OPTIONS_CONTEXT_VALUE}
+                and all(singleton(name) for name in (
+                    "directive_instance_id", "scope_id",
+                    "directive_source_identity", "directive_semantic_mode",
+                    "directive_options_identity",
+                ))
+            )
         return False
 
     @staticmethod
@@ -5689,10 +5744,14 @@ class HybridRetriever:
                 ))
             )
         if source == "hlsgraph.target.qualified_gate.v1":
+            expected_stage = target_derived_condition_stage(
+                binding, key, source,
+            )
             if (context.get(_GATE_EVIDENCE_CONTEXT_KEY, set())
                     != {_GATE_EVIDENCE_CONTEXT_VALUE}
                     or context.get("snapshot_association", set()) != {"verified"}
-                    or not singleton("stage")):
+                    or expected_stage is None
+                    or context.get("stage", set()) != {expected_stage}):
                 return False
             identities = {
                 "csim_result_present": (

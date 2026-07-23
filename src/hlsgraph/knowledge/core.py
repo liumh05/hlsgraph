@@ -96,6 +96,9 @@ _DIRECT_CONDITION_SOURCE_PORT_OWNERSHIP = (
 _DIRECT_CONDITION_SOURCE_REQUESTED_DIRECTIVE = (
     "hlsgraph.condition.requested_directive.v1"
 )
+_DIRECT_CONDITION_SOURCE_DIRECTIVE_OPTIONS = (
+    "hlsgraph.condition.directive_options.v1"
+)
 
 _TARGET_DIRECTIVE_KINDS = frozenset({
     "DATAFLOW", "PIPELINE", "UNROLL", "ARRAY_PARTITION", "INTERFACE",
@@ -156,6 +159,12 @@ _TARGET_GATE_CONDITIONS: dict[str, frozenset[str]] = {
     "correctness": frozenset({"csim_result_present", "cosim_result_present"}),
     "resource_fits": frozenset({"utilization_report_present"}),
     "post_route_timing": frozenset({"timing_gate_requested"}),
+}
+_TARGET_GATE_CONDITION_STAGES: dict[tuple[str, str], str] = {
+    ("correctness", "csim_result_present"): "csim",
+    ("correctness", "cosim_result_present"): "cosim",
+    ("resource_fits", "utilization_report_present"): "post_route",
+    ("post_route_timing", "timing_gate_requested"): "post_route",
 }
 
 
@@ -696,6 +705,18 @@ def target_derived_condition_source(
     return None
 
 
+def target_derived_condition_stage(
+    binding: KnowledgeBinding, key: str, source: str,
+) -> str | None:
+    """Return the sole stage that can witness one target-derived condition."""
+
+    if source != _TARGET_CONDITION_SOURCE_GATE:
+        return None
+    return _TARGET_GATE_CONDITION_STAGES.get((
+        str(binding.target), str(key),
+    ))
+
+
 def direct_condition_source(
     binding: KnowledgeBinding, key: str, condition: Any,
 ) -> str | None:
@@ -730,6 +751,12 @@ def direct_condition_source(
         and _same(condition, True)
     ):
         return _DIRECT_CONDITION_SOURCE_REQUESTED_DIRECTIVE
+    if (
+        target_kind == "directive_kind"
+        and target in {"PIPELINE", "UNROLL", "ARRAY_PARTITION", "INLINE"}
+        and key == "directive_semantic_mode"
+    ):
+        return _DIRECT_CONDITION_SOURCE_DIRECTIVE_OPTIONS
     return None
 
 
@@ -751,7 +778,7 @@ def _requires_value(constraint: Any) -> bool:
 
 
 def _target_condition_source_closed(
-    binding: KnowledgeBinding, source: str,
+    binding: KnowledgeBinding, key: str, source: str,
 ) -> bool:
     required = binding.required_context
     if source == _TARGET_CONDITION_SOURCE_DIRECTIVE:
@@ -796,8 +823,13 @@ def _target_condition_source_closed(
             ))
         )
     if source == _TARGET_CONDITION_SOURCE_GATE:
+        expected_stage = target_derived_condition_stage(binding, key, source)
         return (
-            _constraint_mentions_exact(
+            expected_stage is not None
+            and _constraint_mentions_exact(
+                required.get("stage"), expected_stage,
+            )
+            and _constraint_mentions_exact(
                 required.get("gate_evidence_qualified"),
                 "derived_from_typed_evidence_v1",
             )
@@ -847,6 +879,21 @@ def _direct_condition_source_closed(
             and _requires_value(required.get("scope_id"))
             and "scope_kind" in required
         )
+    if source == _DIRECT_CONDITION_SOURCE_DIRECTIVE_OPTIONS:
+        return (
+            _constraint_mentions_exact(
+                required.get("directive_options_qualified"),
+                "derived_from_current_directive_options_v1",
+            )
+            and _constraint_mentions_exact(
+                required.get("directive_source_declaration_qualified"),
+                "derived_from_current_directive_source_declaration_v1",
+            )
+            and all(_requires_value(required.get(key)) for key in (
+                "directive_options_identity", "directive_source_identity",
+                "directive_instance_id", "scope_id",
+            ))
+        )
     return False
 
 
@@ -879,7 +926,7 @@ def binding_entails_rule_condition(
         source = target_derived_condition_source(binding, key, condition)
         if source is None:
             errors.append(f"condition {key!r} has no explicit binding premise")
-        elif not _target_condition_source_closed(binding, source):
+        elif not _target_condition_source_closed(binding, key, source):
             errors.append(
                 f"condition {key!r} target premise lacks {source} evidence closure"
             )

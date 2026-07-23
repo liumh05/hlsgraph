@@ -34,7 +34,7 @@ from .directives import ExternalDirectiveExtractor
 from .source import LibClangExtractor
 
 
-DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v5"
+DIRECTIVE_REPLAY_CONTRACT = "hlsgraph.directive_parser_replay.v6"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +53,8 @@ class DirectiveReplayProof:
     source_artifact_size: int
     source_anchor_hash: str
     source_spelling_hash: str
+    directive_options_hash: str
+    directive_semantic_mode: str | None
     directive_record_hash: str
     scope_record_hash: str
     scope_owner_id: str
@@ -97,6 +99,167 @@ def _directive_observation_value(directive: Entity) -> Any | None:
     if not isinstance(options, Mapping):
         return None
     return dict(options) if options else True
+
+
+def _directive_semantic_mode(directive: Entity) -> str | None:
+    """Normalize only the reviewed enabled subset of AMD 2024.2 directives.
+
+    Source pragmas and external directives use different surface spellings for
+    flags.  This closed normalizer runs only over an independently replayed
+    directive record and rejects unknown keys, invalid types, conflicting
+    flags, disabled forms, and option combinations outside the cited UG1399
+    rule.  ``None`` therefore means that no executable knowledge rule may be
+    selected from the declaration merely because its directive kind matches.
+    """
+
+    options = directive.attrs.get("options")
+    if not isinstance(options, Mapping):
+        return None
+    kind = str(
+        directive.attrs.get("directive_kind") or directive.name
+    ).upper()
+
+    def flags(allowed: frozenset[str]) -> set[str] | None:
+        raw = options.get("flags", [])
+        if not isinstance(raw, list):
+            return None
+        folded = [
+            item.casefold() for item in raw
+            if isinstance(item, str) and item
+        ]
+        if len(folded) != len(raw) or len(folded) != len(set(folded)):
+            return None
+        result = set(folded)
+        return result if result <= allowed else None
+
+    def true_options(names: frozenset[str], bare: set[str]) -> bool:
+        for name in names:
+            if name in options and options[name] is not True:
+                return False
+            if name in options and name in bare:
+                return False
+        return True
+
+    def positive_integer(value: Any) -> bool:
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 1
+        )
+
+    keys = {str(key).casefold() for key in options}
+    if len(keys) != len(options):
+        return None
+
+    if kind == "PIPELINE":
+        if keys - {"ii", "off", "rewind", "style", "flags"}:
+            return None
+        bare = flags(frozenset({"off", "rewind"}))
+        if bare is None or not true_options(
+            frozenset({"off", "rewind"}), bare,
+        ):
+            return None
+        style = options.get("style")
+        if (
+            style is not None
+            and (
+                not isinstance(style, str)
+                or style.casefold() not in {"stp", "flp", "frp"}
+            )
+        ):
+            return None
+        if "off" in bare or options.get("off") is True:
+            return None
+        if not positive_integer(options.get("ii")):
+            return None
+        return "pipeline.explicit_ii.enabled"
+
+    if kind == "UNROLL":
+        if keys - {"factor", "off", "skip_exit_check", "flags"}:
+            return None
+        bare = flags(frozenset({"off", "skip_exit_check"}))
+        if bare is None or not true_options(
+            frozenset({"off", "skip_exit_check"}), bare,
+        ):
+            return None
+        if "off" in bare or options.get("off") is True:
+            return None
+        factor = options.get("factor")
+        skip_exit = (
+            "skip_exit_check" in bare
+            or options.get("skip_exit_check") is True
+        )
+        if factor is None:
+            return None if skip_exit else "unroll.full.enabled"
+        if not positive_integer(factor):
+            return None
+        return "unroll.partial.enabled"
+
+    if kind == "ARRAY_PARTITION":
+        if directive.attrs.get("scope_kind") != "hls.memory":
+            return None
+        if keys - {"variable", "type", "factor", "dim", "off", "flags"}:
+            return None
+        bare = flags(frozenset({"off", "block", "cyclic", "complete"}))
+        if bare is None or not true_options(frozenset({"off"}), bare):
+            return None
+        if "off" in bare or options.get("off") is True:
+            return None
+        variable = options.get("variable")
+        if variable is not None and (
+            not isinstance(variable, str) or not variable
+        ):
+            return None
+        dimension = options.get("dim")
+        if dimension is not None and (
+            not isinstance(dimension, int)
+            or isinstance(dimension, bool)
+            or dimension < 0
+        ):
+            return None
+        explicit_type = options.get("type")
+        bare_types = bare & {"block", "cyclic", "complete"}
+        if len(bare_types) > 1 or (
+            explicit_type is not None and bare_types
+        ):
+            return None
+        partition_type = (
+            explicit_type
+            if explicit_type is not None
+            else next(iter(bare_types), None)
+        )
+        if not isinstance(partition_type, str):
+            return None
+        partition_type = partition_type.casefold()
+        factor = options.get("factor")
+        if partition_type == "complete":
+            if factor is not None:
+                return None
+        elif partition_type in {"block", "cyclic"}:
+            if not positive_integer(factor):
+                return None
+        else:
+            return None
+        return f"array_partition.{partition_type}.enabled"
+
+    if kind == "INLINE":
+        if keys - {"off", "recursive", "flags"}:
+            return None
+        bare = flags(frozenset({"off", "recursive"}))
+        if bare is None or not true_options(
+            frozenset({"off", "recursive"}), bare,
+        ):
+            return None
+        if "off" in bare or options.get("off") is True:
+            return None
+        recursive = (
+            "recursive" in bare or options.get("recursive") is True
+        )
+        return (
+            "inline.recursive.enabled"
+            if recursive else "inline.default.enabled"
+        )
+    return None
 
 
 def _ownership_closure(
@@ -389,6 +552,8 @@ def _proof_for_directive(
                 or str(port_owner.completeness) != "complete"):
             return None
     directive_hash = _record_hash(directive)
+    directive_options_hash = stable_hash(directive.attrs.get("options"))
+    directive_semantic_mode = _directive_semantic_mode(directive)
     scope_hash = _record_hash(scope)
     operand_hash = _record_hash(operand) if operand is not None else None
     relation_hash = _record_hash(annotation)
@@ -425,6 +590,8 @@ def _proof_for_directive(
         "source_artifact_sha256": artifact.sha256,
         "source_artifact_size": artifact.size,
         "source_spelling_hash": spelling_hash,
+        "directive_options_hash": directive_options_hash,
+        "directive_semantic_mode": directive_semantic_mode,
     })
     return DirectiveReplayProof(
         directive_id=directive.id,
@@ -439,6 +606,8 @@ def _proof_for_directive(
         source_artifact_size=artifact.size,
         source_anchor_hash=_record_hash(observation.anchor),
         source_spelling_hash=spelling_hash,
+        directive_options_hash=directive_options_hash,
+        directive_semantic_mode=directive_semantic_mode,
         directive_record_hash=directive_hash,
         scope_record_hash=scope_hash,
         scope_owner_id=scope_owner.id,

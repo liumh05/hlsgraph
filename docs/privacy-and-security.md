@@ -180,7 +180,7 @@ self-attest. Before retrieval emits `directive_source_declaration_qualified`,
 `dependence_operand_resolved`, it validates the complete immutable snapshot
 input closure and reruns only the built-in `source.libclang` v4 plus literal
 `directive.external` v3 parsers under
-`hlsgraph.directive_parser_replay.v5`. The exact spelling hash, options, source
+`hlsgraph.directive_parser_replay.v6`. The exact spelling hash, options, source
 anchor, scope, operand, annotation, and request record must match one unique
 replayed declaration. Tcl and config are parsed with isolated literal grammars;
 their quoting, comments, substitutions, escapes, and token rules are not mixed.
@@ -193,6 +193,12 @@ the complete unique scope/operand ownership closure. For `INTERFACE`, that
 closure also requires one direct complete AST containment from the configured
 top kernel to the port and binds both owner and relation hashes; a helper port
 or second owner fails closed.
+
+Rules that describe enabled directive effects also require a replay-derived
+`directive_semantic_mode` and options identity. These reserved values are
+minted only by the closed AMD 2024.2 normalizer; entity or observation metadata
+cannot inject them, and disabled, unknown, conflicting, or unsupported option
+forms do not receive them.
 
 Executable binding authorization separately commits the installed pack's
 complete rules, bindings, and coverage with an activation hash. The retriever

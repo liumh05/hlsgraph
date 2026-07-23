@@ -15,6 +15,7 @@ from hlsgraph.extract.directive_identity import (
 from hlsgraph.extract.directives import ExternalDirectiveExtractor
 from hlsgraph.extract.source import LibClangExtractor, RegexSourceExtractor
 from hlsgraph.graph import CanonicalGraph
+from hlsgraph.knowledge import KnowledgeCatalog
 from hlsgraph.knowledge.core import canonical_context_scalar
 from hlsgraph.manifest import minimal_manifest
 from hlsgraph.model import (
@@ -363,6 +364,62 @@ def test_replay_rejects_forged_options(tmp_path: Path) -> None:
     assert "requested_directive_present" not in _requested_context(
         bundle, snapshot, graph, directive,
     )
+
+
+@pytest.mark.parametrize(
+    ("pragma", "expected_mode"),
+    [
+        ("#pragma HLS pipeline II=2", "pipeline.explicit_ii.enabled"),
+        ("#pragma HLS pipeline off", None),
+        ("#pragma HLS pipeline II=2 unknown_option=1", None),
+    ],
+)
+def test_only_reviewed_replayed_options_mint_semantic_mode(
+    tmp_path: Path, pragma: str, expected_mode: str | None,
+) -> None:
+    bundle, snapshot, result = _fixed_records(
+        tmp_path,
+        f"void dut() {{\n{pragma}\n"
+        "  for (int i = 0; i < 2; ++i) {}\n}\n",
+    )
+    directive = next(
+        item for item in result.graph.entities.values()
+        if item.kind == "hls.directive"
+    )
+    _persist(bundle, result.graph, result.observations)
+    context = _context(bundle, snapshot, result.graph, directive)
+    pack = next(
+        item for item in KnowledgeCatalog.builtin().packs
+        if item.pack_id == "hlsgraph.amd.public_guidance.2024_2"
+    )
+    rule = next(
+        item for item in pack.rules
+        if item.rule_id == "directive.pipeline_ii_is_requested"
+    )
+    bindings = [
+        item for item in pack.bindings
+        if item.knowledge_rule_id == rule.id
+    ]
+    matches = sum(
+        HybridRetriever._binding_constraints_match_values(
+            binding, context, {"directive_kind": {"PIPELINE"}},
+            condition=rule.condition,
+        )
+        for binding in bindings
+    )
+
+    if expected_mode is None:
+        assert matches == 0
+        assert "directive_semantic_mode" not in context
+        assert "directive_options_qualified" not in context
+        assert "directive_options_identity" not in context
+    else:
+        assert matches == 1
+        assert context["directive_semantic_mode"] == {expected_mode}
+        assert context["directive_options_qualified"] == {
+            "derived_from_current_directive_options_v1",
+        }
+        assert len(context["directive_options_identity"]) == 1
 
 
 @pytest.mark.parametrize(

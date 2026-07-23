@@ -1322,6 +1322,52 @@ def test_builtin_bindings_have_audited_condition_entailment() -> None:
             assert entailed, (binding.id, errors)
 
 
+def test_correctness_gate_condition_cannot_borrow_another_stage() -> None:
+    pack = next(
+        item for item in KnowledgeCatalog.builtin().packs
+        if item.pack_id == "hlsgraph.amd.public_guidance.2024_2"
+    )
+    rule = next(
+        item for item in pack.rules
+        if item.rule_id == "verification.csim_is_workload_scoped"
+    )
+    original = next(
+        item for item in pack.bindings
+        if item.knowledge_rule_id == rule.id
+        and item.target_kind == "gate_kind"
+    )
+    payload = json_ready(original)
+    payload.pop("id")
+    payload["required_context"]["stage"] = {
+        "one_of": ["csim", "cosim"],
+    }
+    widened = KnowledgeBinding.from_dict(payload)
+
+    entailed, errors = binding_entails_rule_condition(rule, widened)
+    assert not entailed
+    assert errors == (
+        "condition 'csim_result_present' target premise lacks "
+        "hlsgraph.target.qualified_gate.v1 evidence closure",
+    )
+
+    cosim_context = {
+        "vendor": {"amd"}, "tool": {"vitis_hls"},
+        "tool_version": {"2024.2"}, "stage": {"cosim"},
+        "workload_id": {"workload.fixture"},
+        "snapshot_association": {"verified"},
+        "gate_evidence_qualified": {"derived_from_typed_evidence_v1"},
+        "verification_observation_identity": {"observation.fixture"},
+        "verification_report_identity": {"artifact.fixture"},
+    }
+    assert HybridRetriever._binding_semantics_complete(
+        widened, widened.required_context,
+    )
+    assert not HybridRetriever._binding_constraints_match_values(
+        widened, cosim_context, {"gate_kind": {"correctness"}},
+        condition=rule.condition,
+    )
+
+
 def test_v02_to_v03_migration_is_additive_and_keeps_graph_marker(tmp_path: Path) -> None:
     path = tmp_path / "graph.db"
     store = LedgerStore(path)
