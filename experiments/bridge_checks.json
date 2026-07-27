@@ -1,0 +1,111 @@
+{
+  "schema_version": "hlsgraph.experiment-bridge-checks.v1",
+  "checked_at": "2026-07-27",
+  "public_core_binding": {
+    "release_tag": "v0.3.0-technical-preview.1",
+    "commit": "e893196f6cf59faa3dcb6cc9372d121a5db7a7ff",
+    "wheel_sha256": "b73814815368fc45300b2667c0b904b532ffcc1421f5125865947266dfe91747"
+  },
+  "execution_policy": {
+    "vendor_tool_calls": 0,
+    "llm_calls": 0,
+    "model_training_runs": 0,
+    "remote_hosts_used": 0
+  },
+  "checks": [
+    {
+      "check_id": "public-wheel-clean-smoke",
+      "status": "passed",
+      "claim_level": "v03_contract_smoke",
+      "method": "Install the published wheel without dependencies in a clean environment, copy dataflow_gemm, and run index --degraded, status, and retrieve.",
+      "result": {
+        "entities": 32,
+        "relations": 23,
+        "observations": 83,
+        "tool_truth": false,
+        "synthetic_evidence_present": true,
+        "degraded_extraction_present": true
+      },
+      "claim_limit": "This checks packaging and evidence labels; it is not a fresh synthesis result."
+    },
+    {
+      "check_id": "gnn-v24-export-contract",
+      "status": "partial",
+      "claim_level": "v03_contract_smoke",
+      "method": "Load the legacy-g10-1.v1 public export with the frozen adapter and compare its deterministic tensors with the independently constructed legacy golden.",
+      "result": {
+        "contract_tests_passed": 4,
+        "contract_tests_failed": 0,
+        "export_hash": "4ee46cd7c17e4f5ad2dd3d6c8dbf18a6ac3f19f406c9e1b943578eb9617c405d",
+        "tensor_contract_digest": "49d06c94812fb4bcd3cdd27ccf4ba977400f204ee2f1f041f5e368d8a1f4eb55",
+        "checkpoint_sha256_verified": "053de4b39f2ce31b7c902a34c975144f5c3c8cedd98ffdd4d786a7b97e38a8e9",
+        "prediction_reference_reexecuted": false
+      },
+      "claim_limit": "Checkpoint inference exceeded the local CPU smoke window. Tensor transport is bit-exact, but the frozen prediction was not re-executed and no retraining occurred."
+    },
+    {
+      "check_id": "rcd-s3-json-replay",
+      "status": "passed",
+      "claim_level": "v03_contract_smoke",
+      "method": "Recompute the published summaries from the frozen S3 JSON rows without invoking Vitis.",
+      "result": {
+        "ratio_floor_mape_percent": 30.899598503859796,
+        "library_bypass_hits": 9,
+        "library_bypass_total": 11,
+        "library_bypass_percent": 81.81818181818183,
+        "context_ratio_percent": 21.37040157259197,
+        "anchored_violation_count": 0
+      },
+      "claim_limit": "This is metric replay over historical evidence, not a v0.3-native experiment."
+    },
+    {
+      "check_id": "controller-fake-replay-gates",
+      "status": "passed",
+      "claim_level": "v03_contract_smoke",
+      "method": "Run the public-contract online controller and reproduction adapters with mock proposals and fake/replay runners.",
+      "result": {
+        "selected_tests_passed": 8,
+        "selected_tests_failed": 0,
+        "fake_promoted_to_tool_truth": false,
+        "replay_promoted_to_tool_truth": false
+      },
+      "claim_limit": "No real LLM or vendor tool was invoked."
+    },
+    {
+      "check_id": "reproduction-summary-audit",
+      "status": "passed",
+      "claim_level": "v03_contract_smoke",
+      "method": "Recount the frozen CSV and verify the final checkpoint plus selected manifest file hashes.",
+      "result": {
+        "loaded_runs": 53,
+        "included_runs": 44,
+        "audit_only_runs": 9,
+        "hlspilot": {
+          "runs": 22,
+          "verified": 11,
+          "cosim_pass": 21,
+          "timing_met": 11,
+          "llm_calls": 57,
+          "csynth_calls": 483
+        },
+        "timelyhls": {
+          "runs": 22,
+          "verified": 19,
+          "cosim_pass": 22,
+          "timing_met": 19,
+          "llm_calls": 49,
+          "csynth_calls": 90
+        },
+        "checkpoint_sha256": "bf3bbcf8d9bcc3e181687e3bc473d4f05cb0c43b5985bc8764a4f94d54e422c4",
+        "results_csv_sha256": "1fadaf12d17297a56240598f47200a716271e6da0a295f12fa5fcd08b9f838b1",
+        "reproduction_manifest_sha256": "4725878540e2dab378dc755a1ce8cd7b07e88323a68e66e59fb26bab037d5f70"
+      },
+      "claim_limit": "The audit verifies frozen counts and hashes only; it does not re-run LLM, HLS, RTL, or Vivado stages."
+    }
+  ],
+  "known_migration_item": {
+    "status": "open",
+    "summary": "A legacy private RCD fixture builder inserts complete static aggregates directly. The published v0.3 ledger correctly rejects that path because complete aggregates now require pipeline index authorization.",
+    "impact": "Frozen RCD metrics replay successfully. A fresh RcdFeatureView success-path fixture must be rebuilt through the canonical index pipeline before it can be called a v0.3 contract pass."
+  }
+}

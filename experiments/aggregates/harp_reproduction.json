@@ -1,0 +1,25 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "harp-reproduction",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "run": "v18",
+      "performance_kendall_tau": 0.9479,
+      "paper_reference_tau": 0.93,
+      "total_rmse": 0.8014,
+      "total_mae": 0.2229
+    },
+    {
+      "run": "v20",
+      "performance_kendall_tau": 0.8981,
+      "paper_reference_tau": 0.9,
+      "total_mae": 0.305,
+      "paper_reference_mae": 0.317
+    }
+  ],
+  "limitations": [
+    "The Table II style prediction protocol and part of the explorer were reproduced.",
+    "The long AutoDSE comparison and the paper's internal Merlin-dependent path were not reproduced."
+  ]
+}

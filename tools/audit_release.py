@@ -169,6 +169,16 @@ PUBLIC_BOUNDARY_SHORT_EXCLUSIONS = frozenset({
     "hlsgraph/render/vendor/elk.bundled.js",
     "hlsgraph/render/vendor/cytoscape.min.js",
 })
+PUBLIC_EXPERIMENT_PATHS = frozenset({"docs/experiments.md"})
+PUBLIC_EXPERIMENT_PREFIXES = ("experiments/",)
+FORMAL_REVIEW_RESULT_SDIST = frozenset({
+    "docs/knowledge-review-v0.3.adversarial.json",
+    "docs/knowledge-review-v0.3.adversarial.receipt.json",
+    "docs/knowledge-review-v0.3.adversarial.trace.jsonl",
+    "docs/knowledge-review-v0.3.semantic.json",
+    "docs/knowledge-review-v0.3.semantic.receipt.json",
+    "docs/knowledge-review-v0.3.semantic.trace.jsonl",
+})
 REQUIRED_SDIST = {
     "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "SECURITY.md",
     "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "DCO", "CITATION.cff",
@@ -207,6 +217,7 @@ REQUIRED_SDIST = {
     "docs/knowledge-review-v0.3.semantic.receipt.json",
     "docs/knowledge-review-v0.3.semantic.trace.jsonl",
 }
+PREVIEW_REQUIRED_SDIST = REQUIRED_SDIST - FORMAL_REVIEW_RESULT_SDIST
 RELEASE_VERSION = "0.3.0"
 SEMANTIC_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.semantic.v1"
 ADVERSARIAL_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.adversarial.v1"
@@ -500,6 +511,14 @@ def _scan(name: str, data: bytes) -> list[str]:
     normalized_name = name.replace("\\", "/").lstrip("/")
     encoded_name = normalized_name.encode("utf-8", errors="surrogateescape")
     for label, pattern, allow_short_vendor_symbol in PUBLIC_BOUNDARY_PATTERNS:
+        if (
+            label.startswith("non-public roadmap marker")
+            and (
+                normalized_name in PUBLIC_EXPERIMENT_PATHS
+                or normalized_name.startswith(PUBLIC_EXPERIMENT_PREFIXES)
+            )
+        ):
+            continue
         if pattern.search(encoded_name):
             issues.append(f"{label} in member name {name}")
         if (
@@ -4595,6 +4614,8 @@ def _review_bound_sdist_paths(root: Path) -> set[str]:
 
 def _audit_sdist(
     path: Path, root_sbom: bytes, *, root: Path | None = None,
+    required_sdist: set[str] | frozenset[str] = REQUIRED_SDIST,
+    require_review_bound: bool = True,
 ) -> list[str]:
     issues: list[str] = []
     with tarfile.open(path, "r:gz") as archive:
@@ -4634,7 +4655,7 @@ def _audit_sdist(
                 data = stream.read()
                 stripped_bytes[name] = data
                 issues.extend(_scan(name, data))
-        missing = REQUIRED_SDIST - set(stripped)
+        missing = set(required_sdist) - set(stripped)
         if missing:
             issues.append(f"sdist is missing: {sorted(missing)}")
         if root is not None:
@@ -4671,7 +4692,10 @@ def _audit_sdist(
                     issues.append(
                         f"sdist installable source/build bytes differ from source: {relative}"
                     )
-            for relative in sorted(_review_bound_sdist_paths(root)):
+            review_bound_paths = (
+                _review_bound_sdist_paths(root) if require_review_bound else ()
+            )
+            for relative in sorted(review_bound_paths):
                 source_path = root / relative
                 member = stripped.get(relative)
                 if not source_path.is_file():
@@ -4702,6 +4726,59 @@ def _audit_sdist(
     return issues
 
 
+def _audit_unreviewed_preview(root: Path, release_notes: Path | None) -> list[str]:
+    """Approve an explicitly unreviewed preview without implying formal review."""
+
+    issues: list[str] = []
+    try:
+        catalog = KnowledgeCatalog.builtin()
+    except (OSError, TypeError, ValueError) as exc:
+        return [f"cannot load bundled knowledge packs for preview audit: {exc}"]
+    if not catalog.packs:
+        issues.append("unreviewed preview contains no bundled knowledge packs")
+    for pack in catalog.packs:
+        coverage_status = (
+            pack.coverage.review_status if pack.coverage is not None else None
+        )
+        if (
+            pack.metadata.get("review_status") != "unreviewed"
+            or coverage_status != "unreviewed"
+            or pack.review_ready
+        ):
+            issues.append(
+                f"knowledge pack {pack.pack_id} is not explicitly unreviewed"
+            )
+    if release_notes is None:
+        issues.append("--unreviewed-preview requires --release-notes")
+        return issues
+    release_notes = (
+        release_notes if release_notes.is_absolute() else root / release_notes
+    )
+    issues.extend(_audit_technical_preview_release_notes(release_notes))
+    try:
+        note_root = root if release_notes.is_relative_to(root) else release_notes.parent
+        notes = _strict_file_bytes(
+            release_notes,
+            "Technical Preview release notes",
+            root=note_root,
+        ).decode("utf-8")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        issues.append(str(exc))
+        return issues
+    folded = notes.casefold()
+    if "unreviewed" not in folded:
+        issues.append("unreviewed preview release notes must say `unreviewed`")
+    if (
+        "no machine-review, human-review, or cross-model-review claim"
+        not in folded
+    ):
+        issues.append(
+            "unreviewed preview release notes must disclaim machine, human, "
+            "and cross-model review"
+        )
+    return issues
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("dist", type=Path)
@@ -4710,6 +4787,13 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "run archive/privacy hygiene only; this mode deliberately skips final "
             "knowledge-review and evaluation approval and cannot approve a release"
+        ),
+    )
+    parser.add_argument(
+        "--unreviewed-preview", action="store_true",
+        help=(
+            "approve a Technical Preview whose bundled knowledge packs remain "
+            "explicitly unreviewed; formal review evidence must be omitted"
         ),
     )
     parser.add_argument(
@@ -4773,6 +4857,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    selected_modes = sum(bool(value) for value in (
+        args.preflight_only,
+        args.unreviewed_preview,
+        args.technical_preview_without_agent_eval,
+    ))
+    if selected_modes > 1:
+        parser.error(
+            "--preflight-only, --unreviewed-preview, and "
+            "--technical-preview-without-agent-eval are mutually exclusive"
+        )
     root = Path(__file__).resolve().parents[1]
     root_sbom = (root / "sbom.spdx.json").read_bytes()
     wheels = sorted(args.dist.glob(f"hlsgraph-{RELEASE_VERSION}-*.whl"))
@@ -4785,7 +4879,19 @@ def main(argv: list[str] | None = None) -> int:
     if len(sdists) != 1:
         issues.append(f"expected one v{RELEASE_VERSION} sdist, found {len(sdists)}")
     else:
-        issues.extend(_audit_sdist(sdists[0], root_sbom, root=root))
+        formal_review_artifacts = not (
+            args.preflight_only or args.unreviewed_preview
+        )
+        issues.extend(_audit_sdist(
+            sdists[0],
+            root_sbom,
+            root=root,
+            required_sdist=(
+                REQUIRED_SDIST if formal_review_artifacts
+                else PREVIEW_REQUIRED_SDIST
+            ),
+            require_review_bound=formal_review_artifacts,
+        ))
     if len(wheels) == 1 and len(sdists) == 1:
         try:
             wheel_data = _strict_file_bytes(
@@ -4824,6 +4930,22 @@ def main(argv: list[str] | None = None) -> int:
             issues.append(
                 "--preflight-only cannot consume or imply final review/evaluation approval"
             )
+    elif args.unreviewed_preview:
+        forbidden_preview_inputs = (
+            *evaluation_evidence_inputs,
+            args.semantic_review,
+            args.adversarial_review,
+            args.semantic_review_raw,
+            args.adversarial_review_raw,
+            args.semantic_review_cache,
+            args.adversarial_review_cache,
+            args.knowledge_review_suite_evidence,
+        )
+        if any(value is not None for value in forbidden_preview_inputs):
+            issues.append(
+                "--unreviewed-preview cannot consume formal review or evaluation evidence"
+            )
+        issues.extend(_audit_unreviewed_preview(root, args.release_notes))
     else:
         semantic_review = args.semantic_review or root / SEMANTIC_REVIEW_PATH
         adversarial_review = args.adversarial_review or root / ADVERSARIAL_REVIEW_PATH
@@ -4884,6 +5006,12 @@ def main(argv: list[str] | None = None) -> int:
             "PRE-FLIGHT ONLY: source and archives passed hygiene checks; "
             "knowledge review and evaluation were not approved, so this is not "
             "a release approval"
+        )
+    elif args.unreviewed_preview:
+        print(
+            "Technical Preview source and archives passed privacy, RECORD, SPDX, "
+            "and explicit unreviewed-knowledge checks; no formal knowledge-review "
+            "or comparative-performance approval is implied"
         )
     elif args.technical_preview_without_agent_eval:
         print(

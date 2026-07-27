@@ -215,6 +215,7 @@ claimed as complete in v0.3:
 - [Privacy and security](https://github.com/liumh05/hlsgraph/blob/main/docs/privacy-and-security.md)
 - [Versioning and migrations](https://github.com/liumh05/hlsgraph/blob/main/docs/versioning.md)
 - [Formats and upstream references](https://github.com/liumh05/hlsgraph/blob/main/docs/references.md)
+- [Research experiment bridge](https://github.com/liumh05/hlsgraph/blob/main/docs/experiments.md)
 
 ## Contributing and license
 

@@ -1,0 +1,33 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "agent-live",
+  "claim_level": "historical_pre_v03",
+  "protocol": {
+    "kernels": 7,
+    "systems": 3,
+    "repetitions": 3,
+    "runs": 63
+  },
+  "metrics": [
+    {
+      "metric": "bad_synthesis_rate",
+      "system_a": 0.189,
+      "system_b": 0.378,
+      "system_c": 0.323
+    },
+    {
+      "metric": "terminal_success_rate",
+      "system_a": 1.0,
+      "system_b": 1.0,
+      "system_c": 1.0
+    }
+  ],
+  "negative_results": [
+    "The first graph-only workflow increased context use and high-friction tools were often ignored.",
+    "A gemver counterexample was retained in the final analysis."
+  ],
+  "limitations": [
+    "This protocol predates and is distinct from the public eval/agent_ab harness.",
+    "The aggregate must not be merged into the public harness as if both used one protocol."
+  ]
+}

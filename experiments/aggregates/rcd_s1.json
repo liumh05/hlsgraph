@@ -1,0 +1,32 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "rcd-s1",
+  "claim_level": "historical_pre_v03",
+  "benchmarks": {
+    "ood_kernels": 6,
+    "observed_configurations": 26,
+    "planned_configurations": 32
+  },
+  "metrics": [
+    {
+      "metric": "hard_subset_accuracy",
+      "full_method": 0.71,
+      "ablation": 0.0
+    },
+    {
+      "metric": "mcnemar_discordance",
+      "full_wins": 10,
+      "ablation_wins": 0,
+      "p_value": 0.002
+    },
+    {
+      "metric": "proposed_to_verified_rate",
+      "clean_prompt_approx": 0.42,
+      "hinted_prompt_approx": 0.38
+    }
+  ],
+  "limitations": [
+    "Prompt hints did not improve the proposal verification rate.",
+    "Refuted mechanism rules remain part of the result rather than being removed."
+  ]
+}

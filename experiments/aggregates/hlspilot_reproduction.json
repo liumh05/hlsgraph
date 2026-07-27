@@ -1,0 +1,44 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "hlspilot-reproduction",
+  "claim_level": "historical_pre_v03",
+  "environment": {
+    "part": "xck26-sfvc784-2LV-c",
+    "hls_tool": "Vitis HLS 2024.2",
+    "physical_board_run": false
+  },
+  "metrics": [
+    {
+      "metric": "included_runs",
+      "value": 22
+    },
+    {
+      "metric": "verified_runs",
+      "value": 11
+    },
+    {
+      "metric": "rtl_cosim_runs",
+      "value": 21
+    },
+    {
+      "metric": "timing_met_runs",
+      "value": 11
+    },
+    {
+      "metric": "llm_calls",
+      "value": 57
+    },
+    {
+      "metric": "csynth_calls",
+      "value": 483
+    },
+    {
+      "metric": "wall_time_hours",
+      "value": 22.449
+    }
+  ],
+  "limitations": [
+    "This is a method reproduction under a substituted toolchain, not a numeric replication of the paper.",
+    "No board runtime or global-optimum claim is made."
+  ]
+}

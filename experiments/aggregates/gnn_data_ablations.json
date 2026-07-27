@@ -1,0 +1,27 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "gnn-data-ablations",
+  "claim_level": "historical_pre_v03",
+  "dataset_summary": {
+    "combined_samples": 27069,
+    "forgehls_graphs": 14356,
+    "forgehls_kernels": 470
+  },
+  "metrics": [
+    {
+      "metric": "held_out_performance_kendall_tau",
+      "before": 0.287,
+      "after": 0.536,
+      "relative_improvement": 0.87,
+      "flat_gbm_reference": 0.541
+    }
+  ],
+  "negative_results": [
+    "Additional architecture complexity did not improve cross-kernel rank correlation.",
+    "A v25 residual-feature experiment was reverted."
+  ],
+  "limitations": [
+    "Raw third-party datasets are not redistributed.",
+    "Dataset names, counts, split manifests, and aggregate metrics are retained for traceability."
+  ]
+}

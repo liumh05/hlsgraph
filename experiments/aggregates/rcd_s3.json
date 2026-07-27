@@ -1,0 +1,52 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "rcd-s3",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "metric": "registered_outcomes",
+      "passed": 9,
+      "partial": 2,
+      "lightweight_degradation": 1,
+      "total": 12
+    },
+    {
+      "metric": "ir_ratio_mape",
+      "zero_probe": 0.309,
+      "one_probe_anchor": 0.404,
+      "naive": 0.682
+    },
+    {
+      "metric": "library_zero_llm_bypass_rate",
+      "hits": 9,
+      "cases": 11,
+      "value": 0.82
+    },
+    {
+      "metric": "sliced_context_ratio",
+      "value": 0.214,
+      "approximate_reduction": "5x"
+    },
+    {
+      "metric": "hero_budget_loop",
+      "guided_syntheses": 2,
+      "brute_force_syntheses": 6,
+      "regret": 0,
+      "budget_violations": 0,
+      "amplitude_error_percent": [
+        0.04,
+        0.09
+      ]
+    },
+    {
+      "metric": "fault_localization",
+      "localized": 4,
+      "injections": 4,
+      "cross_domain_leakage": 0
+    }
+  ],
+  "limitations": [
+    "Scheduler-level sharing can be invisible to CSE observations.",
+    "High-unroll routing and time-sharing effects remain nonlinear boundaries."
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "rcd-s2",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "metric": "hero_cases_correct",
+      "correct": 6,
+      "total": 8
+    },
+    {
+      "metric": "dsp_lut_cases_correct",
+      "correct": 4,
+      "total": 4
+    },
+    {
+      "metric": "budget_violations",
+      "before": 27,
+      "after": 17,
+      "relative_reduction": 0.37
+    },
+    {
+      "metric": "selection_regret_cases",
+      "before": 8,
+      "after": 2
+    },
+    {
+      "metric": "holdout",
+      "samples": 64,
+      "full_overall": 0.91,
+      "full_hard_subset": 0.69,
+      "multiply_side_correct": "3/3"
+    }
+  ],
+  "limitations": [
+    "Scope changes and global cost effects remain explicit failure boundaries.",
+    "These are frozen research-protocol results, not public 0.3 tool runs."
+  ]
+}

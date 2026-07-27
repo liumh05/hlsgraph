@@ -1,0 +1,32 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "core-m1-m5",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "benchmark": "ML-KEM",
+      "metric": "context_compression_ratio",
+      "value": 20.5,
+      "unit": "x",
+      "full_characters": 84572,
+      "selected_characters": 4132,
+      "estimated_tokens_before": 21143,
+      "estimated_tokens_after": 1033
+    },
+    {
+      "benchmark": "ML-DSA",
+      "metric": "context_compression_ratio",
+      "value": 23.8,
+      "unit": "x",
+      "full_characters": 97126,
+      "selected_characters": 4083,
+      "estimated_tokens_before": 24281,
+      "estimated_tokens_after": 1020
+    }
+  ],
+  "protocol": "Deterministic graph extraction and selected-context measurement on real design sources and imported Vitis reports.",
+  "limitations": [
+    "Token counts are estimates derived from character counts.",
+    "This is an information-reduction result, not a QoR or agent-success comparison."
+  ]
+}

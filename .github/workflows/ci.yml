@@ -38,4 +38,7 @@ jobs:
       - run: python -m pip install build
       - run: python -m build
       - name: Inspect release archives
-        run: python tools/audit_release.py dist --preflight-only
+        run: >-
+          python tools/audit_release.py dist
+          --unreviewed-preview
+          --release-notes docs/release-notes-v0.3.0.md

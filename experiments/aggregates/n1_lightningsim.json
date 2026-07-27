@@ -1,0 +1,33 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "n1-lightningsim",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "metric": "fifo_name_and_depth_provenance_match",
+      "matched": 5,
+      "total": 5
+    },
+    {
+      "metric": "configured_depth_sufficient",
+      "correct": 4,
+      "total": 5
+    },
+    {
+      "metric": "rdi_soundness",
+      "sound": 1,
+      "cases": 1,
+      "conservatism_factor": 18.7
+    },
+    {
+      "metric": "exact_depth_boundary",
+      "deadlock_at_or_below": 3,
+      "minimum_runnable": 4,
+      "throughput_settles_near": 8
+    }
+  ],
+  "limitations": [
+    "The static analysis is a zero-tool-budget warning and advice mechanism.",
+    "It is not presented as a replacement for LightningSim or RTL cosimulation."
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "controller-p0",
+  "claim_level": "historical_pre_v03",
+  "metrics": [
+    {
+      "metric": "historical_unit_tests",
+      "passed": 31
+    }
+  ],
+  "implemented_flow": [
+    "task diagnosis",
+    "correctness-first repair loop",
+    "candidate generation",
+    "prediction and ranking",
+    "synthesis confirmation",
+    "budget-aware stop and report"
+  ],
+  "limitations": [
+    "The frozen stage used a pool-driven surrogate loop.",
+    "Real repair, analyzer, and predictor integration was incomplete at that stage.",
+    "This is engineering validation, not an autonomous-agent performance result."
+  ]
+}

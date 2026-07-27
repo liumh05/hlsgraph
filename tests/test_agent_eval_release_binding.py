@@ -710,3 +710,32 @@ def test_preflight_is_explicit_and_never_claims_release_approval(
     output = capsys.readouterr().out
     assert "PRE-FLIGHT ONLY" in output
     assert "not a release approval" in output
+
+
+def test_unreviewed_preview_is_explicit_and_omits_formal_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "hlsgraph-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "hlsgraph-0.3.0.tar.gz").write_bytes(b"sdist")
+    notes = tmp_path / "notes.md"
+    notes.write_text("Technical Preview\n", encoding="utf-8")
+    monkeypatch.setattr(release_audit, "_audit_source_tree", lambda _root: [])
+    monkeypatch.setattr(release_audit, "_audit_sbom", lambda _data, _root: [])
+    monkeypatch.setattr(release_audit, "_audit_wheel", lambda *_args: [])
+    monkeypatch.setattr(release_audit, "_audit_sdist", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(release_audit, "_strict_file_bytes", lambda *_args, **_kwargs: b"x")
+    monkeypatch.setattr(release_audit, "_release_wheel_package_digest", lambda _data: "d")
+    monkeypatch.setattr(release_audit, "_release_sdist_package_digest", lambda _data: "d")
+    monkeypatch.setattr(
+        release_audit, "_audit_unreviewed_preview", lambda *_args: [],
+    )
+    assert release_audit.main([
+        str(dist),
+        "--unreviewed-preview",
+        "--release-notes", str(notes),
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "explicit unreviewed-knowledge checks" in output
+    assert "no formal knowledge-review" in output

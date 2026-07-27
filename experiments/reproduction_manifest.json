@@ -1,0 +1,54 @@
+{
+  "schema_version": "hlsgraph.public-reproduction-manifest.v1",
+  "claim_level": "historical_pre_v03",
+  "environment": {
+    "part": "xck26-sfvc784-2LV-c",
+    "toolchain": "Vitis HLS and Vivado 2024.2",
+    "board_execution": false,
+    "environment_matches_papers": false
+  },
+  "sources": {
+    "HLSPilot": {
+      "commit": "1cb3aa9736f84ee4e626271596983a5bea98f6c3",
+      "license_note": "No explicit repository license was observed; the workflow was implemented clean-room and selected benchmark files were fetched for evaluation only."
+    },
+    "GenHLSOptimizer": {
+      "commit": "7acb82f43f1bd94cf502e4fb384ca6c648e5a11c",
+      "license": "MIT",
+      "repository": "https://github.com/aferikoglou/GenHLSOptimizer"
+    },
+    "TimelyHLS": {
+      "implementation": "Clean-room implementation from the published method description."
+    },
+    "HARP": {
+      "implementation": "Partial reproduction of the Table II style prediction protocol and part of the explorer."
+    }
+  },
+  "frozen_evidence": {
+    "results_csv": {
+      "sha256": "1fadaf12d17297a56240598f47200a716271e6da0a295f12fa5fcd08b9f838b1",
+      "size": 21298,
+      "redistributed": false
+    },
+    "internal_reproduction_manifest": {
+      "sha256": "4725878540e2dab378dc755a1ce8cd7b07e88323a68e66e59fb26bab037d5f70",
+      "size": 39045,
+      "redistributed": false
+    },
+    "final_checkpoint_archive": {
+      "sha256": "bf3bbcf8d9bcc3e181687e3bc473d4f05cb0c43b5985bc8764a4f94d54e422c4",
+      "size": 9946013,
+      "redistributed": false
+    }
+  },
+  "public_summaries": [
+    "experiments/aggregates/hlspilot_reproduction.json",
+    "experiments/aggregates/timelyhls_reproduction.json",
+    "experiments/aggregates/harp_reproduction.json"
+  ],
+  "limitations": [
+    "The papers' boards and exact toolchains were not reproduced.",
+    "No board runtime, end-to-end speedup, global optimum, or superiority over the original papers is claimed.",
+    "Raw prompts, vendor reports, third-party source trees, and internal paths are not redistributed."
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "gnn-v24",
+  "claim_level": "historical_pre_v03",
+  "environment": {
+    "part": "xck26-sfvc784-2LV-c",
+    "hls_tool": "Vitis HLS 2024.2",
+    "feature_contract": "legacy-g10-1.v1"
+  },
+  "metrics": [
+    {
+      "split": "seen-kernel/new-config",
+      "samples": 31,
+      "performance_kendall_tau": 0.728,
+      "utilization_mae": 0.033
+    },
+    {
+      "split": "held-out-kernel",
+      "samples": 34,
+      "performance_kendall_tau": 0.724,
+      "utilization_mae": 0.067,
+      "held_out_kernels": [
+        "2mm",
+        "correlation",
+        "gemm-p",
+        "jacobi-2d",
+        "syr2k"
+      ]
+    }
+  ],
+  "checkpoint": {
+    "published": false,
+    "size_bytes": 279247901,
+    "sha256": "053de4b39f2ce31b7c902a34c975144f5c3c8cedd98ffdd4d786a7b97e38a8e9"
+  },
+  "limitations": [
+    "The checkpoint is not included in the public bundle.",
+    "The metrics were not retrained or recomputed with the public 0.3 package."
+  ]
+}

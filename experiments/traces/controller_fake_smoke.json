@@ -1,0 +1,37 @@
+{
+  "schema_version": "hlsgraph.selected-contract-trace.v1",
+  "trace_kind": "controller_fake_smoke",
+  "claim_level": "v03_contract_smoke",
+  "authority": "synthetic",
+  "tool_truth": false,
+  "events": [
+    {
+      "stage": "retrieve",
+      "outcome": "public evidence slice returned"
+    },
+    {
+      "stage": "proposal",
+      "outcome": "mock VariantAction accepted as a proposal only"
+    },
+    {
+      "stage": "child_snapshot",
+      "outcome": "action lineage retained"
+    },
+    {
+      "stage": "prediction",
+      "outcome": "PredictionEnvelope retained as non-truth"
+    },
+    {
+      "stage": "gates",
+      "outcome": "fake and replay observations rejected as fresh tool evidence"
+    },
+    {
+      "stage": "stop",
+      "outcome": "contract smoke completed without vendor-tool invocation"
+    }
+  ],
+  "limitations": [
+    "This trace demonstrates state and authority transitions only.",
+    "It contains no real LLM proposal, synthesis result, or QoR claim."
+  ]
+}

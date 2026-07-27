@@ -45,6 +45,13 @@ def test_audited_vendor_symbol_does_not_trigger_short_marker() -> None:
     )
 
 
+def test_named_methods_are_allowed_only_in_public_experiment_evidence() -> None:
+    payload = b"G" + b"NN R" + b"CD HLS" + b"Pilot Timely" + b"HLS"
+    assert AUDIT._scan("docs/experiments.md", payload) == []
+    assert AUDIT._scan("experiments/aggregates/example.json", payload) == []
+    assert AUDIT._scan("docs/public.md", payload)
+
+
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-32", "utf-32-be"])
 def test_wide_unicode_cannot_bypass_public_boundary_scan(encoding: str) -> None:
     private_marker = "hlsgraph" + "-research"

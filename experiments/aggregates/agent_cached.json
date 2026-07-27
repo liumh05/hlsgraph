@@ -1,0 +1,36 @@
+{
+  "schema_version": "hlsgraph.experiment-aggregate.v1",
+  "experiment_id": "agent-cached",
+  "claim_level": "historical_pre_v03",
+  "protocol": {
+    "kernels": 7,
+    "systems": 3,
+    "repetitions": 3,
+    "runs": 63,
+    "tool_mode": "cached synthesis lookup"
+  },
+  "metrics": [
+    {
+      "metric": "bad_region_rate",
+      "system_a": 0.176,
+      "system_b": 0.483,
+      "system_c": 0.424,
+      "system_a_gated": 0.067
+    },
+    {
+      "metric": "mean_attempts",
+      "system_a": 2.43,
+      "system_b": 2.6
+    },
+    {
+      "metric": "success_rate",
+      "system_a": 1.0,
+      "system_b": 0.95,
+      "system_c": 1.0
+    }
+  ],
+  "limitations": [
+    "No fresh Vitis invocation was made by this protocol.",
+    "The cached pool constrains the candidate and failure distribution."
+  ]
+}
