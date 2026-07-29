@@ -7,11 +7,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
-async def smoke(project_root: Path) -> None:
+async def _smoke_session(project_root: Path, mode: str) -> dict[str, Any]:
     try:
-        from mcp import ClientSession, StdioServerParameters
+        from mcp import Client, StdioServerParameters
         from mcp.client.stdio import stdio_client
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise SystemExit("install hlsgraph[mcp] to run this smoke test") from exc
@@ -21,26 +22,39 @@ async def smoke(project_root: Path) -> None:
         args=["-m", "hlsgraph.mcp.server", str(project_root)],
         env=dict(os.environ),
     )
-    async with stdio_client(parameters) as (reader, writer):
-        async with ClientSession(reader, writer) as session:
-            initialized = await session.initialize()
-            listed = await session.list_tools()
-            names = sorted(tool.name for tool in listed.tools)
-            required = {"explore"}
-            missing = sorted(required - set(names))
-            if missing:
-                raise RuntimeError(f"MCP server is missing tools: {', '.join(missing)}")
-            explored = await session.call_tool(
-                "explore", {"query": "top kernel architecture", "max_chars": 13_000},
-            )
-            if explored.isError:
-                raise RuntimeError("explore returned an MCP tool error")
-            print(json.dumps({
-                "server": initialized.serverInfo.name,
-                "tools": names,
-                "explore_content_blocks": len(explored.content),
-                "status": "MCP_SMOKE_OK",
-            }, ensure_ascii=False, sort_keys=True))
+    async with Client(stdio_client(parameters), mode=mode) as client:
+        listed = await client.list_tools()
+        names = sorted(tool.name for tool in listed.tools)
+        required = {"explore"}
+        missing = sorted(required - set(names))
+        if missing:
+            raise RuntimeError(f"MCP server is missing tools: {', '.join(missing)}")
+        explored = await client.call_tool(
+            "explore", {"query": "top kernel architecture", "max_chars": 13_000},
+        )
+        if explored.is_error:
+            raise RuntimeError("explore returned an MCP tool error")
+        if explored.structured_content is None:
+            raise RuntimeError("explore did not return structuredContent")
+        return {
+            "mode": mode,
+            "protocol_version": str(client.protocol_version),
+            "tools": names,
+            "explore_content_blocks": len(explored.content),
+            "explore_chars": len(explored.content[0].text),
+        }
+
+
+async def smoke(project_root: Path) -> None:
+    sessions = [
+        await _smoke_session(project_root, "auto"),
+        await _smoke_session(project_root, "legacy"),
+    ]
+    print(json.dumps({
+        "server": "hlsgraph",
+        "sessions": sessions,
+        "status": "MCP_SMOKE_OK",
+    }, ensure_ascii=False, sort_keys=True))
 
 
 def main() -> int:

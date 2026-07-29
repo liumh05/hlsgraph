@@ -9,7 +9,7 @@ from ..bundle import GraphBundle
 from ..diagnostic_projection import public_diagnostic, redacted_diagnostic_record
 from ..model import json_ready
 from ..query import DEFAULT_IMPACT_RELATIONS, CoreService, ExploreSpec, QuerySpec
-from ..retrieval import RetrievalAdapter, RetrievalSpec
+from ..retrieval import RetrievalAdapter, RetrievalResult, RetrievalSpec
 from ..render import render as render_graph
 from ..run_projection import (
     PUBLIC_FAILURE_CLASSES, PUBLIC_GATE_KINDS, PUBLIC_GATE_STATUSES,
@@ -154,6 +154,17 @@ class ReadOnlyMcpService:
                 include_private_snippets: bool = False,
                 include_predictions: bool = False) -> dict[str, Any]:
         """Unified GraphRAG retrieval with explicit, separate truth planes."""
+        return self.explore_result(
+            query, snapshot_id, scope_id, view, max_chars,
+            include_private_snippets, include_predictions,
+        ).to_dict()
+
+    def explore_result(self, query: str, snapshot_id: str | None = None,
+                       scope_id: str | None = None, view: str = "architecture",
+                       max_chars: int | None = None,
+                       include_private_snippets: bool = False,
+                       include_predictions: bool = False) -> RetrievalResult:
+        """Return the typed retrieval result used by structured MCP output."""
         core = (self._require_core() if snapshot_id in {None, self.snapshot_id}
                 else CoreService(self.bundle, snapshot_id=snapshot_id))
         return core.retrieve(RetrievalSpec(
@@ -164,7 +175,7 @@ class ReadOnlyMcpService:
             max_chars=max_chars,
             include_private_snippets=include_private_snippets,
             include_predictions=include_predictions,
-        ), adapters=self.retrieval_adapters).to_dict()
+        ), adapters=self.retrieval_adapters)
 
     def context(self, query: str | None = None, scope_id: str | None = None,
                 depth: int = 1, top_k: int = 8, cursor: str | None = None) -> dict[str, Any]:

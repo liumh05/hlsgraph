@@ -357,18 +357,65 @@ def test_mcp_context_and_render_validate_bounds(indexed_bundle):
         mcp.traverse("missing")
 
 
-def test_optional_fastmcp_defaults_to_explore_and_can_opt_in_legacy_tools(
+def test_optional_mcp2_defaults_to_explore_and_can_opt_in_legacy_tools(
     indexed_bundle, monkeypatch,
 ):
     if importlib.util.find_spec("mcp") is None:
         pytest.skip("optional mcp dependency is not installed")
     server = create_mcp(indexed_bundle["bundle"].project_root,
                         snapshot_id=indexed_bundle["first"])
-    registered = {item.name for item in asyncio.run(server.list_tools())}
+    listed = asyncio.run(server.list_tools())
+    registered = {item.name for item in listed}
     assert registered == {"explore"}
+    explore = next(item for item in listed if item.name == "explore")
+    assert explore.output_schema is not None
+    assert explore.annotations.read_only_hint is True
+    assert explore.annotations.open_world_hint is False
 
     monkeypatch.setenv("HLSGRAPH_MCP_TOOLS", "all")
     server = create_mcp(indexed_bundle["bundle"].project_root,
                         snapshot_id=indexed_bundle["first"])
-    registered = {item.name for item in asyncio.run(server.list_tools())}
+    listed = asyncio.run(server.list_tools())
+    registered = {item.name for item in listed}
     assert registered == {"explore", *LEGACY_TOOL_NAMES}
+    assert all(item.annotations.read_only_hint is True for item in listed)
+    assert all(item.annotations.open_world_hint is False for item in listed)
+
+
+def test_optional_mcp2_modern_and_legacy_clients_keep_compact_structured_output(
+    indexed_bundle, monkeypatch,
+):
+    if importlib.util.find_spec("mcp") is None:
+        pytest.skip("optional mcp dependency is not installed")
+    try:
+        from mcp import Client
+    except ImportError:
+        pytest.skip("test requires MCP Python SDK 2")
+
+    monkeypatch.delenv("HLSGRAPH_MCP_TOOLS", raising=False)
+    server = create_mcp(
+        indexed_bundle["bundle"].project_root,
+        snapshot_id=indexed_bundle["first"],
+    )
+
+    async def call(mode):
+        async with Client(server, mode=mode) as client:
+            response = await client.call_tool("explore", {
+                "query": "top kernel architecture",
+                "max_chars": 1_000,
+            })
+            return str(client.protocol_version), response
+
+    for mode, expected_protocol in (
+        ("auto", "2026-07-28"),
+        ("legacy", "2025-11-25"),
+    ):
+        protocol, response = asyncio.run(call(mode))
+        assert protocol == expected_protocol
+        assert response.is_error is False
+        assert response.structured_content is not None
+        content = response.content[0].text
+        assert len(content) <= 1_000
+        assert json.loads(content) == response.structured_content
+        assert response.structured_content["predictions"] == []
+        assert response.structured_content["trace"]["private_snippets_returned"] is False

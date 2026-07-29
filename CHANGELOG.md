@@ -3,6 +3,19 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.4.0 - 2026-07-29
+
+Developer-preview MCP compatibility update:
+
+- move the optional stdio integration to MCP Python SDK 2.x;
+- publish typed `explore` structured output while preserving the existing
+  compact character budget;
+- mark all MCP tools read-only and closed-world;
+- retain current and legacy protocol clients and the opt-in 16-tool surface;
+  and
+- keep the canonical schema, bundle, feature schema, and retrieval profile at
+  `0.3.0`, with no stored-data migration.
+
 ## 0.3.0 — 2026-07-23
 
 Developer-preview retrieval and knowledge update:

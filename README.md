@@ -121,7 +121,8 @@ hlsgraph-mcp /absolute/path/to/project
 The default MCP surface exposes one bounded `explore` tool. It accepts a
 natural-language query and returns the same fact/evidence/knowledge separation
 used by the SDK and CLI. The legacy narrow tool set remains available only
-through explicit compatibility opt-in.
+through explicit compatibility opt-in. The optional MCP transport uses Python
+SDK 2.x over stdio and serves both current and legacy protocol clients.
 
 ## Data path and interfaces
 

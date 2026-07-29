@@ -291,6 +291,10 @@ hlsgraph-mcp /path/to/project
 # optionally: hlsgraph-mcp /path/to/project --snapshot-id snapshot_...
 ```
 
+The optional dependency uses MCP Python SDK 2.x. The stdio server negotiates
+the current protocol while retaining the SDK's legacy-client compatibility.
+HLSGraph does not expose an HTTP transport or MCP Resources in v0.4.
+
 The default MCP surface registers one read-only `explore` tool. It returns a
 bounded answer containing ranked facts, cited evidence, applicable guidance,
 explicit HLS flow, freshness, completeness, and confidence. Predictions and

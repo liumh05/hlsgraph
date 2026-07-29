@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "hlsgraph"
-version = "0.3.0"
+version = "0.4.0"
 description = "Deterministic, evidence-backed HLS architecture graph infrastructure for agents and ML4HLS."
 readme = "README.md"
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ dependencies = ["tomli>=2; python_version < '3.11'"]
 
 [project.optional-dependencies]
 clang = ["libclang>=16"]
-mcp = ["mcp>=1.27,<2"]
+mcp = ["mcp>=2.0,<3"]
 pdf = ["pypdf>=6,<7"]
 parquet = ["pyarrow>=15"]
 pyg = ["torch>=2", "torch-geometric>=2.5"]

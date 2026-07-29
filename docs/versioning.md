@@ -7,9 +7,9 @@ silently reinterpret an older observation.
 
 HLSGraph tracks several versions independently:
 
-| Layer | Current v0.3 contract |
+| Layer | Current contract |
 | --- | --- |
-| Python package | Semantic version `0.3.0`. |
+| Python package | Semantic version `0.4.0`. |
 | Canonical schema | `schema_version` on manifests, ledgers, graphs, and wire responses. |
 | Bundle format | `bundle_version` in `.hlsgraph/bundle.json`. |
 | Extraction profile | Hash of extractor names/versions, degraded selection, plugins, and options. |

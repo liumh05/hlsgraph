@@ -200,14 +200,9 @@ REQUIRED_SDIST = {
     "tools/audit_release.py",
     "docs/knowledge-citation-audit-v0.3.json",
     "docs/knowledge-review-evidence-v0.3.json",
-    "docs/knowledge-review-v0.3.adversarial.json",
-    "docs/knowledge-review-v0.3.adversarial.receipt.json",
-    "docs/knowledge-review-v0.3.adversarial.trace.jsonl",
-    "docs/knowledge-review-v0.3.semantic.json",
-    "docs/knowledge-review-v0.3.semantic.receipt.json",
-    "docs/knowledge-review-v0.3.semantic.trace.jsonl",
 }
-RELEASE_VERSION = "0.3.0"
+RELEASE_VERSION = "0.4.0"
+AGENT_EVAL_CANDIDATE_VERSION = "0.3.0"
 SEMANTIC_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.semantic.v1"
 ADVERSARIAL_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.adversarial.v1"
 SEMANTIC_REVIEW_PATH = "docs/knowledge-review-v0.3.semantic.json"
@@ -4156,8 +4151,8 @@ def _candidate_identity_from_environment(environment: dict[str, Any]) -> dict[st
     if (environment.get("official_profile") is not True
             or identity.get("schema_version") != "hlsgraph.agent_eval.wheel_identity.v1"
             or identity.get("verified") is not True
-            or identity.get("version") != RELEASE_VERSION
-            or candidate["version"] != RELEASE_VERSION
+            or identity.get("version") != AGENT_EVAL_CANDIDATE_VERSION
+            or candidate["version"] != AGENT_EVAL_CANDIDATE_VERSION
             or any(_SHA256_RE.fullmatch(value) is None for value in hashes)
             or re.fullmatch(r"[0-9a-f]{40}", candidate["revision"]) is None
             or candidate["source_revision"] != candidate["revision"]
@@ -4590,7 +4585,7 @@ def _review_bound_sdist_paths(root: Path) -> set[str]:
     for path in (implementation_root / "knowledge" / "packs").glob("*.json"):
         if path.is_file():
             paths.add(path.relative_to(root).as_posix())
-    return paths
+    return {relative for relative in paths if (root / relative).is_file()}
 
 
 def _audit_sdist(

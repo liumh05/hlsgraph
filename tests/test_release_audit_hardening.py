@@ -391,7 +391,7 @@ def test_sdist_rejects_extra_or_changed_installable_source(
 ) -> None:
     expected = _expected_sdist_installable(ROOT)
     path = tmp_path / "tampered.tar.gz"
-    prefix = "hlsgraph-0.3.0/"
+    prefix = "hlsgraph-0.4.0/"
     with tarfile.open(path, "w:gz") as archive:
         for relative, data in sorted(expected.items()):
             if relative == "src/hlsgraph/version.py":

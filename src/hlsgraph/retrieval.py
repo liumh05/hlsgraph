@@ -723,7 +723,7 @@ class RetrievalSpec:
             raise ValueError("applicability must map non-empty strings to non-empty strings")
 
 
-@dataclass(slots=True)
+@dataclass
 class RetrievalItem:
     record_id: str
     plane: str
@@ -749,7 +749,7 @@ class RetrievalItem:
         self.score_channels = dict(sorted(self.score_channels.items()))
 
 
-@dataclass(slots=True)
+@dataclass
 class RetrievalTrace:
     query_sha256: str
     snapshot_id: str
@@ -769,7 +769,7 @@ class RetrievalTrace:
     semantic_channel: str = "optional_not_enabled"
 
 
-@dataclass(slots=True)
+@dataclass
 class RetrievalResult:
     snapshot_id: str
     facts: list[RetrievalItem]

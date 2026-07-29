@@ -545,8 +545,8 @@ def _stub_release_archive_audits(
 ) -> tuple[Path, Path]:
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "hlsgraph-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
-    (dist / "hlsgraph-0.3.0.tar.gz").write_bytes(b"sdist")
+    (dist / "hlsgraph-0.4.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "hlsgraph-0.4.0.tar.gz").write_bytes(b"sdist")
     suite_evidence = tmp_path / "suite-evidence"
     monkeypatch.setattr(release_audit, "_audit_source_tree", lambda _root: [])
     monkeypatch.setattr(release_audit, "_audit_sbom", lambda _data, _root: [])
@@ -574,8 +574,8 @@ def test_formal_release_audit_cannot_omit_evaluation_inputs(
 ) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "hlsgraph-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
-    (dist / "hlsgraph-0.3.0.tar.gz").write_bytes(b"sdist")
+    (dist / "hlsgraph-0.4.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "hlsgraph-0.4.0.tar.gz").write_bytes(b"sdist")
     monkeypatch.setattr(release_audit, "_audit_source_tree", lambda _root: [])
     monkeypatch.setattr(release_audit, "_audit_sbom", lambda _data, _root: [])
     monkeypatch.setattr(release_audit, "_audit_wheel", lambda *_args: [])
@@ -598,7 +598,7 @@ def test_explicit_technical_preview_can_omit_all_agent_evaluation_evidence(
     dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
     notes = tmp_path / "release-notes.md"
     notes.write_text(
-        f"# HLSGraph 0.3.0\n\n{preview_label}. Comparative performance is not claimed.\n",
+        f"# HLSGraph 0.4.0\n\n{preview_label}. Comparative performance is not claimed.\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -631,7 +631,7 @@ def test_technical_preview_rejects_every_agent_evaluation_evidence_input(
 ) -> None:
     dist, suite_evidence = _stub_release_archive_audits(tmp_path, monkeypatch)
     notes = tmp_path / "release-notes.md"
-    notes.write_text("# HLSGraph 0.3.0\n\nTechnical Preview.\n", encoding="utf-8")
+    notes.write_text("# HLSGraph 0.4.0\n\nTechnical Preview.\n", encoding="utf-8")
     supplied_evidence = tmp_path / "partial-evidence.json"
     supplied_evidence.write_text("{}\n", encoding="utf-8")
     assert release_audit.main([
@@ -651,11 +651,11 @@ def test_technical_preview_rejects_every_agent_evaluation_evidence_input(
     ("notes_text", "expected"),
     [
         (
-            "# HLSGraph 0.3.0\n\nPreview release.\n",
+            "# HLSGraph 0.4.0\n\nPreview release.\n",
             "must explicitly say Technical Preview or Developer Preview",
         ),
         (
-            "# HLSGraph 0.3.0\n\nTechnical Preview that outperforms other tools.\n",
+            "# HLSGraph 0.4.0\n\nTechnical Preview that outperforms other tools.\n",
             "claim an advantage without a completed Agent A/B evaluation",
         ),
     ],
@@ -697,8 +697,8 @@ def test_preflight_is_explicit_and_never_claims_release_approval(
 ) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "hlsgraph-0.3.0-py3-none-any.whl").write_bytes(b"wheel")
-    (dist / "hlsgraph-0.3.0.tar.gz").write_bytes(b"sdist")
+    (dist / "hlsgraph-0.4.0-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "hlsgraph-0.4.0.tar.gz").write_bytes(b"sdist")
     monkeypatch.setattr(release_audit, "_audit_source_tree", lambda _root: [])
     monkeypatch.setattr(release_audit, "_audit_sbom", lambda _data, _root: [])
     monkeypatch.setattr(release_audit, "_audit_wheel", lambda *_args: [])
