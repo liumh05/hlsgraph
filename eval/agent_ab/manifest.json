@@ -81,7 +81,7 @@
       "kind": "mcp",
       "repository": "https://github.com/liumh05/hlsgraph",
       "revision": "record-at-run-time",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "mcp_tools": "explore"
     }
   ],

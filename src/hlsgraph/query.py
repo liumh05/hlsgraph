@@ -34,6 +34,8 @@ DEFAULT_IMPACT_RELATIONS = (
 
 _NON_ARCHITECTURE_RELATIONS = frozenset({
     "software.calls", "llvm.calls", "llvm.cfg", "ir.contains",
+    "source.binds_argument", "source.stream_access", "source.contains",
+    "source.dataflow_channel",
 })
 
 
@@ -888,6 +890,8 @@ class CoreService:
             "relation_kinds": list(selected),
             "excluded_from_default": [
                 "software.calls", "llvm.calls", "llvm.cfg", "ir.contains",
+                "source.binds_argument", "source.stream_access", "source.contains",
+                "source.dataflow_channel",
                 "source/ast hls.contains",
             ],
             "qor_prediction": None,

@@ -207,7 +207,7 @@ REQUIRED_SDIST = {
     "docs/knowledge-review-v0.3.semantic.receipt.json",
     "docs/knowledge-review-v0.3.semantic.trace.jsonl",
 }
-RELEASE_VERSION = "0.3.0"
+RELEASE_VERSION = "0.3.1"
 SEMANTIC_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.semantic.v1"
 ADVERSARIAL_REVIEW_PROTOCOL = "hlsgraph.knowledge-review.adversarial.v1"
 SEMANTIC_REVIEW_PATH = "docs/knowledge-review-v0.3.semantic.json"

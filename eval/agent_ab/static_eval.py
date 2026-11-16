@@ -86,7 +86,7 @@ def _environment_identity(work_root: Path) -> tuple[dict[str, Any], str, dict[st
     lock_sha256 = sha256_file(lock_path)
     candidate = prepared_hlsgraph_identity(environment, "hlsgraph-v03")
     runtime = inspect_installed(
-        "0.3.0", candidate["installed_payload_sha256"],
+        "0.3.1", candidate["installed_payload_sha256"],
     )
     if (runtime.get("verified") is not True
             or runtime.get("installed_payload_sha256")

@@ -1578,6 +1578,12 @@ class Derivation:
 
 @dataclass(slots=True)
 class Diagnostic:
+    """A diagnostic fact, with ``run_id`` naming its first recording attempt.
+
+    Later identical index attempts can reference the same fact in their
+    ``ToolRun.diagnostics`` lists without replacing its immutable provenance.
+    """
+
     snapshot_id: str
     code: str
     severity: DiagnosticSeverity
@@ -1603,9 +1609,14 @@ class Diagnostic:
         self.severity = enum_value(DiagnosticSeverity, self.severity)  # type: ignore[assignment]
         reject_embedded_body_fields(self.metadata, "diagnostic metadata")
         if not self.id:
-            self.id = stable_id("diagnostic", {"snapshot": self.snapshot_id, "code": self.code,
-                                                "message": self.message, "stage": self.stage,
-                                                "run": self.run_id, "subject": self.subject_id})
+            identity = {"snapshot": self.snapshot_id, "code": self.code,
+                        "message": self.message, "stage": self.stage,
+                        "run": self.run_id, "subject": self.subject_id}
+            # The artifact identifies the file; the anchor distinguishes repeated
+            # messages at different source locations. Keep unlocated IDs unchanged.
+            if self.anchor is not None:
+                identity["anchor"] = self.anchor
+            self.id = stable_id("diagnostic", identity)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Diagnostic":
@@ -1613,6 +1624,19 @@ class Diagnostic:
         if data.get("anchor"):
             data["anchor"] = SourceAnchor.from_dict(data["anchor"])
         return cls(**data)
+
+
+def unique_diagnostics(values: Iterable[Diagnostic]) -> list[Diagnostic]:
+    """Keep the first occurrence of each diagnostic fact, in producer order.
+
+    Multiple translation units or extractors can report the same fact. Their
+    provenance metadata does not turn one code/message/subject/location into
+    multiple diagnostics or duplicate materialization references.
+    """
+    unique: dict[str, Diagnostic] = {}
+    for item in values:
+        unique.setdefault(item.id, item)
+    return list(unique.values())
 
 
 @dataclass(slots=True)

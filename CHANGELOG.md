@@ -3,6 +3,21 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.3.1
+
+Technical Preview, additive source evidence:
+
+- distinguish diagnostic locations and deduplicate repeated facts so compile errors fail indexing and variants cleanly;
+- add source argument bindings, DATAFLOW regions, direct call processes and
+  channels, and stream access counts from libclang;
+- diagnose non-canonical DATAFLOW statements and arguments, multiple channel
+  endpoints, conflicting directives, and source constructs requiring synthesis
+  review;
+- expose the additions through evidence queries, MCP health and ML export;
+- retain schema, bundle and feature schema version 0.3.0, with no stored-data
+  migration; source extractor version 5 changes extraction profile and snapshot
+  identity. Source calls and channels do not establish hardware instances.
+
 ## 0.3.0 — 2026-07-23
 
 Developer-preview retrieval and knowledge update:

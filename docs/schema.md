@@ -359,3 +359,53 @@ their own table and cannot satisfy a label lookup.
 
 This separation prevents accidental label leakage and prevents any estimate
 from being interpreted as a synthesis result.
+
+## Source bindings and DATAFLOW evidence (0.3.1)
+
+These kinds are **source evidence, not hardware topology**. A software call is
+not an HLS hardware instance; synthesis may restructure non-canonical DATAFLOW
+regions. Like `software.calls`, all records below use `stage=ast`,
+`authority=static_fact`, `hardware_instance=false`, and `ml_input_evidence=true`.
+They are available in the evidence view and ML entity/relation tables, and are
+excluded from the default architecture and impact projections. ML exports keep
+the existing feature allowlist contract: dataset authors explicitly select the
+new attributes in `feature_attribute_allowlist` when needed.
+
+| Kind | Endpoints / attributes |
+| --- | --- |
+| `source.binds_argument` | Caller port, memory, stream or visible variable → callee parameter port. `call_site_id` is stable from the source span; `arg_index` and `call_order` are zero-based. `passing` is `array`, `reference`, `pointer` or `value`, from the parameter declaration. `expression` is `entity`, `element` or `expression`; a non-entity expression binds only its uniquely resolved base. `completeness` accompanies the record completeness. |
+| `source.dataflow_region` | One entity per scope annotated with source DATAFLOW: `scope_id`, `scope_kind` (`function` or `loop`), `directive_id`. |
+| `source.dataflow_process` | Direct call statement in a region: `region_id`, `callee_id`, `call_site_id`, `order` (call order within its function). |
+| `source.contains` | Annotated scope → region and region → direct process. |
+| `source.dataflow_channel` | Producer process → consumer process: `via` (`stream` or `array`), `variable_id`, `producer_param`, `consumer_param`, `depth`, `depth_assumed`, `completeness`. Only storage declared directly in the region and exact-entity arguments qualify. Depth comes from a unique positive literal source STREAM depth; otherwise it is null and `depth_assumed=true`. |
+| `source.stream_access` | Innermost enclosing loop (otherwise function) → stream port or local stream: `direction`, `count_per_iteration`, `completeness`. Counts are static access-expression counts in that scope, excluding nested-loop bodies; they are not runtime transfer rates or trip-count products. Conditional and nonblocking accesses are partial. Availability queries are counted as accesses but alone do not establish channel transfers. |
+
+Argument resolution uses AST declaration identity and lexical visibility;
+callee resolution must agree with the existing project-local `software.calls`
+edge. Missing or ambiguous arguments produce `mapping.ambiguous_argument`.
+Unknown stream receivers produce `mapping.ambiguous_stream_access`;
+unsupported stream methods produce `mapping.unknown_stream_access`.
+Distinct macro-expanded calls sharing a span produce
+`mapping.ambiguous_call_site` and no call-site facts. Loop-header accesses have
+partial counts and `mapping.unknown_stream_count`; conditional, short-circuit
+and nonblocking counts are also partial. Forwarded storage and aliases do not
+establish transitive channel directions.
+
+Non-fatal warnings include `dataflow.noncanonical_statement`,
+`dataflow.noncanonical_argument`, `dataflow.multiple_producers`,
+`dataflow.multiple_consumers`, and `dataflow.pipeline_conflict`.
+`dataflow.unresolved_process`, `dataflow.unknown_direction`, and
+`dataflow.unknown_depth` retain unresolved cases without guessing facts.
+
+Synthesis warnings are `synth.dynamic_allocation`, `synth.recursion`,
+`synth.virtual_function`, `synth.function_pointer`, `synth.pointer_to_pointer`,
+`synth.long_double`, and `synth.system_call`. Each records a subject and source
+span. Declarations without their own graph entity use the configured kernel as
+the review subject while retaining the declaration's own source span. They
+inspect design translation units, excluding declared testbench files
+and `main`, in a separate libclang preprocessing view with `__SYNTHESIS__`
+defined. This view does not replace the configured-source graph. Parse errors
+or untracked inputs withhold that unit's diagnostics and produce
+`synth.analysis_incomplete`. These are source review findings, not a synthesis
+success/failure verdict. No alias analysis or inferred hardware connectivity is
+performed.

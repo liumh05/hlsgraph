@@ -674,7 +674,7 @@ def replay_directive_declarations(
     if (
         type(source) is not LibClangExtractor
         or source.name != "source.libclang"
-        or source.version != "4"
+        or source.version != "5"
         or type(external) is not ExternalDirectiveExtractor
         or external.name != "directive.external"
         or external.version != "3"

@@ -675,7 +675,7 @@ def _constant_for_loop_facts(cursor: Any) -> dict[str, Any]:
 
 class LibClangExtractor:
     name = "source.libclang"
-    version = "4"
+    version = "5"
 
     def supports(self, context: ExtractionContext) -> bool:
         # Being unsupported would silently omit the source plane.  The standard
@@ -817,6 +817,8 @@ class LibClangExtractor:
             str, list[tuple[tuple[str, ...], int, int]]
         ] = defaultdict(list)
         entity_lexical_paths: dict[str, tuple[str, ...]] = {}
+        from .source_facts import SourceFacts
+        facts = SourceFacts(context, result, entity_lexical_paths)
         untracked_project_inputs: set[str] = set()
         untracked_external_inputs = 0
         pragma_activity: dict[tuple[str, int], set[bool | None]] = defaultdict(set)
@@ -1029,7 +1031,8 @@ class LibClangExtractor:
             def visit(cursor: Any, parent_entity: str | None = None,
                       current_function_id: str | None = None,
                       current_function_qname: str | None = None,
-                      lexical_scope_path: tuple[str, ...] = ()) -> None:
+                      lexical_scope_path: tuple[str, ...] = (),
+                      parent_cursor: Any = None) -> None:
                 nonlocal untracked_external_inputs
                 location_file = str(cursor.location.file) if cursor.location.file else None
                 relative = _relative_file(context, location_file)
@@ -1139,6 +1142,9 @@ class LibClangExtractor:
                     if owner_id and callee:
                         pending_calls.append((owner_id, callee, anchor))
 
+                facts.record(cursor, entity, current_function_id,
+                             lexical_scope_path, parent_cursor)
+
                 for child in cursor.get_children():
                     visit(
                         child,
@@ -1146,9 +1152,11 @@ class LibClangExtractor:
                         current_function_id,
                         current_function_qname,
                         child_lexical_scope_path,
+                        cursor,
                     )
 
             visit(tu.cursor)
+            facts.design_units.append((unit, tu, args))
 
         for relative in sorted(untracked_project_inputs):
             result.diagnostics.append(Diagnostic(
@@ -1212,6 +1220,8 @@ class LibClangExtractor:
             lexical_scopes=lexical_scopes,
             entity_lexical_paths=entity_lexical_paths,
         )
+        facts.emit(function_by_name)
+        facts.synthesizability(index, cindex)
         result.coverage = {
             "translation_units": len(context.manifest.build.translation_units),
             "entities": len(graph.entities), "relations": len(graph.relations),

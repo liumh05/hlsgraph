@@ -26,7 +26,7 @@ from .model import (
     ActionMaterialization, ActionMaterializationStatus, DatasetManifest, Diagnostic,
     DiagnosticSeverity, EntityCorrespondence, FailureClass, GateKind, GateStatus,
     EvidenceKind, PredictionEnvelope, RunStatus, ToolRun, VariantAction, VerificationKind,
-    hash_artifact_bytes, json_ready, stable_hash, utc_now,
+    hash_artifact_bytes, json_ready, stable_hash, unique_diagnostics, utc_now,
 )
 from .manifest import project_path
 from .query import CoreService, ExploreResult, ExploreSpec, QueryResult, QuerySpec, StatusResult
@@ -74,6 +74,12 @@ def _canonical_extraction_value(value: Any, path: str = "options") -> Any:
     raise ValueError(
         f"{path} must contain only canonical JSON values; got {type(value).__name__}"
     )
+
+
+def _diagnostic_fact_hash(item: Diagnostic) -> str:
+    """Identify an exact fact independently of the attempt that first recorded it."""
+    return stable_hash({key: value for key, value in json_ready(item).items()
+                        if key not in {"id", "run_id"}})
 
 
 @dataclass(slots=True)
@@ -439,6 +445,7 @@ class Project:
                 metadata={"stale": final_stale,
                           "mismatch_ids": final_mismatches},
             ))
+        result.diagnostics = unique_diagnostics(result.diagnostics)
         fatal = [item for item in result.diagnostics
                  if item.severity in {DiagnosticSeverity.ERROR, DiagnosticSeverity.CRITICAL}]
         request_hash = stable_hash({"snapshot": snapshot.id,
@@ -457,6 +464,20 @@ class Project:
                       "candidate_graph_hash": result.graph.graph_hash},
         )
         scoped_diagnostics = []
+        # Runs retain their own diagnostic references. Reuse an identical fact
+        # from an earlier attempt so retries do not multiply stored diagnostics.
+        # Historical IDs from an older identity scheme remain untouched.
+        recorded_index_run_ids = {
+            item.id for item in self.bundle.store.runs(snapshot.id)
+            if item.stage == run.stage and item.backend == run.backend
+            and item.request_hash == run.request_hash
+        }
+        recorded_diagnostics = {
+            _diagnostic_fact_hash(item): item
+            for item in self.bundle.store.diagnostics(snapshot.id)
+            if item.run_id in recorded_index_run_ids
+            and replace(item, id="").id == item.id
+        }
         resolvable_subjects = artifact_ids if fatal else entity_ids | artifact_ids
         for item in result.diagnostics:
             metadata = dict(item.metadata)
@@ -464,9 +485,13 @@ class Project:
             if subject_id and subject_id not in resolvable_subjects:
                 metadata["unresolved_candidate_subject_id"] = subject_id
                 subject_id = None
-            scoped_diagnostics.append(replace(
+            scoped = replace(
                 item, id="", run_id=run.id, subject_id=subject_id, metadata=metadata,
+            )
+            scoped_diagnostics.append(recorded_diagnostics.get(
+                _diagnostic_fact_hash(scoped), scoped,
             ))
+        scoped_diagnostics = unique_diagnostics(scoped_diagnostics)
         result.diagnostics = scoped_diagnostics
         run.diagnostics = [item.id for item in scoped_diagnostics]
         materialization = None
@@ -1064,8 +1089,9 @@ class Project:
             evidence_ids=[observation_ids.get(value, derivation_ids.get(value, value))
                           for value in item.evidence_ids],
         ) for item in extraction.verifications]
-        extraction.diagnostics = [replace(item, id="", run_id=run.id)
-                                  for item in extraction.diagnostics]
+        extraction.diagnostics = unique_diagnostics(
+            replace(item, id="", run_id=run.id) for item in extraction.diagnostics
+        )
 
         run.output_artifact_ids = [item.id for item in managed]
         run.diagnostics = [item.id for item in extraction.diagnostics]

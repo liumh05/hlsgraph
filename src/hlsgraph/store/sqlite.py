@@ -2175,10 +2175,11 @@ class LedgerStore:
             ).fetchall()]
 
     def active_diagnostics(self, snapshot_id: str) -> list[Diagnostic]:
-        """Diagnostics for the successful index attempt that produced the active view.
+        """Facts referenced by the successful index attempt for the active view.
 
         Unscoped diagnostics are retained for compatibility and non-index tool
-        events. Failed-attempt diagnostics remain available through diagnostics().
+        events. Retries may reference facts first recorded by an earlier run.
+        Other failed-attempt diagnostics remain available through diagnostics().
         """
         values = self.diagnostics(snapshot_id)
         successful = [run for run in self.runs(snapshot_id)
@@ -2186,8 +2187,10 @@ class LedgerStore:
         if not successful:
             return ([item for item in values if item.run_id is None]
                     if self.has_graph(snapshot_id) else [])
-        run_id = successful[-1].id
-        return [item for item in values if item.run_id in {None, run_id}]
+        run = successful[-1]
+        diagnostic_ids = set(run.diagnostics)
+        return [item for item in values
+                if item.run_id in {None, run.id} or item.id in diagnostic_ids]
 
     def _add_run(
         self,
