@@ -257,7 +257,7 @@ def test_review_boundary_contract_rejects_tampering(
 )
 def test_archive_names_fail_closed(name: str) -> None:
     assert _unsafe_archive_name(name) is not None
-    assert _unsafe_archive_name("hlsgraph-0.3.2/src/hlsgraph/model.py") is None
+    assert _unsafe_archive_name("hlsgraph-0.3.3/src/hlsgraph/model.py") is None
 
 
 def test_archive_duplicate_detection_includes_case_collisions() -> None:
@@ -325,8 +325,8 @@ def test_wheel_requires_exact_source_package_paths_and_bytes(tmp_path: Path) -> 
         archive.writestr("hlsgraph/__init__.py", b"changed")
         archive.writestr("hlsgraph/not-in-source.py", b"extra")
         archive.writestr(
-            "hlsgraph-0.3.2.dist-info/METADATA",
-            b"Name: hlsgraph\nVersion: 0.3.2\n",
+            "hlsgraph-0.3.3.dist-info/METADATA",
+            b"Name: hlsgraph\nVersion: 0.3.3\n",
         )
     issues = _audit_wheel(wheel, ROOT, b"{}")
     assert any("missing source package files" in item for item in issues)
@@ -349,14 +349,14 @@ def test_sdist_rejects_duplicates_traversal_links_specials_and_multiple_roots(
 ) -> None:
     path = tmp_path / "bad.tar.gz"
     with tarfile.open(path, "w:gz") as archive:
-        first = _tar_member("hlsgraph-0.3.2/LICENSE")
+        first = _tar_member("hlsgraph-0.3.3/LICENSE")
         archive.addfile(first, io.BytesIO(b"x"))
-        duplicate = _tar_member("hlsgraph-0.3.2/LICENSE")
+        duplicate = _tar_member("hlsgraph-0.3.3/LICENSE")
         archive.addfile(duplicate, io.BytesIO(b"x"))
-        traversal = _tar_member("hlsgraph-0.3.2/../escape")
+        traversal = _tar_member("hlsgraph-0.3.3/../escape")
         archive.addfile(traversal, io.BytesIO(b"x"))
-        archive.addfile(_tar_member("hlsgraph-0.3.2/link", kind=tarfile.SYMTYPE))
-        archive.addfile(_tar_member("hlsgraph-0.3.2/device", kind=tarfile.CHRTYPE))
+        archive.addfile(_tar_member("hlsgraph-0.3.3/link", kind=tarfile.SYMTYPE))
+        archive.addfile(_tar_member("hlsgraph-0.3.3/device", kind=tarfile.CHRTYPE))
         second_root = _tar_member("other-root/file")
         archive.addfile(second_root, io.BytesIO(b"x"))
     issues = _audit_sdist(path, b"{}")
@@ -369,7 +369,7 @@ def test_sdist_rejects_duplicates_traversal_links_specials_and_multiple_roots(
 def test_sdist_requires_support_migration_and_review_inputs(tmp_path: Path) -> None:
     path = tmp_path / "minimal.tar.gz"
     with tarfile.open(path, "w:gz") as archive:
-        member = _tar_member("hlsgraph-0.3.2/LICENSE")
+        member = _tar_member("hlsgraph-0.3.3/LICENSE")
         archive.addfile(member, io.BytesIO(b"x"))
     issues = _audit_sdist(path, b"{}")
     missing = next(item for item in issues if item.startswith("sdist is missing:"))
@@ -391,7 +391,7 @@ def test_sdist_rejects_extra_or_changed_installable_source(
 ) -> None:
     expected = _expected_sdist_installable(ROOT)
     path = tmp_path / "tampered.tar.gz"
-    prefix = "hlsgraph-0.3.2/"
+    prefix = "hlsgraph-0.3.3/"
     with tarfile.open(path, "w:gz") as archive:
         for relative, data in sorted(expected.items()):
             if relative == "src/hlsgraph/version.py":

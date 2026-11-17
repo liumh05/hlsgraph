@@ -292,3 +292,36 @@ def test_global_invisible_or_ambiguous_stays_unresolved(tmp_path, source):
     _, graph, diagnostics = project_at(tmp_path, source)
     assert not [r for r in graph.relations.values() if r.kind == "hls.annotates"]
     assert any(d.code == "directive.unresolved_scope" for d in diagnostics)
+
+
+def test_runner_keeps_csynth_full_facts_on_existing_entities_and_defers_structure(tmp_path):
+    """A run never adds structure to its fixed snapshot; it must not fail because of it either."""
+    import sys
+    from hlsgraph.model import RunStatus, ToolchainContext, ToolOutputSpec
+    from hlsgraph.runner import LocalRunner
+
+    (tmp_path / "kernel.cpp").write_text(PLAIN)
+    (tmp_path / "fixture_full.xml").write_text(full_report())
+    manifest = minimal_manifest("test.release.v032.runner", "runner csynth_full", "kern", "kernel.cpp")
+    manifest.stage_commands = {"csynth": [sys.executable, "-c", (
+        "from pathlib import Path; p=Path('reports/csynth/csynth_full.xml'); "
+        "p.parent.mkdir(parents=True, exist_ok=True); "
+        f"p.write_text({full_report()!r})")]}
+    manifest.toolchains = [ToolchainContext(id="test.fixture", vendor="test", name="fixture", version="1")]
+    manifest.stage_toolchains = {"csynth": "test.fixture"}
+    manifest.stage_outputs = {"csynth": [ToolOutputSpec(
+        path="reports/csynth/csynth_full.xml", kind="amd.vitis.csynth_full_xml", role="tool_report")]}
+    project = Project(GraphBundle.create(tmp_path, manifest))
+    indexed = project.index()
+    result = project.run(LocalRunner(tmp_path, allow_execution=True), ["csynth"])
+    run, = result.runs
+    assert run.status == RunStatus.SUCCEEDED, run.message
+    store = project.bundle.store
+    codes = {d.code: d for d in store.diagnostics(indexed.snapshot_id)}
+    assert "runner.structural_output_requires_reindex" not in codes
+    deferred = codes["runner.structural_output_deferred"]
+    assert str(deferred.severity) == "info" and deferred.metadata["entity_count"] > 0
+    graph = project.service(indexed.snapshot_id).graph()
+    assert not [e for e in graph.entities.values() if e.kind == "hls.module"]
+    known = set(graph.entities) | set(graph.relations)
+    assert all(item.subject_id in known for item in store.observations(indexed.snapshot_id))

@@ -420,7 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.expected_payload_sha256 is not None and args.source_repo is not None:
         raise SystemExit("--source-repo is only valid together with --wheel")
     if (args.wheel is not None
-            and args.expected_version in {"0.2.0", "0.3.2"}
+            and args.expected_version in {"0.2.0", "0.3.3"}
             and args.source_repo is None):
         raise SystemExit(
             f"v{args.expected_version} evaluation wheel verification requires --source-repo"

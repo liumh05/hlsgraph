@@ -2106,7 +2106,7 @@ def load_environment_lock(path: Path) -> dict[str, Any]:
     }
     for arm, key, version in (
         ("hlsgraph-v02", "hlsgraph_v02", "0.2.0"),
-        ("hlsgraph-v03", "hlsgraph_v03", "0.3.2"),
+        ("hlsgraph-v03", "hlsgraph_v03", "0.3.3"),
     ):
         declared = environment.get(key)
         if (not isinstance(declared, dict) or declared.get("version") != version

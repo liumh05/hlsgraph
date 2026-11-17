@@ -100,6 +100,30 @@ class IndexResult:
     materialization_status: str | None = None
 
 
+
+def _facts_on_existing_subjects(parsed: ExtractionResult, graph: CanonicalGraph) -> ExtractionResult:
+    """Drop the facts of ``parsed`` that depend on entities or relations absent from ``graph``.
+
+    The returned result keeps ``parsed.graph`` only so callers can report its size; its
+    entities and relations are never stored.
+    """
+    known = set(graph.entities) | set(graph.relations)
+    observations = [item for item in parsed.observations if item.subject_id in known]
+    kept = {item.id for item in observations}
+    dropped = {item.id for item in parsed.observations} - kept
+    derivations = []
+    for item in parsed.derivations:
+        refs = set(item.input_observation_ids) | {ref.target_id for ref in item.evidence_refs}
+        if item.subject_id in known and not refs & dropped:
+            derivations.append(item)
+        else:
+            dropped.add(item.id)
+    verifications = [item for item in parsed.verifications if not set(item.evidence_ids) & dropped]
+    diagnostics = [item for item in parsed.diagnostics
+                   if item.subject_id is None or item.subject_id in known]
+    return replace(parsed, observations=observations, derivations=derivations,
+                   verifications=verifications, diagnostics=diagnostics)
+
 class Project:
     def __init__(self, bundle: GraphBundle):
         self.bundle = bundle
@@ -1017,17 +1041,22 @@ class Project:
                     continue
                 parsed = extractor.extract(context)
                 if parsed.graph.entities or parsed.graph.relations:
+                    # A fixed snapshot never gains structure from a run. Keep only the facts
+                    # about entities it already has (for example top or loop QoR) and defer
+                    # the new structure (for example csynth_full module hierarchy) to a
+                    # re-index that lists the report as a manifest artifact.
+                    parsed = _facts_on_existing_subjects(parsed, graph)
                     extraction.diagnostics.append(Diagnostic(
                         snapshot_id=snapshot.id,
-                        code="runner.structural_output_requires_reindex",
-                        severity=DiagnosticSeverity.ERROR, stage=run.stage,
-                        message=("a declared output contains structural graph facts; add it to "
-                                 "the manifest artifact set and re-index a new snapshot"),
+                        code="runner.structural_output_deferred",
+                        severity=DiagnosticSeverity.INFO, stage=run.stage,
+                        message=("a declared output contains structural graph facts; they are "
+                                 "not added to this snapshot. Add the report to the manifest "
+                                 "artifact set and re-index to include them"),
                         metadata={"extractor": extractor.name,
                                   "entity_count": len(parsed.graph.entities),
                                   "relation_count": len(parsed.graph.relations)},
                     ))
-                    continue
                 extraction.observations.extend(parsed.observations)
                 extraction.derivations.extend(parsed.derivations)
                 extraction.verifications.extend(parsed.verifications)

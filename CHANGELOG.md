@@ -3,6 +3,16 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.3.3
+
+Technical Preview, Runner v2 fix:
+
+- a run whose declared output carries structural facts (for example
+  `amd.vitis.csynth_full_xml` module hierarchy) no longer fails: it keeps the
+  facts about entities its fixed snapshot already has, defers the structure to a
+  re-index, and records `runner.structural_output_deferred` (info). Schema,
+  bundle, feature schema and extractor versions are unchanged.
+
 ## 0.3.2
 
 Technical Preview, additive source and schedule evidence:
