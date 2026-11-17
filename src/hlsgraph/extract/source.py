@@ -1030,6 +1030,10 @@ class LibClangExtractor:
                     metadata={"category": diagnostic.category_name or None, "tu": unit.file},
                 ))
 
+            # Every cursor of a large file resolves the same path; resolve each file once
+            # per translation unit (the snapshot's files do not change while it is read).
+            resolved_files: dict[str | None, str | None] = {}
+
             def visit(cursor: Any, parent_entity: str | None = None,
                       current_function_id: str | None = None,
                       current_function_qname: str | None = None,
@@ -1037,7 +1041,9 @@ class LibClangExtractor:
                       parent_cursor: Any = None) -> None:
                 nonlocal untracked_external_inputs
                 location_file = str(cursor.location.file) if cursor.location.file else None
-                relative = _relative_file(context, location_file)
+                if location_file not in resolved_files:
+                    resolved_files[location_file] = _relative_file(context, location_file)
+                relative = resolved_files[location_file]
                 kind_name = cursor.kind.name
                 if relative is None and kind_name != "TRANSLATION_UNIT":
                     if location_file and Path(location_file).is_absolute():
@@ -1167,6 +1173,11 @@ class LibClangExtractor:
                 facts.record(cursor, entity, current_function_id,
                              lexical_scope_path, parent_cursor)
 
+                # A file-scope initializer (for example a large weight table) holds only
+                # constant expressions: no loops, directives, or calls, since calls are
+                # recorded inside functions only. Its literals are not walked.
+                if kind_name == "INIT_LIST_EXPR" and current_function_id is None:
+                    return
                 for child in cursor.get_children():
                     visit(
                         child,

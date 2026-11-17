@@ -507,8 +507,13 @@ class SourceFacts:
                 continue
             kernel = next(iter(self.graph.by_kind("hls.kernel")), None)
 
+            resolved_files: dict[str, str | None] = {}
+
             def scan(cursor: Any, owner: str | None = None) -> None:
-                relative = _relative_file(context, str(cursor.location.file)) if cursor.location.file else None
+                filename = str(cursor.location.file) if cursor.location.file else None
+                if filename is not None and filename not in resolved_files:
+                    resolved_files[filename] = _relative_file(context, filename)
+                relative = resolved_files[filename] if filename is not None else None
                 if cursor.kind.name != "TRANSLATION_UNIT" and (
                     relative is None or relative in testbenches
                     or context.artifact_for_uri(relative) is None

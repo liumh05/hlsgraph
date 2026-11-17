@@ -12,6 +12,9 @@ Technical Preview, Runner v2 fix:
   facts about entities its fixed snapshot already has, defers the structure to a
   re-index, and records `runner.structural_output_deferred` (info). Schema,
   bundle, feature schema and extractor versions are unchanged.
+- index large constant tables faster: file-scope initializer lists are not walked
+  literal by literal and file paths are resolved once per translation unit;
+  graphs and snapshot identities are unchanged.
 
 ## 0.3.2
 

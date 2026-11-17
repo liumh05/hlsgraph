@@ -325,3 +325,21 @@ def test_runner_keeps_csynth_full_facts_on_existing_entities_and_defers_structur
     assert not [e for e in graph.entities.values() if e.kind == "hls.module"]
     known = set(graph.entities) | set(graph.relations)
     assert all(item.subject_id in known for item in store.observations(indexed.snapshot_id))
+
+
+def test_file_scope_initializer_is_skipped_but_function_initializer_calls_are_kept(tmp_path):
+    source = """
+const int table[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+int scale(int x) { return 2 * x; }
+void kern(int out[8]) {
+  int local[2] = {scale(table[0]), scale(table[1])};
+  out[0] = local[0] + local[1];
+}
+"""
+    _, graph, _ = project_at(tmp_path, source)
+    table, = [e for e in graph.entities.values() if e.name == "table"]
+    assert table.attrs["storage"] == "global"
+    names = {e.id: e.name for e in graph.entities.values()}
+    calls = {(names.get(r.src), names.get(r.dst)) for r in graph.relations.values()
+             if r.kind == "software.calls"}
+    assert ("kern", "scale") in calls

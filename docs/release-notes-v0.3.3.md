@@ -16,6 +16,12 @@ records an informational `runner.structural_output_deferred` diagnostic. The
 snapshot is never changed. To see the module hierarchy, add the report to the
 manifest artifact set and re-index a new snapshot, as before.
 
+Source indexing is faster on designs with large constant tables: file-scope
+initializer lists are no longer walked literal by literal (they cannot hold loops,
+directives or recorded calls), and each source file path is resolved once per
+translation unit. On a real design with a 950 KB weight header, indexing went
+from about 30 s to about 6 s with an identical graph hash.
+
 The package version is 0.3.3. Canonical schema, bundle format and ML feature
 schema remain 0.3.0, and extractor versions are unchanged from 0.3.2, so
 extraction profiles and snapshot identities are the same.
