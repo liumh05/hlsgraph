@@ -6,7 +6,7 @@ from typing import Any
 
 from ..diagnostic_projection import redacted_diagnostic_record
 from ..graph import CanonicalGraph
-from ..model import Diagnostic, DiagnosticSeverity, Observation, json_ready, stable_hash
+from ..model import Diagnostic, DiagnosticSeverity, Observation, Relation, json_ready, stable_hash
 
 
 RENDER_SCHEMA_VERSION = "hlsgraph.render.v1"
@@ -82,34 +82,132 @@ def _display_observations(
     return selected, sorted(conflicts)
 
 
-def _scope(graph: CanonicalGraph, scope_id: str | None) -> set[str]:
+def _scope(graph: CanonicalGraph, scope_id: str | None, *, source: bool = False) -> set[str]:
     if not scope_id:
         return set(graph.entities)
     entities, _relations = graph.traverse(scope_id, depth=8, direction="both",
-                                          relation_kinds=["hls.contains", "hls.streams_to"])
+                                          relation_kinds=["hls.contains", "hls.streams_to"] + (
+                                              ["source.contains", "source.binds_argument",
+                                               "source.dataflow_channel", "software.calls"] if source else []))
     return {item.id for item in entities}
 
 
+def _source_structure(graph: CanonicalGraph, allowed: set[str]) -> tuple[set[str], list[Relation], dict[str, str]]:
+    # Vendor and standard-library helpers (hls::stream::read, std::...) are not design structure.
+    static = {item.id: item for item in graph.entities.values()
+              if item.id in allowed and item.stage == "ast"
+              and str(item.authority) == "static_fact"
+              and not (item.kind == "hls.function"
+                       and str(item.qualified_name or "").startswith(("hls::", "std::")))}
+    structural = {"hls.kernel", "hls.function", "hls.loop"}
+    nodes = {key for key, item in static.items() if item.kind in structural | {
+        "source.dataflow_region", "source.dataflow_process"}}
+    endpoints = structural | {"hls.memory", "hls.stream", "hls.port", "source.dataflow_process"}
+    edges = []
+    parents = {}
+    for relation in graph.relations.values():
+        if (relation.stage != "ast" or str(relation.authority) != "static_fact"
+                or relation.src not in static or relation.dst not in static):
+            continue
+        src, dst = static[relation.src], static[relation.dst]
+        if relation.kind == "source.contains" and src.kind == "source.dataflow_region":
+            parents[dst.id] = src.id
+        if ((relation.kind == "hls.contains" and src.kind in structural and dst.kind in structural)
+                or (relation.kind in {"source.binds_argument", "source.dataflow_channel"}
+                    and src.kind in endpoints and dst.kind in endpoints)):
+            edges.append(relation)
+            nodes.update((src.id, dst.id))
+    # Source calls between design functions, labelled as software calls (never instances). A call
+    # already drawn through a DATAFLOW process is not repeated from the caller.
+    via_process = {static[key].attrs.get("callee_id") for key in nodes
+                   if static[key].kind == "source.dataflow_process"}
+    for relation in graph.relations.values():
+        if (relation.kind == "software.calls" and relation.stage == "ast"
+                and str(relation.authority) == "static_fact"
+                and relation.src in nodes and relation.dst in nodes
+                and static[relation.src].kind in {"hls.kernel", "hls.function"}
+                and static[relation.dst].kind == "hls.function"
+                and relation.dst not in via_process):
+            edges.append(relation)
+    # A bound port or memory hangs off the function that declares it, so a BINDS edge reads
+    # "this function's argument is passed to that one".
+    for relation in graph.relations.values():
+        if (relation.kind == "hls.contains" and relation.stage == "ast"
+                and str(relation.authority) == "static_fact"
+                and relation.src in nodes and relation.dst in nodes
+                and relation.src in static and relation.dst in static
+                and static[relation.src].kind in {"hls.kernel", "hls.function"}
+                and static[relation.dst].kind in {"hls.memory", "hls.stream", "hls.port"}):
+            edges.append(relation)
+    # Each process explicitly records its callee; this is a source call, not an instance.
+    for key in sorted(nodes):
+        process = static[key]
+        callee = process.attrs.get("callee_id")
+        if process.kind == "source.dataflow_process" and callee in nodes:
+            edges.append(Relation(
+                src=key, dst=callee, kind="software.calls", snapshot_id=graph.snapshot_id,
+                stage="ast", authority=process.authority, anchors=process.anchors,
+                attrs={"hardware_instance": False, "call_site_id": process.attrs.get("call_site_id")},
+            ))
+    return nodes, edges, parents
+
+
+def _badges(directives: list[dict[str, Any]]) -> list[str]:
+    badges = []
+    for directive in directives:
+        kind, options = str(directive["kind"]).upper(), directive["options"]
+        badge = kind
+        if kind == "PIPELINE" and options.get("ii") is not None:
+            badge += f" II={options['ii']}"
+        if kind == "ARRAY_PARTITION":
+            partition = options.get("type") or next((k for k in ("complete", "cyclic", "block")
+                                                     if k in options or k in options.get("flags", [])), None)
+            if partition:
+                badge += f" {partition}"
+        # `INLINE off` / `PIPELINE off` mean the opposite of the bare directive.
+        if "off" in options.get("flags", []) or str(options.get("off", "")).lower() == "true":
+            badge += " off"
+        badges.append(badge)
+    return sorted(set(badges))
+
+
+def _schedule_metric(item: Observation) -> bool:
+    return item.stage == "schedule" and (
+        str(item.authority) in {"tool_observation", "compiler_decision", "synthetic"}
+        or (item.predicate == "qor.target_ii" and str(item.authority) == "declared_constraint")
+    )
+
+
 def to_render_data(graph: CanonicalGraph, observations: list[Observation],
-                   diagnostics: list[Diagnostic], *, scope_id: str | None = None) -> dict[str, Any]:
+                   diagnostics: list[Diagnostic], *, scope_id: str | None = None,
+                   view: str = "auto") -> dict[str, Any]:
+    if view not in {"auto", "hardware", "source"}:
+        raise ValueError("view must be auto, hardware, or source")
+    source_view = view == "source"
     # Rendering is a public output surface even when invoked directly through
     # the SDK.  Normalize at the lowest shared boundary so HTML/JSON/static
     # formats cannot accidentally serialize vendor/plugin diagnostic details.
     diagnostics = [projected for item in diagnostics
                    if (projected := redacted_diagnostic_record(item)) is not None]
-    allowed = _scope(graph, scope_id)
+    allowed = _scope(graph, scope_id, source=source_view)
+    parents: dict[str, str] = {}
     dataflow = [item for item in graph.relations.values()
                 if _is_hardware_dataflow(item)
                 and item.src in allowed and item.dst in allowed]
-    if dataflow:
+    if source_view:
+        node_ids, edge_values, parents = _source_structure(graph, allowed)
+        view = "source_structure"
+    elif dataflow:
         node_ids = {item.src for item in dataflow} | {item.dst for item in dataflow}
         edge_values = dataflow
         view = "dataflow"
     else:
         architectural = {item.id for item in graph.entities.values()
-                         if item.id in allowed and item.kind in {
+                         if item.id in allowed and (view != "hardware" or (
+                             item.stage in _HARDWARE_STRUCTURE_STAGES
+                             and str(item.authority) != "static_fact")) and item.kind in {
                              "hls.kernel", "hls.function", "hls.process", "hls.region",
-                             "hls.loop", "hls.memory", "hls.buffer", "hls.stream", "hls.port",
+                             "hls.loop", "hls.memory", "hls.buffer", "hls.stream", "hls.port", "hls.module",
                          }}
         node_ids = architectural
         edge_values = [item for item in graph.relations.values()
@@ -120,6 +218,13 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
     by_subject: dict[str, list[Observation]] = defaultdict(list)
     for item in observations:
         by_subject[item.subject_id].append(item)
+    if source_view:
+        direct_observations = {key: list(values) for key, values in by_subject.items()}
+        for relation in sorted(graph.relations.values(), key=lambda item: item.id):
+            if (relation.kind == "cross.maps_to" and relation.stage == "schedule"
+                    and str(relation.authority) in {"tool_observation", "compiler_decision", "synthetic"}):
+                by_subject[relation.dst].extend(item for item in direct_observations.get(relation.src, [])
+                                                if _schedule_metric(item))
     by_diagnostic: dict[str | None, list[Diagnostic]] = defaultdict(list)
     for item in diagnostics:
         by_diagnostic[item.subject_id].append(item)
@@ -151,7 +256,8 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
         if not entity:
             continue
         selected, observation_conflicts = _display_observations(
-            by_subject.get(entity_id, [])
+            [item for item in by_subject.get(entity_id, [])
+             if not source_view or _schedule_metric(item)]
         )
         achieved_ii = selected.get("qor.achieved_ii")
         target_ii = selected.get("qor.target_ii")
@@ -212,6 +318,10 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
             "display_conflicts": observation_conflicts,
             "completeness": str(entity.completeness),
         }
+        if source_view:
+            prepared[entity_id]["badges"] = _badges(directives_by_scope.get(entity_id, []))
+            if entity_id in parents:
+                prepared[entity_id]["parent"] = parents[entity_id]
 
     bottleneck_candidates: list[tuple[float, float, str, str]] = []
     for entity_id, item in prepared.items():
@@ -229,6 +339,13 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
             if authority == "synthetic":
                 reason = "synthetic fixture candidate: " + reason
             bottleneck_candidates.append((violation, float(latency or 0), entity_id, reason))
+    # The design top's latency includes every measured child, so it would always win on latency
+    # alone. It stays a candidate only when nothing else was measured.
+    top_name = graph.metadata.get("top")
+    inner = [value for value in bottleneck_candidates
+             if not (prepared[value[2]]["type"] == "hls.kernel" or (top_name and prepared[value[2]]["name"] == top_name))]
+    if inner:
+        bottleneck_candidates = inner
     if bottleneck_candidates:
         _, _, bottleneck_id, reason = max(bottleneck_candidates,
                                            key=lambda value: (value[0], value[1], value[2]))
@@ -241,7 +358,8 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
             "id": relation.id,
             "source": relation.src,
             "target": relation.dst,
-            "type": "STREAMS_TO" if relation.kind == "hls.streams_to" else "CONTAINS",
+            "type": {"hls.streams_to": "STREAMS_TO", "source.dataflow_channel": "CHANNEL",
+                     "source.binds_argument": "BINDS", "software.calls": "CALLS"}.get(relation.kind, "CONTAINS"),
             "fifo_depth": relation.attrs.get("fifo_depth"),
             "elem_type": relation.attrs.get("elem_type"),
             "stage": relation.stage,
@@ -249,8 +367,15 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
             "attrs": relation.attrs,
             "evidence": [json_ready(anchor) for anchor in relation.anchors],
         })
+        if source_view:
+            edges[-1].update({key: relation.attrs.get(key) for key in (
+                "depth", "depth_assumed", "via", "arg_index", "passing")})
+            edges[-1]["variable"] = relation.attrs.get("variable", relation.attrs.get("variable_id"))
+            edges[-1]["fifo_depth"] = relation.attrs.get("depth")
     nodes = [prepared[key] for key in sorted(prepared)]
     return {
+        **({"view": "source_structure", "notice": "Source structure evidence; not hardware topology."}
+           if source_view else {}),
         "render_schema_version": RENDER_SCHEMA_VERSION,
         "canonical_schema_version": graph.schema_version,
         "meta": {
@@ -275,6 +400,7 @@ def to_render_data(graph: CanonicalGraph, observations: list[Observation],
                 ) for item in graph.entities.values())
             ),
             "topology_policy": (
+                "Source structure evidence; not hardware topology." if source_view else
                 "source/AST containment is excluded; only HLS IR, schedule, RTL, or "
                 "dialect-derived dataflow may form architecture edges"
             ),

@@ -3,6 +3,23 @@
 All notable changes are recorded here. HLSGraph follows semantic versioning;
 the schema and bundle have independent explicit versions.
 
+## 0.3.2
+
+Technical Preview, additive source and schedule evidence:
+
+- add explicit `auto`, `hardware`, and labelled `source` render views, including
+  DATAFLOW compound regions, channels, argument bindings, source calls between
+  design functions, and directive badges that keep `off` flags;
+- exclude the design top from latency bottleneck selection when a child was
+  measured;
+- ingest `amd.vitis.csynth_full_xml` module metrics, RTL instance hierarchy, and
+  loop rows, with exact source mappings and unresolved/ambiguous diagnostics;
+- capture global and namespace variables with file ownership, including
+  lexically visible global ARRAY_PARTITION operands;
+- retain schema, bundle and feature schema 0.3.0; source extractor version 6 and
+  Vitis report extractor version 2 change newly indexed snapshot identities.
+  Bundled knowledge packs remain `unreviewed`.
+
 ## 0.3.1
 
 Technical Preview, additive source evidence:

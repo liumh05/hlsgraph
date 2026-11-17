@@ -31,7 +31,7 @@ from .directive_identity import directive_identity_metadata
 
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 _PARSER_NAME = "amd.vitis.reports"
-_PARSER_VERSION = "1"
+_PARSER_VERSION = "2"
 _SCHEDULE_OBSERVATION_FIELDS = frozenset({
     "start_cycle", "end_cycle", "pipeline_stage", "latency", "achieved_ii", "target_ii",
 })
@@ -139,6 +139,8 @@ class VitisReportExtractor:
             try:
                 if artifact.kind == "amd.vitis.csynth_xml":
                     self._csynth(context, existing, graph, result, artifact)
+                elif artifact.kind == "amd.vitis.csynth_full_xml":
+                    self._csynth_full(context, existing, graph, result, artifact)
                 elif artifact.kind == "amd.vitis.csim_result":
                     self._csim(context, existing, result, artifact)
                 elif artifact.kind in {"amd.vitis.cosim_rpt", "amd.vitis.cosim_report"}:
@@ -295,6 +297,136 @@ class VitisReportExtractor:
                         metadata={"source": "hls_estimate", "report_scope": name,
                                   "mapping_status": "exact" if len(matches) == 1 else "unresolved"},
                     ))
+
+    def _csynth_full(self, context: ExtractionContext, existing: CanonicalGraph,
+                     graph: CanonicalGraph, result: ExtractionResult, artifact: Any) -> None:
+        """Read the 2025.1 module table and explicit RTL instance tree only."""
+        root = ET.fromstring(_read_limited(project_path(context.project_root, artifact.uri)))
+        authority = context.authority_for(artifact, AuthorityClass.TOOL_OBSERVATION)
+        modules: dict[str, Entity] = {}
+
+        def mapping(entity: Entity, name: str, kinds: set[str]) -> None:
+            matches = [item for item in existing.entities.values()
+                       if item.stage == "ast" and item.kind in kinds
+                       and (item.name == name or item.attrs.get("label") == name)]
+            if len(matches) == 1:
+                graph.add_relation(Relation(
+                    src=entity.id, dst=matches[0].id, kind="cross.maps_to",
+                    snapshot_id=context.snapshot.id, stage="schedule", authority=authority,
+                    mapping_kind="schedule.exact_source_name", anchors=entity.anchors,
+                    attrs={"cardinality": "exact", "report_scope": name},
+                ), allow_dangling=True)
+            else:
+                result.diagnostics.append(Diagnostic(
+                    snapshot_id=context.snapshot.id,
+                    code="mapping.ambiguous_report_scope" if matches else "mapping.unresolved_report_scope",
+                    severity=DiagnosticSeverity.WARNING, stage="schedule",
+                    subject_id=entity.id, artifact_id=artifact.id,
+                    message=f"report scope {name!r} matched {len(matches)} source entities",
+                    metadata={"report_scope": name, "candidate_ids": sorted(item.id for item in matches)},
+                ))
+
+        def module(name: str) -> Entity:
+            if name not in modules:
+                entity = Entity(
+                    kind="hls.module", name=name, qualified_name=f"{artifact.uri}::{name}",
+                    snapshot_id=context.snapshot.id, stage="schedule", authority=authority,
+                    anchors=[SourceAnchor(artifact_id=artifact.id, ir_location=f"ModuleInformation/{name}")],
+                )
+                modules[name] = entity
+                graph.add_entity(entity)
+                if "_Pipeline_" in name:
+                    _function, loop = name.split("_Pipeline_", 1)
+                    mapping(entity, loop, {"hls.loop"})
+                else:
+                    mapping(entity, name, {"hls.kernel", "hls.function"})
+            return modules[name]
+
+        def observe(entity: Entity, element: ET.Element, fields: dict[str, str]) -> None:
+            for predicate, path in fields.items():
+                value = _number(_text(element, path))
+                if value is not None:
+                    result.observations.append(_report_observation(
+                        artifact, snapshot_id=context.snapshot.id, subject_id=entity.id,
+                        predicate=predicate, value=value,
+                        unit=("count" if predicate.startswith("resource.") else
+                              "iteration" if predicate == "qor.trip_count" else "cycle"),
+                        stage="schedule", authority=authority, anchor=entity.anchors[0],
+                        metadata={"source": "hls_estimate", "report_scope": entity.name},
+                    ))
+
+        overall = "PerformanceEstimates/SummaryOfOverallLatency/"
+        fields = {predicate: overall + tag for predicate, tag in {
+            "qor.latency_cycles": "Worst-caseLatency",
+            "qor.latency_best_cycles": "Best-caseLatency",
+            "qor.interval_max_cycles": "Interval-max",
+            "qor.interval_min_cycles": "Interval-min",
+            "qor.achieved_ii": "PipelineInitiationInterval",
+        }.items()}
+        fields.update({f"resource.{name.lower()}": f"AreaEstimates/Resources/{name}"
+                       for name in ("LUT", "FF", "DSP", "BRAM_18K", "URAM")})
+        for row in root.findall("ModuleInformation/Module"):
+            name = _text(row, "Name")
+            if not name:
+                raise ValueError("module row lacks Name")
+            entity = module(name)
+            observe(entity, row, fields)
+            loops = row.find("PerformanceEstimates/SummaryOfLoopLatency")
+            for loop_row in loops if loops is not None else []:
+                loop_name = _text(loop_row, "Name") or loop_row.tag
+                loop = Entity(
+                    kind="hls.loop", name=loop_name,
+                    qualified_name=f"{artifact.uri}::{name}::loop::{loop_name}",
+                    snapshot_id=context.snapshot.id, stage="schedule", authority=authority,
+                    anchors=[SourceAnchor(artifact_id=artifact.id,
+                                          ir_location=f"ModuleInformation/{name}/SummaryOfLoopLatency/{loop_name}")],
+                )
+                graph.add_entity(loop)
+                graph.add_relation(Relation(
+                    src=entity.id, dst=loop.id, kind="hls.contains",
+                    snapshot_id=context.snapshot.id, stage="schedule", authority=authority,
+                    anchors=loop.anchors,
+                ))
+                mapping(loop, loop_name, {"hls.loop"})
+                observe(loop, loop_row, {
+                    "qor.latency_cycles": "Latency", "qor.achieved_ii": "PipelineII",
+                    "qor.iteration_latency_cycles": "IterationLatency",
+                    "qor.pipeline_depth": "PipelineDepth",
+                    "qor.trip_count": "TripCount",
+                })
+
+        def hierarchy(row: ET.Element, path: str) -> None:
+            name = _text(row, "ModuleName")
+            if not name:
+                raise ValueError("hierarchy row lacks ModuleName")
+            parent = module(name)
+            for index, child in enumerate(row.findall("InstancesList/Instance")):
+                child_name, instance = _text(child, "ModuleName"), _text(child, "InstName")
+                if not child_name or not instance:
+                    raise ValueError("instance lacks ModuleName or InstName")
+                child_path = f"{path}/{index}"
+                graph.add_relation(Relation(
+                    src=parent.id, dst=module(child_name).id, kind="hls.contains",
+                    snapshot_id=context.snapshot.id, stage="schedule", authority=authority,
+                    attrs={"instance_name": instance, "instance_path": child_path},
+                    anchors=[SourceAnchor(artifact_id=artifact.id, ir_location=f"RTLDesignHierarchy/{child_path}")],
+                ))
+                hierarchy(child, child_path)
+
+        top = root.find("RTLDesignHierarchy/TopModule")
+        if top is not None:
+            hierarchy(top, "TopModule")
+            top_name = _text(top, "ModuleName")
+            top_row = next((row for row in root.findall("ModuleInformation/Module")
+                            if _text(row, "Name") == top_name), None)
+            # The profile summary supplies the top interval when the module
+            # table only reports PipelineInitiationInterval. Do not equate them.
+            observe(modules[top_name], root, {
+                predicate: path for predicate, path in fields.items()
+                if top_row is None or _text(top_row, path) is None
+            })
+        if not modules:
+            raise ValueError("report has no module information or RTL hierarchy")
 
     def _cosim(self, context: ExtractionContext, existing: CanonicalGraph,
                graph: CanonicalGraph, result: ExtractionResult, artifact: Any) -> None:

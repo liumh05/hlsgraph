@@ -186,7 +186,7 @@ def build_plan(
         ])
     for arm, python, expected, wheel, source_repo in (
         ("hlsgraph-v02", v02_python, "0.2.0", v02_wheel, v02_repo),
-        ("hlsgraph-v03", v03_python, "0.3.1", v03_wheel, v03_repo),
+        ("hlsgraph-v03", v03_python, "0.3.2", v03_wheel, v03_repo),
     ):
         identity_command = [
             python, str((Path(__file__).with_name("wheel_identity.py")).resolve()),
@@ -215,7 +215,7 @@ def build_plan(
         })
         for arm, python, expected in (
             ("hlsgraph-v02", v02_python, "0.2.0"),
-            ("hlsgraph-v03", v03_python, "0.3.1"),
+            ("hlsgraph-v03", v03_python, "0.3.2"),
         ):
             cwd = (work_root / arm / corpus_id).resolve()
             plan.extend([
@@ -565,7 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "wheel_package_sha256": v02_identity["wheel_package_sha256"],
             },
             "hlsgraph_v03": {
-                "version": "0.3.1", "wheel": args.v03_wheel.name,
+                "version": "0.3.2", "wheel": args.v03_wheel.name,
                 "wheel_sha256": sha256_file(args.v03_wheel),
                 "revision": recorded_v03_revision,
                 "source_revision": v03_identity["source_revision"],

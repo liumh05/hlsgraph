@@ -307,6 +307,22 @@ MCP has no tool for writing graph facts or promoting a prediction. Any external
 source/config change creates a new state that must be re-indexed or verified by
 a real tool before new observations exist.
 
+## Vitis full synthesis report
+
+Declare a Vitis HLS 2025.1 full report just like `amd.vitis.csynth_xml`:
+
+```toml
+[[artifact_paths]]
+path = "reports/csynth_full.xml"
+kind = "amd.vitis.csynth_full_xml"
+```
+
+The adapter reads the module table and explicit RTL instance hierarchy. It emits
+schedule-stage module/loop observations and exact source mappings; missing and
+ambiguous source names remain diagnostic. The existing 32 MiB report limit
+applies. Synthetic manifests should declare `metadata.fixture_authority =
+"synthetic"`.
+
 ## Human view
 
 `Project.render()` / `hlsgraph render` can emit a self-contained HTML view using
@@ -314,6 +330,19 @@ a layered hardware/dataflow layout. It supports evidence details,
 stage/authority/category filters, search, focus, bottleneck coloring, FIFO-depth
 edge width, and light/dark themes. Mermaid, DOT, SVG, and projection JSON are
 available for simpler integrations.
+
+Select `view="auto"|"hardware"|"source"` in `Project.render()`, the Python
+renderer, or the MCP `render` tool; the CLI accepts `--view`. `auto` preserves
+the existing dataflow-first selection. `hardware` displays only hardware-stage
+structure and excludes AST entities. `source` shows AST containment, DATAFLOW
+regions/processes/channels, and argument bindings. Regions are compound parents;
+CONTAINS edges are dashed, BINDS edges dotted, and CHANNEL width reflects depth.
+Directive badges supplement the full evidence details. All formats label source
+structure with “Source structure evidence; not hardware topology.”
+
+Source metrics require schedule observations on the entity or an explicit
+`cross.maps_to` relation. Missing values stay unknown; source directives alone
+never create achieved II, latency, or a bottleneck.
 
 The renderer consumes the canonical graph; it does not infer topology. The HTML
 does not embed private source bodies, but names, source spans, artifact metadata,

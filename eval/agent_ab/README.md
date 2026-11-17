@@ -8,7 +8,7 @@ read-only information surfaces:
    `286e9ccc2dad45336d4fd67052930322054d64b5` with its default explore tool;
 3. HLSGraph 0.2.0 at commit
    `7b26bfb07aa7c4d1a4705d3076cac684c3561e6f` with its narrow MCP tools; and
-4. the HLSGraph 0.3.1 candidate with its single `explore` tool.
+4. the HLSGraph 0.3.2 candidate with its single `explore` tool.
 
 The model is fixed to `gpt-5.6-sol` with `medium` reasoning. There are 12
 questions, four repetitions, and four arms: 192 cells. The runner randomizes
@@ -211,7 +211,7 @@ not invoke Vitis, Vivado, simulation, implementation, a remote host, or training
 
 ```bash
 export V02_WHEEL="$HLSGRAPH_REPO/dist/hlsgraph-0.2.0-py3-none-any.whl"
-export V03_WHEEL="$HLSGRAPH_REPO/dist/hlsgraph-0.3.1-py3-none-any.whl"
+export V03_WHEEL="$HLSGRAPH_REPO/dist/hlsgraph-0.3.2-py3-none-any.whl"
 export CODEGRAPH_COMMAND="$(command -v node) $CODEGRAPH_JS"
 
 python3 -m eval.agent_ab.prepare \

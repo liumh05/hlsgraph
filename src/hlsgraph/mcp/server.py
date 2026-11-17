@@ -105,9 +105,9 @@ def _register_legacy_tools(mcp: Any, tools: ReadOnlyMcpService) -> None:
 
     @mcp.tool()
     def render(scope_id: str | None = None, format: str = "mermaid",
-               max_chars: int = 500_000) -> dict[str, Any]:
+               max_chars: int = 500_000, view: str = "auto") -> dict[str, Any]:
         """Render the graph in memory without changing files or facts."""
-        return tools.render(scope_id, format, max_chars)
+        return tools.render(scope_id, format, max_chars, view)
 
     @mcp.tool()
     def knowledge(query: str | None = None, document_id: str | None = None,

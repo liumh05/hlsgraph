@@ -1185,10 +1185,10 @@ class Project:
         )
 
     def render(self, output: str | Path, *, format: str = "html",
-               scope_id: str | None = None) -> Path:
+               scope_id: str | None = None, view: str = "auto") -> Path:
         from .render import render
         graph = self.service().graph()
-        text = render(graph, format=format, scope_id=scope_id,
+        text = render(graph, format=format, scope_id=scope_id, view=view,
                       observations=self.bundle.store.observations(graph.snapshot_id),
                       diagnostics=self.bundle.store.active_diagnostics(graph.snapshot_id))
         output = Path(output)

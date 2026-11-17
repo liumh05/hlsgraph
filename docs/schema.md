@@ -409,3 +409,44 @@ or untracked inputs withhold that unit's diagnostics and produce
 `synth.analysis_incomplete`. These are source review findings, not a synthesis
 success/failure verdict. No alias analysis or inferred hardware connectivity is
 performed.
+
+
+## Module reports, global variables, and render views (0.3.2)
+
+`amd.vitis.csynth_full_xml` imports the Vitis HLS 2025.1 `profile` shape:
+`ModuleInformation/Module/Name`, module `PerformanceEstimates` and
+`AreaEstimates/Resources`, and `RTLDesignHierarchy/TopModule` with recursive
+`InstancesList/Instance` (`InstName`, `ModuleName`). One `hls.module` is emitted
+per exact module name per report; schedule `hls.contains` edges retain
+`instance_name` and `instance_path`. Module summaries supply `Worst-caseLatency`,
+`Best-caseLatency`, `Interval-max`, `Interval-min`, and
+`PipelineInitiationInterval`, and resources LUT, FF, DSP, BRAM_18K, URAM.
+The top profile summary supplies fields absent from its module row. Unknown
+numbers are omitted; interval and pipeline II are not equated.
+`SummaryOfLoopLatency` rows supply loop Name (otherwise the row tag), Latency,
+PipelineII, IterationLatency, and PipelineDepth.
+
+These records use stage `schedule` and `context.authority_for` with
+`tool_observation` as the default; synthetic fixtures retain synthetic authority.
+Unique exact AST function/kernel names map through `cross.maps_to` with
+`mapping_kind=schedule.exact_source_name`. A `<func>_Pipeline_<loop>` module may
+map to a unique exact AST loop label. Missing or multiple matches emit
+`mapping.unresolved_report_scope` or `mapping.ambiguous_report_scope`; no fuzzy
+matching or source-derived hardware hierarchy is performed.
+
+File/namespace arrays are `hls.memory`, scalars are `source.variable`, with
+`storage="global"`. A `source.file` owns them through AST `hls.contains`.
+Qualified identity is `<relative file>::global::<qualified declaration>@<line>`;
+namespace, type, and constant array size are retained. The extractor records
+which functions follow the declaration in each design translation unit, including
+tracked headers. Global pragma binding requires this visibility, an enclosing
+namespace match, and one unique visible operand. Other translation units,
+later declarations, unrelated namespaces, and shadowing do not guess a binding.
+Existing non-global qualified names and identity rules are unchanged.
+
+The presentation schema remains `hlsgraph.render.v1`. The source projection adds
+`view="source_structure"` and `notice="Source structure evidence; not hardware
+topology."` at the top level, node `parent` and `badges`, and CHANNEL/BINDS/CALLS
+edge types. CHANNEL carries `depth`, `depth_assumed`, `via`, and `variable`;
+BINDS carries `arg_index` and `passing`. CALLS links an explicit source process
+to its recorded callee. These presentation links never become hardware facts.

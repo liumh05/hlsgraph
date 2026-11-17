@@ -54,7 +54,7 @@ def _write_environment_lock(work_root: Path) -> tuple[str, dict[str, str]]:
     declared: dict[str, dict[str, str]] = {}
     for arm, key, version, marker in (
         ("hlsgraph-v02", "hlsgraph_v02", "0.2.0", "2"),
-        ("hlsgraph-v03", "hlsgraph_v03", "0.3.1", "3"),
+        ("hlsgraph-v03", "hlsgraph_v03", "0.3.2", "3"),
     ):
         wheel_hash = marker * 64
         payload_hash = ("a" if marker == "2" else "b") * 64
@@ -245,7 +245,7 @@ def test_codex_command_is_read_only_ephemeral_and_has_one_arm_server(tmp_path: P
 
 def test_prepare_is_dry_plan_with_pinned_identity_checks(tmp_path: Path) -> None:
     v02_wheel = tmp_path / "hlsgraph-0.2.0-py3-none-any.whl"
-    v03_wheel = tmp_path / "hlsgraph-0.3.1-py3-none-any.whl"
+    v03_wheel = tmp_path / "hlsgraph-0.3.2-py3-none-any.whl"
     plan = build_prepare_plan(
         tmp_path, v02_python="py02", v03_python="py03",
         codegraph_command="node codegraph.js", codegraph_repo=tmp_path / "codegraph-src",
@@ -271,7 +271,7 @@ def test_prepare_is_dry_plan_with_pinned_identity_checks(tmp_path: Path) -> None
     assert codegraph_step["environment"] == CODEGRAPH_OFFLINE_ENV
     assert all("--degraded" not in step["command"] for step in plan if step["kind"] == "hlsgraph-index")
     assert {step.get("expected_stdout") for step in plan if step["kind"] == "verify-hlsgraph-version"} == {
-        "0.2.0", "0.3.1",
+        "0.2.0", "0.3.2",
     }
     identity_steps = {
         step["arm"]: step for step in plan
@@ -305,7 +305,7 @@ def test_path_like_python_is_resolved_before_per_corpus_cwd(tmp_path: Path) -> N
         codegraph_command="node codegraph.js", invocation_root=tmp_path,
         codegraph_repo=tmp_path / "codegraph-src",
         v02_wheel=tmp_path / "hlsgraph-0.2.0-py3-none-any.whl",
-        v03_wheel=tmp_path / "hlsgraph-0.3.1-py3-none-any.whl",
+        v03_wheel=tmp_path / "hlsgraph-0.3.2-py3-none-any.whl",
         v02_repo=tmp_path / "v02-src",
         v03_repo=tmp_path / "v03-src",
     )
@@ -527,7 +527,7 @@ def test_static_retrieval_gate_scores_normalized_results(
 def test_static_report_identity_rejects_stale_suite_and_candidate() -> None:
     environment_sha256 = "e" * 64
     candidate_identity = {
-        "arm": "hlsgraph-v03", "version": "0.3.1",
+        "arm": "hlsgraph-v03", "version": "0.3.2",
         "wheel_sha256": "3" * 64,
         "installed_payload_sha256": "b" * 64,
         "revision": "c" * 40,
@@ -637,7 +637,7 @@ def _gate_fixture() -> tuple[
 ]:
     environment_sha256 = "e" * 64
     candidate_identity = {
-        "arm": "hlsgraph-v03", "version": "0.3.1",
+        "arm": "hlsgraph-v03", "version": "0.3.2",
         "wheel_sha256": "3" * 64,
         "installed_payload_sha256": "b" * 64,
         "revision": "c" * 40,
@@ -934,25 +934,25 @@ def test_workspace_identity_covers_unexpected_readable_files(tmp_path: Path) -> 
 def test_wheel_identity_binds_installed_payload_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    wheel = tmp_path / "hlsgraph-0.3.1-py3-none-any.whl"
-    package_bytes = b'__version__ = "0.3.1"\n'
-    metadata_bytes = b"Name: hlsgraph\nVersion: 0.3.1\n"
+    wheel = tmp_path / "hlsgraph-0.3.2-py3-none-any.whl"
+    package_bytes = b'__version__ = "0.3.2"\n'
+    metadata_bytes = b"Name: hlsgraph\nVersion: 0.3.2\n"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("hlsgraph/__init__.py", package_bytes)
-        archive.writestr("hlsgraph-0.3.1.dist-info/METADATA", metadata_bytes)
-        archive.writestr("hlsgraph-0.3.1.dist-info/RECORD", "")
+        archive.writestr("hlsgraph-0.3.2.dist-info/METADATA", metadata_bytes)
+        archive.writestr("hlsgraph-0.3.2.dist-info/RECORD", "")
     site = tmp_path / "site"
     (site / "hlsgraph").mkdir(parents=True)
-    (site / "hlsgraph-0.3.1.dist-info").mkdir()
+    (site / "hlsgraph-0.3.2.dist-info").mkdir()
     (site / "hlsgraph/__init__.py").write_bytes(package_bytes)
-    (site / "hlsgraph-0.3.1.dist-info/METADATA").write_bytes(metadata_bytes)
-    record = "hlsgraph/__init__.py,,\nhlsgraph-0.3.1.dist-info/METADATA,,\n"
+    (site / "hlsgraph-0.3.2.dist-info/METADATA").write_bytes(metadata_bytes)
+    record = "hlsgraph/__init__.py,,\nhlsgraph-0.3.2.dist-info/METADATA,,\n"
 
     class FakeDistribution:
-        version = "0.3.1"
+        version = "0.3.2"
         files = [
             PurePosixPath("hlsgraph/__init__.py"),
-            PurePosixPath("hlsgraph-0.3.1.dist-info/METADATA"),
+            PurePosixPath("hlsgraph-0.3.2.dist-info/METADATA"),
             PurePosixPath("../../Scripts/hlsgraph-mcp.exe"),
         ]
 
@@ -967,7 +967,7 @@ def test_wheel_identity_binds_installed_payload_bytes(
     import eval.agent_ab.wheel_identity as identity
     monkeypatch.setattr(identity.importlib.metadata, "distribution", lambda _name: FakeDistribution())
     monkeypatch.setattr(identity.importlib, "import_module", lambda _name: SimpleNamespace(
-        __version__="0.3.1", __file__=str(site / "hlsgraph/__init__.py"),
+        __version__="0.3.2", __file__=str(site / "hlsgraph/__init__.py"),
     ))
     source_repo = tmp_path / "source"
     (source_repo / "src/hlsgraph").mkdir(parents=True)
@@ -985,57 +985,57 @@ def test_wheel_identity_binds_installed_payload_bytes(
     git("add", "src/hlsgraph/__init__.py")
     git("commit", "-m", "fixture")
 
-    report = inspect_installation(wheel, "0.3.1", source_repo)
+    report = inspect_installation(wheel, "0.3.2", source_repo)
     assert report["verified"] is True
     assert report["installed_payload_sha256"] == report["wheel_payload_sha256"]
     assert report["source_package_sha256"] == report["wheel_package_sha256"]
     assert report["source_revision"] == git("rev-parse", "HEAD")
-    wheel_with_generated_extra = tmp_path / "hlsgraph-0.3.1-extra-py3-none-any.whl"
+    wheel_with_generated_extra = tmp_path / "hlsgraph-0.3.2-extra-py3-none-any.whl"
     with zipfile.ZipFile(wheel_with_generated_extra, "w") as archive:
         archive.writestr("hlsgraph/__init__.py", package_bytes)
         archive.writestr("hlsgraph/__pycache__/injected.pyc", b"not-source")
-        archive.writestr("hlsgraph-0.3.1.dist-info/METADATA", metadata_bytes)
-        archive.writestr("hlsgraph-0.3.1.dist-info/RECORD", "")
+        archive.writestr("hlsgraph-0.3.2.dist-info/METADATA", metadata_bytes)
+        archive.writestr("hlsgraph-0.3.2.dist-info/RECORD", "")
     with pytest.raises(RuntimeError, match="wheel/source package set mismatch"):
-        inspect_installation(wheel_with_generated_extra, "0.3.1", source_repo)
+        inspect_installation(wheel_with_generated_extra, "0.3.2", source_repo)
     (site / "hlsgraph/injected.py").write_text("SOURCE_TREE_POLLUTION = True\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="payload set mismatch"):
-        inspect_installation(wheel, "0.3.1")
+        inspect_installation(wheel, "0.3.2")
     (site / "hlsgraph/injected.py").unlink()
     (site / "hlsgraph/__init__.py").write_bytes(b"changed\n")
     with pytest.raises(RuntimeError, match="bytes mismatch"):
-        inspect_installation(wheel, "0.3.1")
+        inspect_installation(wheel, "0.3.2")
     (site / "hlsgraph/__init__.py").write_bytes(package_bytes)
 
     (source_repo / "src/hlsgraph/__init__.py").write_bytes(b"dirty\n")
     with pytest.raises(RuntimeError, match="must be clean"):
-        inspect_installation(wheel, "0.3.1", source_repo)
+        inspect_installation(wheel, "0.3.2", source_repo)
     git("add", "src/hlsgraph/__init__.py")
     git("commit", "-m", "mismatch")
     with pytest.raises(RuntimeError, match="wheel/source package bytes mismatch"):
-        inspect_installation(wheel, "0.3.1", source_repo)
+        inspect_installation(wheel, "0.3.2", source_repo)
 
     (source_repo / "src/hlsgraph/__init__.py").write_bytes(package_bytes)
     (source_repo / "src/hlsgraph/extra.py").write_text("EXTRA = True\n", encoding="utf-8")
     git("add", "src/hlsgraph")
     git("commit", "-m", "extra")
     with pytest.raises(RuntimeError, match="wheel/source package set mismatch"):
-        inspect_installation(wheel, "0.3.1", source_repo)
+        inspect_installation(wheel, "0.3.2", source_repo)
 
 
 def test_wheel_identity_rejects_link_members(tmp_path: Path) -> None:
-    wheel = tmp_path / "hlsgraph-0.3.1-py3-none-any.whl"
+    wheel = tmp_path / "hlsgraph-0.3.2-py3-none-any.whl"
     link = zipfile.ZipInfo("hlsgraph/__init__.py")
     link.create_system = 3
     link.external_attr = (stat.S_IFLNK | 0o777) << 16
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(link, "target.py")
         archive.writestr(
-            "hlsgraph-0.3.1.dist-info/METADATA",
-            "Name: hlsgraph\nVersion: 0.3.1\n",
+            "hlsgraph-0.3.2.dist-info/METADATA",
+            "Name: hlsgraph\nVersion: 0.3.2\n",
         )
     with pytest.raises(RuntimeError, match="linked member"):
-        inspect_installation(wheel, "0.3.1")
+        inspect_installation(wheel, "0.3.2")
 
 
 def test_question_stratified_paired_bootstrap_is_seeded() -> None:

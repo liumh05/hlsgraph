@@ -70,6 +70,7 @@ TOOL_EVIDENCE_STAGE_POLICY: Mapping[str, ToolEvidenceStagePolicy] = MappingProxy
         run_stages=frozenset({"csynth", "schedule"}),
         intrinsic_artifact_kinds=frozenset({
             "amd.vitis.csynth_xml",
+            "amd.vitis.csynth_full_xml",
             "amd.vitis.csynth_report",
             "amd.vitis.schedule_json",
             "amd.vitis.directive_status",
@@ -82,6 +83,7 @@ TOOL_EVIDENCE_STAGE_POLICY: Mapping[str, ToolEvidenceStagePolicy] = MappingProxy
         run_stages=frozenset({"csynth"}),
         intrinsic_artifact_kinds=frozenset({
             "amd.vitis.csynth_xml",
+            "amd.vitis.csynth_full_xml",
             "amd.vitis.csynth_report",
         }),
     ),

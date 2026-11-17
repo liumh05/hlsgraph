@@ -230,6 +230,7 @@ _OBSERVATION_REPORT_POLICY: dict[
     **{
         (predicate, "schedule"): frozenset({
             ("amd.vitis.csynth_xml", "tool_observation"),
+            ("amd.vitis.csynth_full_xml", "tool_observation"),
         })
         for predicate in (
             "qor.latency_best_cycles", "qor.latency_worst_cycles",
@@ -242,6 +243,7 @@ _OBSERVATION_REPORT_POLICY: dict[
     }),
     ("qor.achieved_ii", "schedule"): frozenset({
         ("amd.vitis.csynth_xml", "tool_observation"),
+        ("amd.vitis.csynth_full_xml", "tool_observation"),
         ("amd.vitis.schedule_json", "compiler_decision"),
     }),
     **{
@@ -265,6 +267,7 @@ _OBSERVATION_REPORT_POLICY: dict[
     **{
         (f"resource.{resource}", "schedule"): frozenset({
             ("amd.vitis.csynth_xml", "tool_observation"),
+            ("amd.vitis.csynth_full_xml", "tool_observation"),
         })
         for resource in ("lut", "ff", "dsp", "bram_18k", "uram")
     },
@@ -299,7 +302,7 @@ _OBSERVATION_REPORT_POLICY: dict[
 }
 
 _OBSERVATION_PARSER_POLICY: dict[tuple[str, str], frozenset[str]] = {
-    ("amd.vitis.reports", "1"): frozenset({
+    ("amd.vitis.reports", "2"): frozenset({
         kind
         for choices in _OBSERVATION_REPORT_POLICY.values()
         for kind, _authority in choices

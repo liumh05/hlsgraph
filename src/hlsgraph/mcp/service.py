@@ -346,7 +346,7 @@ class ReadOnlyMcpService:
         }
 
     def render(self, scope_id: str | None = None, format: str = "mermaid",
-               max_chars: int = 500_000) -> dict[str, Any]:
+               max_chars: int = 500_000, view: str = "auto") -> dict[str, Any]:
         """Render in memory; this tool never writes files or mutates the graph."""
         if format not in {"html", "json", "mermaid", "dot", "svg"}:
             raise ValueError("format must be html, json, mermaid, dot, or svg")
@@ -359,7 +359,7 @@ class ReadOnlyMcpService:
             if (projected := redacted_diagnostic_record(item)) is not None
         ]
         content = render_graph(
-            graph, format=format, scope_id=scope_id,
+            graph, format=format, scope_id=scope_id, view=view,
             observations=self.bundle.store.observations(core.snapshot_id),
             diagnostics=diagnostics,
         )

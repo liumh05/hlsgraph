@@ -675,7 +675,7 @@ def _constant_for_loop_facts(cursor: Any) -> dict[str, Any]:
 
 class LibClangExtractor:
     name = "source.libclang"
-    version = "5"
+    version = "6"
 
     def supports(self, context: ExtractionContext) -> bool:
         # Being unsupported would silently omit the source plane.  The standard
@@ -825,7 +825,9 @@ class LibClangExtractor:
         pragma_activity_available = True
         index = cindex.Index.create()
 
+        global_visibility: dict[str, set[str]] = defaultdict(set)
         for unit in context.manifest.build.translation_units:
+            preceding_globals: set[str] = set()
             source = project_path(context.project_root, unit.file)
             if not source.is_file():
                 result.diagnostics.append(Diagnostic(
@@ -1104,14 +1106,30 @@ class LibClangExtractor:
                     entity_kind = "hls.port"
                     qname = f"{current_function_qname}::{cursor.spelling}"
                     attrs = {"type": cursor.type.spelling, "direction": "unknown"}
-                elif kind_name == "VAR_DECL" and current_function_id:
+                elif kind_name == "VAR_DECL" and (current_function_id or (
+                    cursor.semantic_parent.kind.name in {"TRANSLATION_UNIT", "NAMESPACE"}
+                    and unit.file not in context.manifest.build.testbench_files
+                    and relative not in context.manifest.build.testbench_files
+                )):
                     spelling = cursor.type.spelling
                     entity_kind = "hls.stream" if "stream<" in spelling.replace(" ", "") else (
                         "hls.memory" if cursor.type.kind.name in {"CONSTANTARRAY", "INCOMPLETEARRAY", "VARIABLEARRAY"}
                         else "source.variable"
                     )
-                    qname = f"{current_function_qname}::{cursor.spelling}@{anchor.start_line if anchor else 0}"
                     attrs = {"type": spelling}
+                    if current_function_id:
+                        qname = f"{current_function_qname}::{cursor.spelling}@{anchor.start_line if anchor else 0}"
+                    else:
+                        attrs.update(storage="global", namespace=qname.rpartition("::")[0])
+                        qname = f"{relative}::global::{qname}@{anchor.start_line if anchor else 0}"
+                        file_entity = Entity(
+                            kind="source.file", name=relative, qualified_name=relative,
+                            snapshot_id=context.snapshot.id, authority=AuthorityClass.STATIC_FACT,
+                            stage=Stage.AST.value,
+                            anchors=[SourceAnchor(artifact_id=anchor.artifact_id)] if anchor else [],
+                        )
+                        graph.add_entity(file_entity)
+                        parent_entity = file_entity.id
                     if cursor.type.kind.name == "CONSTANTARRAY":
                         attrs["array_size"] = int(cursor.type.element_count)
                         attrs["element_type"] = cursor.type.element_type.spelling
@@ -1122,6 +1140,8 @@ class LibClangExtractor:
                                     stage=Stage.AST.value, attrs=attrs,
                                     anchors=[anchor] if anchor else [])
                     graph.add_entity(entity)
+                    if attrs.get("storage") == "global":
+                        preceding_globals.add(entity.id)
                     cursor_entity[cursor.hash] = entity.id
                     entity_lexical_paths[entity.id] = lexical_scope_path
                     if parent_entity:
@@ -1131,6 +1151,8 @@ class LibClangExtractor:
                             stage=Stage.AST.value,
                         ))
                     if entity_kind in {"hls.kernel", "hls.function"}:
+                        for global_id in preceding_globals:
+                            global_visibility[global_id].add(entity.id)
                         current_function_id = entity.id
                         current_function_qname = qname
                         function_by_name[cursor.spelling].append(entity.id)
@@ -1213,6 +1235,9 @@ class LibClangExtractor:
                     artifact_id=anchor.artifact_id if anchor else None,
                     anchor=anchor,
                 ))
+
+        for global_id, functions in global_visibility.items():
+            graph.entities[global_id].attrs["visible_in"] = sorted(functions)
 
         self._attach_source_pragmas(
             context, result,
@@ -1553,10 +1578,15 @@ def _lexically_visible_operand(
     pragma_scope_path: tuple[str, ...] | None,
     entity_lexical_paths: Mapping[str, tuple[str, ...]],
 ) -> bool:
-    if (
-        not _static_ast_entity(graph, entity)
-        or _unique_function_owner(graph, entity) != owner
-    ):
+    if not _static_ast_entity(graph, entity):
+        return False
+    if entity.attrs.get("storage") == "global":
+        namespace = entity.attrs.get("namespace", "")
+        owner_namespace = (owner.qualified_name or owner.name).split("(", 1)[0].rpartition("::")[0]
+        return (owner.id in entity.attrs.get("visible_in", [])
+                and (not namespace or owner_namespace == namespace
+                     or owner_namespace.startswith(namespace + "::")))
+    if _unique_function_owner(graph, entity) != owner:
         return False
     if entity.kind == "hls.port":
         return _unique_ast_parent(graph, entity.id) == owner
@@ -1691,6 +1721,9 @@ def _scope_for_pragma(
     candidates: list[Entity] = []
     for entity in graph.entities.values():
         if not _static_ast_entity(graph, entity):
+            continue
+        if entity.attrs.get("storage") == "global":
+            candidates.append(entity)
             continue
         for anchor in entity.anchors:
             if anchor.artifact_id == artifact_id and anchor.start_line and anchor.end_line:

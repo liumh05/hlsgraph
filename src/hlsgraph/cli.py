@@ -697,7 +697,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
     output = Path(args.output)
     if not output.is_absolute():
         output = project.bundle.project_root / output
-    path = project.render(output, format=args.format, scope_id=args.scope)
+    path = project.render(output, format=args.format, scope_id=args.scope, view=args.view)
     _emit({"command": "render", "format": args.format, "output": str(path)}, args)
     return 0
 
@@ -1032,6 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     render = sub.add_parser("render", help="render the shared canonical graph projection")
     project_option(render)
     render.add_argument("output")
+    render.add_argument("--view", choices=("auto", "hardware", "source"), default="auto")
     render.add_argument("--format", choices=("html", "json", "mermaid", "dot", "svg"),
                         default="html")
     render.add_argument("--scope")

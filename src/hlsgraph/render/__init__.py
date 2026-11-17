@@ -12,8 +12,9 @@ from .static import to_dot, to_mermaid, to_svg
 
 
 def render(graph: CanonicalGraph, *, format: str = "html", scope_id: str | None = None,
-           observations: Iterable[Observation] = (), diagnostics: Iterable[Diagnostic] = ()) -> str:
-    data = to_render_data(graph, list(observations), list(diagnostics), scope_id=scope_id)
+           observations: Iterable[Observation] = (), diagnostics: Iterable[Diagnostic] = (),
+           view: str = "auto") -> str:
+    data = to_render_data(graph, list(observations), list(diagnostics), scope_id=scope_id, view=view)
     if format == "html":
         return to_html(data)
     if format == "json":
